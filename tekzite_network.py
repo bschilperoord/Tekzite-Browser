@@ -280,9 +280,19 @@ def _relay(a: socket.socket, b: socket.socket):
             write_shutdown[dst] = True
 
 
+def _tune_latency_socket(sock: socket.socket):
+    """Favor low latency for Tekzite's loopback/TLS tunnel traffic."""
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except (OSError, AttributeError):
+        pass
+    return sock
+
+
 class ProxyHandler(socketserver.BaseRequestHandler):
     def handle(self):
         client: socket.socket = self.request
+        _tune_latency_socket(client)
         client.settimeout(CONNECT_TIMEOUT)
         try:
             header_blob, already = _recv_headers(client)
@@ -315,6 +325,7 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             return
         _log("connect", host=host, port=port)
         upstream = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+        _tune_latency_socket(upstream)
         try:
             client.sendall(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: Tekzite-Network/1\r\n\r\n")
             _relay(client, upstream)
@@ -347,6 +358,7 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             return
         _log("http", method=method.upper(), host=host, port=port, path=path[:512])
         upstream = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+        _tune_latency_socket(upstream)
         upstream.settimeout(IDLE_TIMEOUT)
         try:
             outgoing = [f"{method} {path} {version}"]
@@ -395,6 +407,7 @@ class ProxyHandler(socketserver.BaseRequestHandler):
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    request_queue_size = 128
 
 
 def main(argv=None):

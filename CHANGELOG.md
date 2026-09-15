@@ -1,4 +1,88 @@
+## v9.8 black-launch hardening hotfix
+
+- Protects all plausible live `Chrome_WidgetWin_1` presenters from asynchronous late-presenter hiding.
+- Keeps the on-screen native black-surface probe enabled when first-frame readiness was proven semantically without a PNG capture.
+- Reduces the chance of an intermittent stale/black DWM thumbnail during Chromium startup while preserving the fast startup path.
+
+# v9.8
+
+- Prewarm the native Win32 window-drag path before the first user drag.
+- Move the Tekzite top-level HWND directly with SetWindowPos during live dragging.
+- Move the DWM Chromium destination in the same native drag frame.
+- Suppress redundant Tk Configure -> DWM chase scheduling while the native dual-window drag path is active.
+- Keep Tk root.geometry() only as a fallback/final bookkeeping path.
+
+# v9.6
+
+- DevTools startup polling no longer performs a full process-tree/window-hide scan on every miss.
+- DevTools readiness now polls at 10 ms and reuses the successful /json/version WebSocket URL for the persistent browser-control channel.
+- Chromium HWND discovery uses a cheap root-PID-first path and refreshes descendant PIDs only as a fallback.
+- Removed a redundant 12 ms sleep after DwmFlush during DWM source sizing.
+- Moved three 40 ms late-presenter parking passes off the first-reveal critical path into a daemon maintenance thread.
+- Deferred the cold-start one-pixel resize kick briefly so naturally settling Chromium geometry does not pay an unnecessary compositor flush.
+
+# v9.5
+
+- Clean-profile cold starts skip expensive Win32_Process/CIM recovery scans.
+- Full Chromium profile recovery runs only when dirty-session markers exist or a first launch fails.
+- Chromium top-level window discovery polling tightened from 100 ms to 10 ms.
+- Startup diagnostics now record profile recovery, process spawn, DevTools readiness and window-discovery timings.
+
 # Changelog
+
+## 9.2
+
+- Collapsed native cold startup from two first-frame readiness gates to one hidden attached-frame gate.
+- Prefer DOM + native render-host geometry for first-frame proof and capture a screenshot only as fallback.
+- Reduced compositor readiness polling from 120 ms sleeps to roughly one frame cadence.
+- Warm only the critical input CDP lane before reveal; scroll/hover lanes now warm asynchronously after the page is visible.
+- Skip synchronous 100% zoom application on native cold startup and poll the navigation worker at 8 ms instead of 40 ms.
+
+## 9.1
+
+- Added a hot-navigation fast path for already-attached native Chromium tabs.
+- Removed repeated first-frame, input-readiness, native-attachment, and synchronous zoom work from ordinary navigations.
+- Allowed Chromium DNS prefetch while keeping DNS-over-HTTPS disabled.
+- Enabled TCP_NODELAY on Tekzite Network proxy sockets and increased the accept backlog for bursty page loads.
+
+## 8.9 - Lower steady-state interaction latency
+
+- Enabled TCP_NODELAY on local Chromium DevTools WebSockets so tiny CDP input commands are sent immediately.
+- Split CSS cursor/computed-style probes onto a dedicated low-priority CDP lane and worker, leaving page hover movement unobstructed.
+- Removed the redundant post-click JavaScript focus round-trip from the common click path; Chromium's native CDP mouse gesture now owns focus directly.
+- Preserved the v8.8 first-visible-frame interactivity gate and the independent input/scroll/hover lanes.
+
+## 8.8 - First-visible-frame interactivity
+
+- Keeps the DWM destination hidden until Chromium has consumed a real event on the critical CDP input lane.
+- Verifies a laid-out DOM plus a harmless `Input.dispatchMouseEvent` round-trip after warming the low-latency channels.
+- Removes the startup window where Startpage could already be visible while the first click was still racing renderer readiness.
+
+
+## 8.7 - Low-latency I/O lanes
+
+- Split clicks/typing, wheel scrolling, and hover/cursor traffic onto independent persistent Chromium CDP WebSockets.
+- Pre-warm all latency-sensitive CDP channels before the first native DWM page is revealed.
+- Coalesce precision-wheel bursts so stale scroll packets cannot queue ahead of later interaction.
+- Warm per-tab I/O channels in the background when switching tabs.
+- Reduced browser-chrome metadata polling overhead while keeping live titles/loading state responsive.
+
+## v8.4 — Low-latency interaction and richer tab controls
+
+- Split hover/cursor CDP work from critical click, wheel and keyboard input so cosmetic probes cannot delay real interaction.
+- Mouse movement is now latest-value-only with at most one hover dispatch in flight, preventing stale pointer-event queues on busy pages.
+- Tightened DWM destination geometry coalescing from ~60 Hz to ~120 Hz while retaining viewport-change checks before Chromium resize.
+- Added a tab context menu with Duplicate Tab, Reopen Closed Tab, Copy Tab URL, Close Other Tabs, and Close Tabs to the Right.
+- Added Search Selected Text to the webpage context menu.
+- Preserved the v8.3 off-Tk-thread synchronized tab activation path.
+
+## v8.3 — Faster synchronized tab presentation
+
+- Moved Chromium target activation off Tk's UI thread so tab switching no longer stalls browser chrome.
+- Serialized rapid tab-switch requests to keep Chromium and Tekzite on the same final tab.
+- Commit tab highlight, address bar and history only after Chromium target activation succeeds.
+- Added a lightweight native redraw + DWM flush after target activation without resizing or rebuilding the embedded Chromium host.
+- Preserved v7.5's hot-switch path while reducing the visible old-frame lag between tab chrome and page content.
 
 ## v8.2 — GitHub-ready repository
 
@@ -367,3 +451,18 @@ Maps and positions the Chromium owner before measuring the untouched RenderWidge
 # Tekzite Browser v5.24
 
 v5.24 makes the first native Chromium tab a true direct-app launch. Chromium starts with the requested URL in `--app=<URL>` instead of `--app=about:blank`, Tekzite claims that exact original app target, and the first-tab path skips the redundant CDP `Page.navigate` when the launch target is already the requested page. This removes the final about:blank -> navigation compositor transition while preserving strict app-target binding, native GPU defaults, and live-render geometry alignment.
+
+## 9.3
+- Reused the persistent critical input CDP channel for first-frame readiness.
+- Removed temporary readiness websocket and redundant Page/Runtime domain enable calls.
+- Skipped Network-domain setup on latency-only input/scroll/hover/cursor lanes.
+- Reused semantic first-frame proof for the initial input readiness check.
+- Deferred screenshot fallback and reduced readiness polling latency.
+- Avoided DwmFlush in the readiness miss loop.
+
+## 9.7
+- Coalesced custom title-bar window dragging so raw high-rate mouse motion keeps only the latest pending position.
+- Capped live Tk top-level position commits to roughly 120 Hz instead of calling `root.geometry()` for every mouse report.
+- Reduced DWM destination tracking to roughly 60 Hz while an interactive drag is active, with an immediate exact sync on release.
+- Pure top-level moves continue to avoid Chromium viewport resize work entirely.
+- Added drag-performance regression coverage.

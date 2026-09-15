@@ -27,6 +27,7 @@ from engine.net import (
     get_embedded_chromium_page_state, find_embedded_chromium_text,
     set_embedded_chromium_presentation, set_embedded_chromium_zoom, check_embedded_chromium_zoom,
     validate_and_recover_embedded_chromium_frame, record_embedded_surface_probe, record_embedded_native_recovery, sync_embedded_chromium_native_geometry,
+    warm_embedded_chromium_io_channels,
 )
 
 
@@ -124,7 +125,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "8.2"
+BROWSER_VERSION = "9.8"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -248,6 +249,7 @@ class BrowserApp:
         # v4.31 is fully frameless. Keep Tekzite as a normal taskbar/Alt-Tab
         # application even though the native Windows title bar is removed.
         self.root.after(20, self._apply_frameless_app_style)
+        self.root.after(40, self._prewarm_native_window_drag)
 
         style = ttk.Style(self.root)
         try:
@@ -277,13 +279,19 @@ class BrowserApp:
         # load indicators and favicons fresh without reloading anything.
         self._closed_tabs = []
         self._page_state_after_id = None
-        self._page_state_poll_ms = 700
+        self._page_state_poll_ms = 850
         self._page_state_inflight = set()
         self._favicon_images = {}
         self._find_bar_visible = False
         # v6.0: Chromium is the only web engine.  Tekzite owns browser UI,
         # while all page parsing/layout/JS/media/storage live in Chromium.
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tekzite-chromium")
+        # v8.3: serialize tab activations away from Tk's UI thread. Chromium's
+        # Target.activateTarget may briefly wait on the browser/compositor; doing
+        # that work inline made Tekzite chrome advance before the DWM page did.
+        self._tab_switch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tekzite-tab-switch")
+        self._tab_switch_serial = 0
+        self._tab_switch_pending_id = None
         self.font_manager = None
         self.js_runtime = None
         self.css_diagnostics = None
@@ -303,6 +311,19 @@ class BrowserApp:
         self._dwm_geometry_after_id = None
         self._dwm_pending_resize = False
         self._dwm_last_chromium_viewport = None
+        # v9.7: live window dragging is latest-value-only. Tk geometry and DWM
+        # destination updates are both coalesced so raw mouse-motion bursts do
+        # not become CPU/compositor bursts. Chromium is never resized for a
+        # pure top-level move.
+        self._window_drag_active = False
+        self._window_drag_pending_xy = None
+        self._window_drag_after_id = None
+        # v9.8: cache the native top-level/DWM drag path before the first drag
+        # so the first mouse movement does not pay Win32/Tk setup costs. During
+        # an active drag both windows move in the same native frame.
+        self._native_drag_user32 = None
+        self._native_drag_hwnd = 0
+        self._native_drag_dwm_offset = None
         self._embedded_future = None
         # v4.80: Tk chrome and the embedded Chromium child are separate native
         # focus domains. Delayed Chromium wake retries must never steal focus
@@ -356,12 +377,14 @@ class BrowserApp:
         app_bar.pack_propagate(False)
         app_bar.bind("<ButtonPress-1>", self._start_window_drag)
         app_bar.bind("<B1-Motion>", self._drag_window)
+        app_bar.bind("<ButtonRelease-1>", self._end_window_drag)
         app_bar.bind("<Double-Button-1>", lambda event: self._toggle_maximize())
 
         app_brand = tk.Frame(app_bar, bg=self.ui["bg"])
         app_brand.pack(side="left", padx=(12, 10), fill="y")
         app_brand.bind("<ButtonPress-1>", self._start_window_drag)
         app_brand.bind("<B1-Motion>", self._drag_window)
+        app_brand.bind("<ButtonRelease-1>", self._end_window_drag)
         tk.Label(
             app_brand,
             text="T",
@@ -382,6 +405,7 @@ class BrowserApp:
         title_label.pack(side="left", padx=(7, 0))
         title_label.bind("<ButtonPress-1>", self._start_window_drag)
         title_label.bind("<B1-Motion>", self._drag_window)
+        title_label.bind("<ButtonRelease-1>", self._end_window_drag)
 
         menu_strip = tk.Frame(app_bar, bg=self.ui["bg"])
         menu_strip.pack(side="left", fill="y")
@@ -603,6 +627,20 @@ class BrowserApp:
         # v5.09: input has its own ordered worker so clicks/keys/wheel never
         # sit behind an expensive screenshot/decode job in the general loader.
         self._chromium_input_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tekzite-cdp-input")
+        # v8.4: hover/cursor traffic is isolated from critical clicks, wheel,
+        # and keyboard input so cosmetic probes cannot delay interaction.
+        self._chromium_hover_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tekzite-cdp-hover")
+        # v8.9: cursor DOM probes are cosmetic and can be more expensive than
+        # Input.dispatchMouseEvent. Keep them off the actual hover lane so a
+        # computed-style query can never delay page hover/mousemove delivery.
+        self._chromium_cursor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tekzite-cdp-cursor")
+        # v8.7: wheel traffic gets its own CDP lane too. Precision touchpads and
+        # high-resolution wheels can emit bursts that must never queue ahead of
+        # a click or keystroke on the critical input lane.
+        self._chromium_scroll_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tekzite-cdp-scroll")
+        self._chromium_scroll_future = None
+        self._chromium_pending_wheel = None
+        self._chromium_wheel_after_id = None
         self._chromium_frame_generation = 0
         self._chromium_frame_target_id = None
         # Input coordinates must follow the exact bitmap-to-canvas transform.
@@ -620,6 +658,7 @@ class BrowserApp:
         self._chromium_last_frame_signature = None
         self._chromium_pending_motion = None
         self._chromium_motion_after_id = None
+        self._chromium_motion_future = None
         # v7.7: track a real left-button drag so Chromium can create native
         # text selections through the DWM input plane.
         self._chromium_left_button_down = False
@@ -631,7 +670,7 @@ class BrowserApp:
         self._chromium_active_frame_ms = 24
         self._chromium_idle_frame_ms = 750
         # Hover is coalesced, but at ~80 Hz so menus/tooltips feel immediate.
-        self._chromium_motion_interval_ms = 12
+        self._chromium_motion_interval_ms = 8
         # v6.8: mirror the webpage's effective CSS cursor on Tekzite's DWM
         # input plane. Only one cursor probe may be in flight at a time; rapid
         # mouse movement is naturally coalesced by the existing hover lane.
@@ -764,10 +803,9 @@ class BrowserApp:
             (lambda: self.navigate_to(self._homepage_url(), add_history=True))
             if startup_mode == "homepage" else self._focus_address
         )
-        self.root.after(
-            250,
-            startup_action,
-        )
+        # v9.2: start Chromium/homepage preparation on the first Tk idle turn.
+        # The old fixed 250 ms chrome-paint delay was pure startup latency.
+        self.root.after_idle(startup_action)
 
     # ── Tabs ──────────────────────────────────────────────────────────────
     # ── v8.1 UI animation helpers ────────────────────────────────────────
@@ -989,8 +1027,9 @@ class BrowserApp:
             )
             label.pack(side="left")
             for click_widget in (frame, body, icon, label):
-                click_widget.bind("<Button-1>", lambda event, tid=tab["id"]: self._switch_tab(tid))
-                click_widget.bind("<Button-2>", lambda event, tid=tab["id"]: self._close_tab(tid))
+                click_widget.bind("<Button-1>", lambda event=None, tid=tab["id"]: self._switch_tab(tid))
+                click_widget.bind("<Button-2>", lambda event=None, tid=tab["id"]: self._close_tab(tid))
+                click_widget.bind("<Button-3>", lambda event=None, tid=tab["id"]: self._show_tab_context_menu(event, tid))
 
             close = tk.Button(
                 body,
@@ -1024,13 +1063,13 @@ class BrowserApp:
                     self._animate_widget_color(ind, "bg", bg, 105 if inside else 145)
 
             for widget in (frame, body, icon, label):
-                widget.bind("<Enter>", lambda e, fn=set_hover: fn(inside=True))
-                widget.bind("<Leave>", lambda e, fn=set_hover: fn(inside=False))
-            close.bind("<Enter>", lambda e, c=close: (
+                widget.bind("<Enter>", lambda e=None, fn=set_hover: fn(inside=True))
+                widget.bind("<Leave>", lambda e=None, fn=set_hover: fn(inside=False))
+            close.bind("<Enter>", lambda e=None, c=close: (
                 self._animate_widget_color(c, "bg", self.ui["danger"], 90),
                 self._animate_widget_color(c, "fg", "#ffffff", 90),
             ))
-            close.bind("<Leave>", lambda e, fn=set_hover: fn(inside=False))
+            close.bind("<Leave>", lambda e=None, fn=set_hover: fn(inside=False))
 
             if active:
                 # Give the newly-active tab a short accent settle rather than a hard flash.
@@ -1310,15 +1349,16 @@ class BrowserApp:
                 return tab
         return None
 
-    def _switch_tab(self, tab_id):
-        if tab_id == self.active_tab_id:
-            return True
-        target = next((t for t in self.tabs if t.get("id") == tab_id), None)
-        if target is None:
-            return False
+    def _commit_tab_switch(self, target):
+        """Commit Tekzite chrome after Chromium has activated the target.
+
+        Keeping this commit on Tk's thread makes the selected tab, address bar
+        and DWM content move together instead of letting the browser chrome run
+        one visual beat ahead of Chromium's compositor.
+        """
         self._capture_active_tab_state()
         self._navigation_generation += 1
-        self.active_tab_id = tab_id
+        self.active_tab_id = target["id"]
         self.history = list(target.get("history") or [])
         target["history"] = self.history
         self.history_index = int(target.get("history_index", -1))
@@ -1326,49 +1366,94 @@ class BrowserApp:
         self.update_history_buttons()
         self._refresh_tab_strip()
 
-        if target.get("engine") == "chromium" and target.get("chromium_target_id"):
-            try:
-                if activate_embedded_chromium_target(target["chromium_target_id"]):
-                    self._current_document = None
-                    presentation = target.get("presentation") or (
-                        "software" if self._use_chromium_software_surface_for_url(target.get("url", "")) else "native"
-                    )
-                    if target.get("software_fallback_reason") == "visible-surface":
-                        presentation = "software"
-                        target["presentation"] = "software"
-                    # v7.5: hot-switch existing native Chromium tabs without
-                    # rebuilding the already-live DWM presentation. The old path
-                    # hid/revealed DWM, forced Tk idle processing and resized the
-                    # Chromium source on every tab click, even though the viewport
-                    # geometry had not changed.
-                    fast_native_switch = bool(
-                        presentation == "native"
-                        and self._embedded_mode
-                        and self._chromium_dwm_mode
-                        and self._dwm_surface_ready
-                        and self.edge_host.winfo_ismapped()
-                    )
-                    if presentation == "software":
-                        set_embedded_chromium_presentation("software", target["chromium_target_id"])
-                        self._show_chromium_software_surface(target["chromium_target_id"])
-                    elif fast_native_switch:
-                        self._chromium_frame_target_id = target["chromium_target_id"]
-                        self._chromium_software_mode = False
-                        # Native Chromium zoom is already maintained by the local
-                        # extension/watchdog. Do not synchronously re-apply zoom to
-                        # every tab during the visual switch. Verify this tab later.
-                        self.root.after(90, lambda tid=target["chromium_target_id"]: self._apply_chromium_zoom(tid))
-                    else:
-                        set_embedded_chromium_presentation("native", target["chromium_target_id"])
-                        self._show_embedded_host()
-                        self._schedule_embedded_surface_wake()
-                        self._schedule_chromium_zoom_apply(target_id=target["chromium_target_id"])
-                    self.status_var.set(f"Switched to existing tab | {target.get('url','')}")
-                    return True
-            except Exception:
-                pass
+        self._current_document = None
+        presentation = target.get("presentation") or (
+            "software" if self._use_chromium_software_surface_for_url(target.get("url", "")) else "native"
+        )
+        if target.get("software_fallback_reason") == "visible-surface":
+            presentation = "software"
+            target["presentation"] = "software"
 
-        # Blank/unloaded tab: no network work until the user navigates.
+        fast_native_switch = bool(
+            presentation == "native"
+            and self._embedded_mode
+            and self._chromium_dwm_mode
+            and self._dwm_surface_ready
+            and self.edge_host.winfo_ismapped()
+        )
+        if presentation == "software":
+            set_embedded_chromium_presentation("software", target["chromium_target_id"])
+            self._show_chromium_software_surface(target["chromium_target_id"])
+        elif fast_native_switch:
+            self._chromium_frame_target_id = target["chromium_target_id"]
+            self._chromium_software_mode = False
+            # Zoom verification is intentionally outside the visual switch path.
+            self.root.after(120, lambda tid=target["chromium_target_id"]: self._apply_chromium_zoom(tid))
+        else:
+            set_embedded_chromium_presentation("native", target["chromium_target_id"])
+            self._show_embedded_host()
+            self._schedule_embedded_surface_wake()
+            self._schedule_chromium_zoom_apply(target_id=target["chromium_target_id"])
+        self.status_var.set(f"Switched to existing tab | {target.get('url','')}")
+        return True
+
+    def _switch_tab(self, tab_id):
+        target = next((t for t in self.tabs if t.get("id") == tab_id), None)
+        if target is None:
+            return False
+
+        # A second click can reverse a still-running switch. Do not treat the
+        # currently selected Tk tab as a no-op while Chromium is moving elsewhere.
+        if tab_id == self.active_tab_id and self._tab_switch_pending_id is None:
+            return True
+
+        if target.get("engine") == "chromium" and target.get("chromium_target_id"):
+            self._tab_switch_serial += 1
+            serial = self._tab_switch_serial
+            self._tab_switch_pending_id = tab_id
+            target_id = target["chromium_target_id"]
+            future = self._tab_switch_executor.submit(activate_embedded_chromium_target, target_id)
+
+            def finish_switch():
+                if not future.done():
+                    self.root.after(8, finish_switch)
+                    return
+                # Ignore stale UI commits. The single-worker executor guarantees
+                # newer activation requests run after older ones, so the final
+                # Chromium target also matches the latest requested tab.
+                if serial != self._tab_switch_serial:
+                    return
+                self._tab_switch_pending_id = None
+                try:
+                    activated = bool(future.result())
+                except Exception:
+                    activated = False
+                if not activated:
+                    self.status_var.set("Tab switch failed")
+                    return
+                current_target = next((t for t in self.tabs if t.get("id") == tab_id), None)
+                if current_target is None or current_target.get("chromium_target_id") != target_id:
+                    return
+                try:
+                    self._commit_tab_switch(current_target)
+                except Exception:
+                    self.status_var.set("Tab switch presentation failed")
+
+            self.root.after(1, finish_switch)
+            return True
+
+        # Blank/unloaded tab has no Chromium activation cost. Commit it directly.
+        self._capture_active_tab_state()
+        self._navigation_generation += 1
+        self._tab_switch_serial += 1
+        self._tab_switch_pending_id = None
+        self.active_tab_id = tab_id
+        self.history = list(target.get("history") or [])
+        target["history"] = self.history
+        self.history_index = int(target.get("history_index", -1))
+        self.url_var.set(target.get("url") or "")
+        self.update_history_buttons()
+        self._refresh_tab_strip()
         self._show_native_canvas()
         self._current_document = None
         try:
@@ -1377,6 +1462,51 @@ class BrowserApp:
             pass
         self.status_var.set("Ready")
         return True
+
+    def _duplicate_tab(self, tab_id):
+        tab = next((t for t in self.tabs if t.get("id") == tab_id), None)
+        if tab is None:
+            return None
+        url = str(tab.get("url") or "").strip()
+        return self._new_tab(url=url or None, switch=True, navigate=bool(url))
+
+    def _close_other_tabs(self, tab_id):
+        for other in list(self.tabs):
+            if other.get("id") != tab_id:
+                self._close_tab(other.get("id"))
+        self._switch_tab(tab_id)
+
+    def _close_tabs_to_right(self, tab_id):
+        ids = [t.get("id") for t in self.tabs]
+        try:
+            index = ids.index(tab_id)
+        except ValueError:
+            return
+        for other_id in ids[index + 1:]:
+            self._close_tab(other_id)
+
+    def _show_tab_context_menu(self, event, tab_id):
+        tab = next((t for t in self.tabs if t.get("id") == tab_id), None)
+        if tab is None:
+            return
+        menu = tk.Menu(
+            self.root, tearoff=False, bg=self.ui["chrome_2"], fg=self.ui["text"],
+            activebackground=self.ui["field_focus"], activeforeground="#ffffff",
+            bd=0, relief="flat", font=(self._ui_font_family, 9),
+        )
+        menu.add_command(label="New Tab", command=self._new_tab, accelerator="Ctrl+T")
+        menu.add_command(label="Duplicate Tab", command=lambda: self._duplicate_tab(tab_id))
+        menu.add_command(label="Reopen Closed Tab", command=self._restore_closed_tab, accelerator="Ctrl+Shift+T")
+        menu.add_separator()
+        url = str(tab.get("url") or "")
+        menu.add_command(label="Copy Tab URL", command=lambda u=url: self._clipboard_set(u), state=("normal" if url else "disabled"))
+        menu.add_separator()
+        menu.add_command(label="Close Tab", command=lambda: self._close_tab(tab_id), accelerator="Ctrl+W")
+        menu.add_command(label="Close Other Tabs", command=lambda: self._close_other_tabs(tab_id), state=("normal" if len(self.tabs) > 1 else "disabled"))
+        ids = [t.get("id") for t in self.tabs]
+        has_right = tab_id in ids and ids.index(tab_id) < len(ids) - 1
+        menu.add_command(label="Close Tabs to the Right", command=lambda: self._close_tabs_to_right(tab_id), state=("normal" if has_right else "disabled"))
+        self._popup_context_menu(menu, event)
 
     def _close_tab(self, tab_id):
         tab = next((t for t in self.tabs if t.get("id") == tab_id), None)
@@ -1606,8 +1736,8 @@ class BrowserApp:
         except Exception:
             return None
 
-    def _schedule_dwm_geometry_sync(self, resize=False, delay=16):
-        """Coalesce DWM move/resize events to roughly one update per frame."""
+    def _schedule_dwm_geometry_sync(self, resize=False, delay=8):
+        """Coalesce DWM geometry near a 120 Hz cadence without resize spam."""
         if not self._embedded_mode or not self._chromium_dwm_mode:
             return
         self._dwm_pending_resize = bool(self._dwm_pending_resize or resize)
@@ -1631,7 +1761,12 @@ class BrowserApp:
                     pass
 
         try:
-            self._dwm_geometry_after_id = self.root.after(max(1, int(delay)), _flush)
+            # v9.7: while the user is dragging the top-level window, 60 Hz is
+            # plenty for DWM destination tracking and avoids feeding the
+            # compositor a 120 Hz stream on top of Tk's own move traffic. The
+            # final drag release performs an immediate exact sync.
+            effective_delay = max(16 if self._window_drag_active else 1, int(delay))
+            self._dwm_geometry_after_id = self.root.after(effective_delay, _flush)
         except Exception:
             self._dwm_geometry_after_id = None
 
@@ -1806,6 +1941,11 @@ class BrowserApp:
         if tab.get("software_fallback_reason") != "visible-surface":
             return
         target_id = tab.get("chromium_target_id")
+        if target_id:
+            try:
+                self._executor.submit(warm_embedded_chromium_io_channels, target_id, 1.5)
+            except Exception:
+                pass
         if not target_id:
             return
         try:
@@ -2118,14 +2258,12 @@ class BrowserApp:
         self._chromium_left_button_down = False
         self._chromium_drag_selecting = False
         self._chromium_press_point = None
-        # A plain click still gets the explicit editable-focus bridge. During a
-        # drag selection, however, focusing the release point can collapse the
-        # selection, especially inside input/textarea controls.
-        if not was_drag:
-            self._submit_chromium_input(
-                focus_embedded_chromium_point, x, y,
-                target_id=self._chromium_frame_target_id,
-            )
+        # v8.9: Input.dispatchMouseEvent already performs Chromium's native
+        # focus behavior. Older builds followed every ordinary click with a
+        # second Runtime.evaluate/focus() round-trip on the critical input lane,
+        # making simple clicks heavier and occasionally delaying the next key.
+        # Keep the gesture purely native-CDP here; explicit focus remains
+        # available for exceptional call sites that actually require it.
         return "break"
 
     def _on_chromium_surface_drag(self, event):
@@ -2169,18 +2307,34 @@ class BrowserApp:
         self._chromium_motion_after_id = None
         if not self._chromium_input_surface_active():
             self._chromium_pending_motion = None
+            self._chromium_motion_future = None
+            return
+        # Keep at most one hover packet in flight. If Chromium is busy, retain
+        # only the newest coordinates instead of building a stale motion queue.
+        if self._chromium_motion_future is not None and not self._chromium_motion_future.done():
+            self._chromium_motion_after_id = self.root.after(
+                self._chromium_motion_interval_ms, self._flush_chromium_surface_motion
+            )
             return
         motion = self._chromium_pending_motion
         self._chromium_pending_motion = None
         if motion is None:
+            self._chromium_motion_future = None
             return
         x, y = motion
-        self._submit_chromium_input(
-            dispatch_embedded_chromium_mouse, "mouseMoved", x, y,
-            target_id=self._chromium_frame_target_id
-        )
+        try:
+            self._chromium_motion_future = self._chromium_hover_executor.submit(
+                dispatch_embedded_chromium_mouse, "mouseMoved", x, y,
+                target_id=self._chromium_frame_target_id, purpose="hover"
+            )
+        except Exception:
+            self._chromium_motion_future = None
         self._chromium_cursor_point = (x, y)
         self._request_chromium_cursor_probe()
+        if self._chromium_pending_motion is not None:
+            self._chromium_motion_after_id = self.root.after(
+                self._chromium_motion_interval_ms, self._flush_chromium_surface_motion
+            )
 
     @staticmethod
     def _tk_cursor_for_css(css_cursor):
@@ -2242,7 +2396,7 @@ class BrowserApp:
             return
         x, y = point
         try:
-            self._chromium_cursor_future = self._chromium_input_executor.submit(
+            self._chromium_cursor_future = self._chromium_cursor_executor.submit(
                 get_embedded_chromium_cursor, x, y,
                 target_id=self._chromium_frame_target_id,
             )
@@ -2280,12 +2434,42 @@ class BrowserApp:
         self._mark_chromium_interaction(1.0)
         x, y = self._surface_xy(event)
         delta = -float(getattr(event, "delta", 0) or 0)
-        self._submit_chromium_input(
-            dispatch_embedded_chromium_mouse, "mouseWheel", x, y,
-            delta_y=delta, target_id=self._chromium_frame_target_id,
-            refresh=True,
-        )
+        # v8.7: keep wheel bursts out of the click/keyboard FIFO. Accumulate
+        # deltas while one scroll packet is in flight, retaining only the newest
+        # pointer position. This is especially important for precision touchpads.
+        if self._chromium_pending_wheel is None:
+            self._chromium_pending_wheel = [x, y, 0.0]
+        self._chromium_pending_wheel[0] = x
+        self._chromium_pending_wheel[1] = y
+        self._chromium_pending_wheel[2] += delta
+        if self._chromium_wheel_after_id is None:
+            self._chromium_wheel_after_id = self.root.after(1, self._flush_chromium_wheel)
         return "break"
+
+    def _flush_chromium_wheel(self):
+        self._chromium_wheel_after_id = None
+        if not self._chromium_input_surface_active():
+            self._chromium_pending_wheel = None
+            return
+        if self._chromium_scroll_future is not None and not self._chromium_scroll_future.done():
+            self._chromium_wheel_after_id = self.root.after(2, self._flush_chromium_wheel)
+            return
+        pending = self._chromium_pending_wheel
+        self._chromium_pending_wheel = None
+        if not pending:
+            return
+        x, y, delta = pending
+        try:
+            self._chromium_scroll_future = self._chromium_scroll_executor.submit(
+                dispatch_embedded_chromium_mouse, "mouseWheel", x, y,
+                delta_y=delta, target_id=self._chromium_frame_target_id,
+                timeout=2, purpose="scroll",
+            )
+        except Exception:
+            self._chromium_scroll_future = None
+        if self._chromium_pending_wheel is not None and self._chromium_wheel_after_id is None:
+            self._chromium_wheel_after_id = self.root.after(1, self._flush_chromium_wheel)
+
 
     def _on_root_chromium_key(self, event):
         """Fallback keyboard lane for DWM presentation.
@@ -2392,6 +2576,8 @@ class BrowserApp:
             menu.insert_separator(3)
         if selected_text:
             menu.add_command(label="Copy Selected Text", command=lambda t=selected_text: self._clipboard_set(t))
+            query = quote_plus(selected_text[:500])
+            menu.add_command(label="Search Selected Text", command=lambda q=query: self._new_tab(url=f"https://www.startpage.com/do/search?q={q}", switch=True, navigate=True))
         if image_url:
             menu.add_command(label="Copy Image Address", command=lambda u=image_url: self._clipboard_set(u))
         if selected_text or image_url:
@@ -2406,9 +2592,13 @@ class BrowserApp:
         menu.add_command(label="Inspect HTML", command=self.inspect_html)
         return menu
 
-    def _popup_context_menu(self, menu, event):
+    def _popup_context_menu(self, menu, event=None):
         try:
-            menu.tk_popup(int(event.x_root), int(event.y_root))
+            if event is not None and hasattr(event, "x_root") and hasattr(event, "y_root"):
+                x_root, y_root = int(event.x_root), int(event.y_root)
+            else:
+                x_root, y_root = self._screen_cursor_position(None)
+            menu.tk_popup(int(x_root), int(y_root))
         finally:
             try:
                 menu.grab_release()
@@ -2770,12 +2960,66 @@ class BrowserApp:
         # The open/navigation future only reaches this point after Chromium has
         # produced a usable frame. Reveal the DWM host now, never before.
         self._dwm_surface_ready = True
+        # v9.0: arm Tk-to-Chromium keyboard ownership *before* exposing the
+        # DWM frame. This removes the final few-instruction window where the
+        # page could be visible while the root still owned keyboard input.
+        if self._chromium_dwm_mode:
+            self._arm_dwm_input_surface()
         self._sync_dwm_host_geometry(show=True, transparent=False)
+        # v9.2: non-critical I/O lanes warm only after the first frame is visible.
+        # This keeps scroll/hover WebSocket setup off the startup reveal path.
+        if tab and tab.get("chromium_target_id"):
+            try:
+                self._executor.submit(
+                    warm_embedded_chromium_io_channels,
+                    tab.get("chromium_target_id"), 0.8, ("scroll", "hover")
+                )
+            except Exception:
+                pass
         self.root.after_idle(lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
         try:
             (self.edge_host if self._chromium_dwm_mode else self.chromium_surface).focus_set()
         except Exception:
             pass
+        # Keep two guarded retries for Windows activation timing; they no
+        # longer establish initial ownership, only repair rare focus churn.
+        if self._chromium_dwm_mode:
+            for delay in (20, 75):
+                try:
+                    self.root.after(delay, self._arm_dwm_input_surface)
+                except Exception:
+                    pass
+        return True
+
+    def _arm_dwm_input_surface(self):
+        """Make a newly visible DWM page ready for first-click input.
+
+        Keep this deliberately lightweight: no Chromium wake, redraw, resize,
+        or input-queue attachment.  DWM presentation sends interaction through
+        Tekzite's CDP plane, so all it needs is an active Tk toplevel, focus on
+        edge_host, and the page-keyboard lane enabled.  Delayed retries cover
+        the short Windows activation window after the first browser frame is
+        revealed, while the omnibox guard prevents focus theft if the user has
+        already started typing there.
+        """
+        if not (self._embedded_mode and self._chromium_dwm_mode and self._dwm_surface_ready):
+            return False
+        try:
+            if self._address_focus_active or self.root.focus_get() is self.address:
+                return False
+        except Exception:
+            if self._address_focus_active:
+                return False
+        try:
+            self.root.focus_force()
+        except Exception:
+            pass
+        try:
+            self.edge_host.focus_set()
+        except Exception:
+            pass
+        self._address_focus_active = False
+        self._chromium_page_keyboard_active = True
         return True
 
     def _on_edge_host_configure(self, event):
@@ -2784,7 +3028,7 @@ class BrowserApp:
         if self._chromium_dwm_mode:
             # Size changes need a Chromium viewport update, but coalesce the
             # noisy Tk Configure burst into one ~60 Hz operation.
-            self._schedule_dwm_geometry_sync(resize=True, delay=16)
+            self._schedule_dwm_geometry_sync(resize=True, delay=8)
             return
         resize_embedded_chromium(
             max(1, int(getattr(event, "width", 1))),
@@ -2798,9 +3042,14 @@ class BrowserApp:
             if getattr(event, "widget", self.root) is not self.root:
                 return
             if self._chromium_dwm_mode:
+                # v9.8 live dragging moves the top-level HWND and DWM destination
+                # together. Do not schedule a second compositor chase from the
+                # resulting Tk Configure notification.
+                if self._window_drag_active and self._native_drag_dwm_offset is not None:
+                    return
                 # A pure top-level move does not resize Chromium. Only slide the
                 # transparent DWM destination along with Tekzite.
-                self._schedule_dwm_geometry_sync(resize=False, delay=16)
+                self._schedule_dwm_geometry_sync(resize=False, delay=8)
                 return
             self.root.after_idle(
                 lambda: resize_embedded_chromium(
@@ -2953,7 +3202,7 @@ class BrowserApp:
         if generation != self._navigation_generation:
             return
         if not future.done():
-            self.root.after(40, self._poll_embedded_navigation,
+            self.root.after(8, self._poll_embedded_navigation,
                             generation, future, url, add_history)
             return
         try:
@@ -2996,9 +3245,20 @@ class BrowserApp:
                 # v4.99: CDP can see a healthy page while the re-parented native
                 # HWND presents only Tekzite's flat gray host. Verify what is
                 # actually visible on-screen and fall back per-tab when needed.
-                self.root.after(300, self._probe_visible_embedded_surface,
+                # v9.9: the fast semantic first-frame path normally avoids PNG
+                # capture, so attached_frame_visual can legitimately be False even
+                # though Chromium has a non-empty page. Do not let that optimization
+                # disable the on-screen black-surface safety probe. Treat a verified
+                # non-empty attached DOM as sufficient evidence that a flat/black DWM
+                # destination is a presentation problem worth checking.
+                visible_probe_expected = bool(
+                    session.get("attached_frame_visual")
+                    or int(session.get("attached_frame_text_len") or 0) >= 8
+                    or int(session.get("first_frame_text_len") or 0) >= 8
+                )
+                self.root.after(220, self._probe_visible_embedded_surface,
                                 generation, session.get("target_id"),
-                                bool(session.get("attached_frame_visual")))
+                                visible_probe_expected)
         except Exception as exc:
             self._show_native_canvas()
             self._finish_navigation_error(generation, exc, allow_chromium_fallback=False)
@@ -3385,16 +3645,149 @@ class BrowserApp:
             ))
             button.pack(side="left", fill="y")
 
+
+    def _prewarm_native_window_drag(self):
+        """Resolve/cache the Win32 drag path before the user starts moving."""
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            self.root.update_idletasks()
+            inner = int(self.root.winfo_id())
+            GA_ROOT = 2
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            hwnd = int(user32.GetAncestor(wintypes.HWND(inner), GA_ROOT) or inner)
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                ctypes.c_int, ctypes.c_int, wintypes.UINT,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            self._native_drag_user32 = user32
+            self._native_drag_hwnd = hwnd
+            return bool(hwnd)
+        except Exception:
+            self._native_drag_user32 = None
+            self._native_drag_hwnd = 0
+            return False
+
+    def _native_move_window_drag(self, x, y):
+        """Move Tekzite and its DWM destination together without Tk geometry churn."""
+        if sys.platform != "win32":
+            return False
+        if not self._native_drag_hwnd or self._native_drag_user32 is None:
+            if not self._prewarm_native_window_drag():
+                return False
+        try:
+            from ctypes import wintypes
+            user32 = self._native_drag_user32
+            SWP_NOSIZE = 0x0001
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_NOOWNERZORDER = 0x0200
+            flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+            user32.SetWindowPos(
+                wintypes.HWND(int(self._native_drag_hwnd)), wintypes.HWND(0),
+                int(x), int(y), 0, 0, flags,
+            )
+            offset = self._native_drag_dwm_offset
+            if (
+                offset is not None and self._embedded_mode and self._chromium_dwm_mode
+                and self._dwm_host and self._dwm_host_size
+            ):
+                dx, dy = offset
+                w, h = self._dwm_host_size
+                user32.SetWindowPos(
+                    wintypes.HWND(int(self._dwm_host)), wintypes.HWND(0),
+                    int(x + dx), int(y + dy), max(1, int(w)), max(1, int(h)),
+                    SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER,
+                )
+                self._dwm_host_rect = (int(x + dx), int(y + dy), max(1, int(w)), max(1, int(h)))
+            return True
+        except Exception:
+            return False
+
     def _start_window_drag(self, event):
         if self._window_maximized or self._fullscreen:
             return
-        self._window_drag_offset = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+        root_x = int(self.root.winfo_x())
+        root_y = int(self.root.winfo_y())
+        self._window_drag_offset = (event.x_root - root_x, event.y_root - root_y)
+        self._window_drag_active = True
+        self._window_drag_pending_xy = None
+        # v9.8: all native setup is normally pre-warmed on startup. Capture the
+        # already-known DWM offset once so live drag frames can move both HWNDs
+        # together without waiting for a Tk Configure -> DWM follow-up pass.
+        if not self._native_drag_hwnd or self._native_drag_user32 is None:
+            self._prewarm_native_window_drag()
+        if self._dwm_host_rect is not None:
+            try:
+                self._native_drag_dwm_offset = (
+                    int(self._dwm_host_rect[0]) - root_x,
+                    int(self._dwm_host_rect[1]) - root_y,
+                )
+            except Exception:
+                self._native_drag_dwm_offset = None
+        else:
+            self._native_drag_dwm_offset = None
+
+    def _flush_window_drag(self):
+        """Apply only the newest queued top-level drag position.
+
+        Windows can deliver mouse motion much faster than Tk/DWM need to move a
+        top-level window. Keeping only the latest coordinate prevents a backlog
+        of root.geometry() calls and corresponding Configure/DWM work.
+        """
+        self._window_drag_after_id = None
+        pending = self._window_drag_pending_xy
+        self._window_drag_pending_xy = None
+        if pending is None or not self._window_drag_active:
+            return
+        x, y = pending
+        if not self._native_move_window_drag(x, y):
+            try:
+                self.root.geometry(f"+{int(x)}+{int(y)}")
+            except tk.TclError:
+                return
+        if self._window_drag_pending_xy is not None and self._window_drag_after_id is None:
+            self._window_drag_after_id = self.root.after(8, self._flush_window_drag)
 
     def _drag_window(self, event):
         if self._window_maximized or self._fullscreen:
             return
         dx, dy = self._window_drag_offset
-        self.root.geometry(f"+{event.x_root - dx}+{event.y_root - dy}")
+        self._window_drag_pending_xy = (event.x_root - dx, event.y_root - dy)
+        if self._window_drag_after_id is None:
+            # ~120 Hz maximum Tk position updates. Raw mouse reports above this
+            # rate are collapsed to the latest coordinate.
+            self._window_drag_after_id = self.root.after(8, self._flush_window_drag)
+
+    def _end_window_drag(self, event=None):
+        if not self._window_drag_active:
+            return
+        if event is not None and not (self._window_maximized or self._fullscreen):
+            dx, dy = self._window_drag_offset
+            self._window_drag_pending_xy = (event.x_root - dx, event.y_root - dy)
+        if self._window_drag_after_id is not None:
+            try:
+                self.root.after_cancel(self._window_drag_after_id)
+            except Exception:
+                pass
+            self._window_drag_after_id = None
+        pending = self._window_drag_pending_xy
+        self._window_drag_pending_xy = None
+        self._window_drag_active = False
+        if pending is not None:
+            if not self._native_move_window_drag(pending[0], pending[1]):
+                try:
+                    self.root.geometry(f"+{int(pending[0])}+{int(pending[1])}")
+                except tk.TclError:
+                    pass
+        self._native_drag_dwm_offset = None
+        if self._embedded_mode and self._chromium_dwm_mode:
+            self._schedule_dwm_geometry_sync(resize=False, delay=1)
 
     def _get_work_area(self):
         if sys.platform == "win32":
@@ -4372,6 +4765,22 @@ class BrowserApp:
         try:
             try:
                 self._chromium_input_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            try:
+                self._chromium_hover_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            try:
+                self._chromium_cursor_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            try:
+                self._chromium_scroll_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            try:
+                self._tab_switch_executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass
             self._executor.shutdown(wait=False, cancel_futures=True)

@@ -399,6 +399,25 @@ def _edge_profile_owner_file(profile_dir):
     return os.path.join(profile_dir, "tekzite-helper.pid")
 
 
+def _profile_recovery_needed(profile_dir):
+    """Cheaply detect whether cold-start recovery work is actually needed.
+
+    A clean Tekzite shutdown removes its owner marker and Chromium singleton
+    artifacts.  Full Win32_Process/CIM enumeration is comparatively expensive,
+    so v9.5 only pays for it when those cheap on-disk signals indicate an
+    unclean prior session. A failed first launch still falls back to the full
+    recovery path on retry.
+    """
+    try:
+        profile = Path(profile_dir)
+        if Path(_edge_profile_owner_file(profile_dir)).exists():
+            return True
+        return any((profile / name).exists() for name in
+                   ("SingletonLock", "SingletonSocket", "SingletonCookie", "lockfile"))
+    except Exception:
+        return True
+
+
 def _terminate_stale_profile_owner(profile_dir):
     """Clean up a helper left behind by an earlier Tekzite run.
 
@@ -735,14 +754,22 @@ def _listener_pid_for_port(port):
 def _wait_for_devtools(port, process, timeout=10.0):
     """Wait for DevTools and tolerate Chromium's normal launcher handoff.
 
-    Some Chromium builds start a short-lived launcher process that exits with
-    code 0 after transferring the profile/command line to the actual browser
-    process.  A clean launcher exit is therefore not a failure by itself.
+    v9.6 keeps the polling loop genuinely lightweight. Chromium is already
+    launched far off-screen, so repeatedly taking a Toolhelp process snapshot
+    and enumerating every top-level window on *each* DevTools miss only slows
+    startup. Hide once before polling and once after DevTools becomes live,
+    while checking the loopback endpoint at a tight cadence. The successful
+    /json/version payload is returned so later browser-CDP setup can reuse its
+    websocket URL without another HTTP round trip.
     """
     deadline = time.monotonic() + timeout
     last_error = None
     clean_exit_seen = False
     exit_code = None
+    try:
+        _hide_process_windows(process.pid)
+    except Exception:
+        pass
     while time.monotonic() < deadline:
         rc = process.poll()
         if rc is not None:
@@ -752,21 +779,23 @@ def _wait_for_devtools(port, process, timeout=10.0):
                     f"Chromium bridge exited early with code {exit_code}"
                 )
             clean_exit_seen = True
-        elif not clean_exit_seen:
-            _hide_process_windows(process.pid)
         try:
-            _devtools_json(port, "/json/version", timeout=0.5)
+            version_info = _devtools_json(port, "/json/version", timeout=0.20)
             if not clean_exit_seen:
-                _hide_process_windows(process.pid)
+                try:
+                    _hide_process_windows(process.pid)
+                except Exception:
+                    pass
             adopted_pid = _listener_pid_for_port(port) if clean_exit_seen else None
             return {
                 "handoff": bool(clean_exit_seen),
                 "exit_code": exit_code,
                 "adopted_pid": adopted_pid,
+                "version": version_info if isinstance(version_info, dict) else {},
             }
         except Exception as exc:
             last_error = exc
-            time.sleep(0.05)
+            time.sleep(0.01)
     if clean_exit_seen:
         raise RuntimeError(
             "Chromium launcher exited cleanly with code 0, but no DevTools "
@@ -800,6 +829,13 @@ class _StdlibWebSocket:
             path += "?" + parsed.query
 
         sock = socket.create_connection((host, port), timeout=timeout)
+        # v8.9: CDP is latency-sensitive tiny-message traffic on loopback.
+        # Disable Nagle so clicks/keys/activation commands are written
+        # immediately instead of being candidates for TCP packet coalescing.
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
         if parsed.scheme == "wss":
             import ssl
             sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
@@ -1065,18 +1101,28 @@ def _get_persistent_page_cdp_channel(session, target_id=None, timeout=5.0, purpo
     channels[cache_key] = channel
     if resolved_target:
         session["target_id"] = resolved_target
-    try:
-        _cdp_call(ws, "Network.enable", {}, message_id=901, timeout=timeout)
-        _cdp_call(
-            ws, "Network.setExtraHTTPHeaders",
-            {"headers": {"DNT": "1", "Sec-GPC": "1"}},
-            message_id=902, timeout=timeout,
-        )
-        channel["enabled_domains"].add("Network")
-        channel["privacy_headers"] = True
-        channel["next_message_id"] = max(channel["next_message_id"], 1000)
-    except Exception:
+    # v9.3: latency-only lanes do not need Network domain setup. Sending
+    # Network.enable + setExtraHTTPHeaders on the critical input socket added
+    # two CDP round trips before the first click could be proven. Keep network
+    # configuration on general/control channels and make input/scroll/hover/
+    # cursor sockets immediately usable after the websocket handshake.
+    latency_only_purposes = {"input", "scroll", "hover", "cursor"}
+    if purpose in latency_only_purposes:
         channel["privacy_headers"] = False
+        channel["network_setup_skipped_for_latency"] = True
+    else:
+        try:
+            _cdp_call(ws, "Network.enable", {}, message_id=901, timeout=timeout)
+            _cdp_call(
+                ws, "Network.setExtraHTTPHeaders",
+                {"headers": {"DNT": "1", "Sec-GPC": "1"}},
+                message_id=902, timeout=timeout,
+            )
+            channel["enabled_domains"].add("Network")
+            channel["privacy_headers"] = True
+            channel["next_message_id"] = max(channel["next_message_id"], 1000)
+        except Exception:
+            channel["privacy_headers"] = False
     return channel
 
 
@@ -1115,6 +1161,199 @@ def _persistent_page_cdp_call(session, method, params=None, *, target_id=None,
             raise
     raise RuntimeError(f"Persistent CDP call failed: {method}") from last_error
 
+
+
+def warm_embedded_chromium_io_channels(target_id: str = None, timeout: float = 2.0,
+                                      purposes=("input", "scroll", "hover")):
+    """Pre-open latency-sensitive CDP lanes before the user needs them.
+
+    v8.7 keeps clicks/typing, wheel scrolling, and cosmetic hover/cursor work on
+    independent persistent WebSockets.  Chromium serializes calls within one
+    page socket, so merely using separate Python workers is not enough. Warming
+    all three lanes removes both lock contention and the first-gesture connect
+    penalty while the page is still hidden or otherwise idle.
+    """
+    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(float(timeout), 8.0))
+    if not session or not session.get("port"):
+        return False
+    warmed = []
+    try:
+        for purpose in tuple(purposes or ("input",)):
+            purpose = str(purpose or "input")
+            _get_persistent_page_cdp_channel(
+                session, target_id=target_id, timeout=float(timeout), purpose=purpose
+            )
+            warmed.append(purpose)
+        tid = str(target_id or session.get("target_id") or "")
+        session["io_channels_warmed_target"] = tid
+        session["io_channels_warmed_purposes"] = list(warmed)
+        session["io_channels_warmed_at"] = time.monotonic()
+        # Retain the v8.6 diagnostics for compatibility with existing tests.
+        if "input" in warmed:
+            session["input_channel_warmed_target"] = tid
+            session["input_channel_warmed_at"] = session["io_channels_warmed_at"]
+        return True
+    except Exception as exc:
+        session["io_channel_warm_error"] = type(exc).__name__
+        if "input" not in warmed:
+            session["input_channel_warm_error"] = type(exc).__name__
+        return False
+
+
+def _wait_for_embedded_chromium_input_ready(session, target_id: str = None, timeout: float = 1.2):
+    """Keep the DWM surface hidden until the renderer consumes real input.
+
+    A paintable compositor frame can arrive a little before Chromium's renderer
+    is ready to service CDP input.  v8.8 closes that visible-but-dead gap by
+    proving the exact critical input lane before the UI is allowed to reveal the
+    DWM thumbnail.  The probe is deliberately harmless: wait for a usable DOM,
+    then send one mouseMoved event at (0, 0).
+    """
+    if not session or not session.get("port"):
+        return False
+    target_id = str(target_id or session.get("target_id") or "")
+    if not target_id:
+        return False
+    # If the attached-frame gate already proved a semantic laid-out frame for
+    # this navigation, skip a duplicate Runtime.evaluate and immediately prove
+    # the exact input command path.
+    if (session.get("first_frame_probe") == "attached-semantic-geometry"
+            and int(session.get("first_frame_generation") or -1) == int(session.get("navigation_generation") or 0)):
+        try:
+            _persistent_page_cdp_call(
+                session, "Input.dispatchMouseEvent",
+                {"type": "mouseMoved", "x": 0.0, "y": 0.0, "button": "none"},
+                target_id=target_id, timeout=min(0.30, max(0.08, float(timeout))),
+                purpose="input",
+            )
+            session["input_ready_verified"] = True
+            session["input_ready_target"] = target_id
+            session["input_ready_ready_state"] = str(session.get("first_frame_ready_state") or "")
+            session["input_ready_attempts"] = 1
+            session["input_ready_at"] = time.monotonic()
+            session["input_ready_reused_frame_proof"] = True
+            return True
+        except Exception as exc:
+            session["input_ready_last_error"] = type(exc).__name__
+
+    deadline = time.monotonic() + max(0.05, float(timeout))
+    last_ready = ""
+    last_dom = False
+    attempts = 0
+    while time.monotonic() < deadline:
+        attempts += 1
+        try:
+            state = _persistent_page_cdp_call(
+                session, "Runtime.evaluate",
+                {
+                    "expression": "(() => { const d=document; const b=d.body; const de=d.documentElement; return {ready:String(d.readyState||''), dom:!!(de&&b&&de.clientWidth>0&&de.clientHeight>0), interactive:!!(b&&b.querySelector&&b.querySelector('input,textarea,button,a[href],[contenteditable=\"true\"]'))}; })()",
+                    "returnByValue": True,
+                },
+                target_id=target_id, timeout=min(0.35, max(0.08, deadline-time.monotonic())),
+                purpose="input",
+            )
+            value = (((state or {}).get("result") or {}).get("value") or {})
+            last_ready = str(value.get("ready") or "")
+            last_dom = bool(value.get("dom"))
+            # Do not require load/DOMContentLoaded: ordinary Chromium is clickable
+            # while a page is still loading.  We only need a real laid-out DOM.
+            if last_dom:
+                _persistent_page_cdp_call(
+                    session, "Input.dispatchMouseEvent",
+                    {"type": "mouseMoved", "x": 0.0, "y": 0.0, "button": "none"},
+                    target_id=target_id, timeout=min(0.35, max(0.08, deadline-time.monotonic())),
+                    purpose="input",
+                )
+                session["input_ready_verified"] = True
+                session["input_ready_target"] = target_id
+                session["input_ready_ready_state"] = last_ready
+                session["input_ready_attempts"] = attempts
+                session["input_ready_at"] = time.monotonic()
+                return True
+        except Exception as exc:
+            session["input_ready_last_error"] = type(exc).__name__
+        time.sleep(0.008)
+    session["input_ready_verified"] = False
+    session["input_ready_target"] = target_id
+    session["input_ready_ready_state"] = last_ready
+    session["input_ready_dom"] = last_dom
+    session["input_ready_attempts"] = attempts
+    session["input_ready_timeout"] = True
+    return False
+
+
+
+def _focus_embedded_chromium_startup_input(session, target_id: str = None, timeout: float = 0.8):
+    """Focus a sensible editable control before the first DWM reveal.
+
+    This is intentionally conservative and startup-only. Prefer explicit
+    autofocus, then search fields, then common query/text inputs. If the page
+    already owns focus inside an editable control, leave it alone.
+    """
+    if not session or not session.get("port"):
+        return False
+    target_id = str(target_id or session.get("target_id") or "")
+    if not target_id:
+        return False
+    expr = r'''(() => {
+      const d = document;
+      const ae = d.activeElement;
+      const editable = (el) => !!el && (
+        el.isContentEditable ||
+        el.tagName === 'TEXTAREA' ||
+        (el.tagName === 'INPUT' && !/^(?:button|checkbox|color|file|hidden|image|radio|range|reset|submit)$/i.test(el.type || 'text'))
+      );
+      if (editable(ae)) return {focused:true, existing:true, tag:ae.tagName, type:ae.type || ''};
+      const selectors = [
+        '[autofocus]',
+        'input[type="search"]',
+        'input[name="q"]',
+        'input[name="query"]',
+        'input[role="searchbox"]',
+        'textarea[role="searchbox"]',
+        'input[type="text"]',
+        'textarea',
+        '[contenteditable="true"]'
+      ];
+      let el = null;
+      for (const sel of selectors) {
+        for (const candidate of d.querySelectorAll(sel)) {
+          const r = candidate.getBoundingClientRect();
+          const cs = getComputedStyle(candidate);
+          if (!candidate.disabled && r.width > 1 && r.height > 1 && cs.visibility !== 'hidden' && cs.display !== 'none') {
+            el = candidate; break;
+          }
+        }
+        if (el) break;
+      }
+      if (!el) return {focused:false};
+      try { el.focus({preventScroll:true}); } catch (_) { try { el.focus(); } catch (_) {} }
+      return {focused:d.activeElement === el, existing:false, tag:el.tagName, type:el.type || ''};
+    })()'''
+    try:
+        result = _persistent_page_cdp_call(
+            session, "Runtime.evaluate",
+            {"expression": expr, "returnByValue": True},
+            target_id=target_id, timeout=max(0.1, float(timeout)), purpose="input",
+        )
+        value = (((result or {}).get("result") or {}).get("value") or {})
+        ok = bool(value.get("focused"))
+        session["startup_editable_focus_ready"] = ok
+        session["startup_editable_focus_target"] = target_id
+        session["startup_editable_focus_existing"] = bool(value.get("existing"))
+        session["startup_editable_focus_tag"] = str(value.get("tag") or "")
+        session["startup_editable_focus_type"] = str(value.get("type") or "")
+        return ok
+    except Exception as exc:
+        session["startup_editable_focus_ready"] = False
+        session["startup_editable_focus_error"] = type(exc).__name__
+        return False
+
+def warm_embedded_chromium_input_channel(target_id: str = None, timeout: float = 2.0):
+    """Backward-compatible v8.6 helper for warming only the critical input lane."""
+    return warm_embedded_chromium_io_channels(
+        target_id=target_id, timeout=timeout, purposes=("input",)
+    )
 
 def persistent_cdp_debug():
     """Return connection-reuse counters for Tekzite debug output/tests."""
@@ -1221,16 +1460,32 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
             })
             process = None
             try:
-                _terminate_stale_profile_owner(profile)
-                found, terminated = _terminate_profile_chromium_processes(profile)
-                if found:
-                    _CHROMIUM_LAUNCH_DEBUG["profile_processes_found"] = list(found)
-                if terminated:
-                    _CHROMIUM_LAUNCH_DEBUG["profile_processes_terminated"] = list(terminated)
-                # Once no live process owns Tekzite's private profile, singleton
-                # crumbs are stale by definition and can be removed safely.
-                if not _profile_chromium_pids(profile):
-                    _clear_chromium_profile_locks(profile)
+                # v9.5: do not enumerate every Windows process on every clean
+                # startup. CIM/Win32_Process discovery was a major chunk of the
+                # user-visible "Preparing Chromium frame" period even before
+                # Chromium itself had launched. Only run the expensive recovery
+                # path when cheap profile markers suggest an unclean prior exit,
+                # or on the deliberate second attempt after a failed launch.
+                recovery_needed = bool(attempt > 1 or _profile_recovery_needed(profile))
+                _CHROMIUM_LAUNCH_DEBUG["profile_recovery_scan_needed"] = recovery_needed
+                if recovery_needed:
+                    recovery_started = time.monotonic()
+                    _terminate_stale_profile_owner(profile)
+                    found, terminated = _terminate_profile_chromium_processes(profile)
+                    if found:
+                        _CHROMIUM_LAUNCH_DEBUG["profile_processes_found"] = list(found)
+                    if terminated:
+                        _CHROMIUM_LAUNCH_DEBUG["profile_processes_terminated"] = list(terminated)
+                    # Once no live process owns Tekzite's private profile,
+                    # singleton crumbs are stale by definition.
+                    if not _profile_chromium_pids(profile):
+                        _clear_chromium_profile_locks(profile)
+                    _CHROMIUM_LAUNCH_DEBUG["profile_recovery_ms"] = round(
+                        (time.monotonic() - recovery_started) * 1000.0, 2
+                    )
+                else:
+                    _CHROMIUM_LAUNCH_DEBUG["profile_recovery_ms"] = 0.0
+                    _CHROMIUM_LAUNCH_DEBUG["clean_profile_fast_path"] = True
                 if attempt == 2:
                     # Give Windows a beat to release file/process handles from
                     # the failed first helper before relaunching the same profile.
@@ -1266,7 +1521,6 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
                     f"--load-extension={_zoom_extension_dir()}",
                     f"--proxy-server={ensure_network_engine()['proxy_url']}",
                     "--proxy-bypass-list=<-loopback>", "--disable-quic",
-                    "--dns-prefetch-disable",
                     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
                     f"--window-position={launch_x},{launch_y}",
                     f"--window-size={launch_w},{launch_h}",
@@ -1305,12 +1559,20 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
                     "typography_css_override_used": False,
                 })
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+                launch_started = time.monotonic()
                 process = subprocess.Popen(
                     command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     creationflags=creationflags, startupinfo=None,
                 )
+                _CHROMIUM_LAUNCH_DEBUG["process_spawn_ms"] = round(
+                    (time.monotonic() - launch_started) * 1000.0, 2
+                )
                 original_pid = int(process.pid)
+                devtools_started = time.monotonic()
                 wait_info = _wait_for_devtools(port, process, timeout=timeout) or {}
+                _CHROMIUM_LAUNCH_DEBUG["devtools_ready_ms"] = round(
+                    (time.monotonic() - devtools_started) * 1000.0, 2
+                )
                 handoff = bool(wait_info.get("handoff"))
                 adopted_pid = wait_info.get("adopted_pid")
                 if handoff:
@@ -1324,6 +1586,7 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
                 _EDGE_SESSION = {
                     "process": process, "port": port, "profile": profile,
                     "page_cdp_channels": {}, "executable": executable,
+                    "browser_ws_url": str((wait_info.get("version") or {}).get("webSocketDebuggerUrl") or ""),
                     "launch_attempt": attempt,
                     "launch_handoff": handoff,
                     "launch_original_pid": original_pid,
@@ -1341,7 +1604,11 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
                 _CHROMIUM_LAUNCH_DEBUG["last_error"] = None
                 if os.name == "nt":
                     try:
+                        window_find_started = time.monotonic()
                         helper_hwnd = _find_chromium_window(_EDGE_SESSION, timeout=1.5)
+                        _CHROMIUM_LAUNCH_DEBUG["window_discovery_ms"] = round(
+                            (time.monotonic() - window_find_started) * 1000.0, 2
+                        )
                         _EDGE_SESSION["outer_hwnd"] = _hwnd_int(helper_hwnd)
                         _EDGE_SESSION["main_hwnd"] = _hwnd_int(helper_hwnd)
                         _apply_tekzite_chromium_branding(_EDGE_SESSION)
@@ -1408,20 +1675,69 @@ def _pick_devtools_page(port, session=None, target_id=None):
 
 
 
-def _browser_cdp_call(session, method, params=None, *, message_id=1, timeout=5.0):
-    """Call the browser-level DevTools target endpoint."""
-    version = _devtools_json(session["port"], "/json/version", timeout=1.0)
-    ws_url = version.get("webSocketDebuggerUrl")
+def _close_persistent_browser_cdp_channel(session):
+    """Close the cached browser-level DevTools channel, if any."""
+    channel = (session or {}).pop("browser_cdp_channel", None)
+    if not channel:
+        return
+    try:
+        channel.get("ws") and channel["ws"].close()
+    except Exception:
+        pass
+    channel["closed"] = True
+
+
+def _get_persistent_browser_cdp_channel(session, timeout=5.0):
+    """Return one long-lived browser-level CDP WebSocket.
+
+    v9.4 removes the /json/version + websocket-handshake tax from every tab
+    activation/creation/close operation.  Browser-level Target.* commands are
+    tiny and sequential, so one locked persistent loopback socket is ideal.
+    """
+    channel = (session or {}).get("browser_cdp_channel")
+    if channel and channel.get("ws") is not None and not channel.get("closed"):
+        return channel
+    ws_url = str((session or {}).get("browser_ws_url") or "")
+    if not ws_url:
+        version = _devtools_json(session["port"], "/json/version", timeout=min(0.5, float(timeout)))
+        ws_url = str(version.get("webSocketDebuggerUrl") or "")
+        if ws_url:
+            session["browser_ws_url"] = ws_url
     if not ws_url:
         raise RuntimeError("Chromium browser DevTools websocket unavailable")
     ws = _open_devtools_websocket(ws_url, timeout=timeout)
-    try:
-        return _cdp_call(ws, method, params or {}, message_id=message_id, timeout=timeout)
-    finally:
+    channel = {
+        "ws": ws, "ws_url": ws_url, "lock": threading.RLock(),
+        "next_message_id": 2000, "closed": False, "calls": 0,
+        "created_at": time.monotonic(),
+    }
+    session["browser_cdp_channel"] = channel
+    return channel
+
+
+def _browser_cdp_call(session, method, params=None, *, message_id=None, timeout=5.0):
+    """Call browser-level CDP over a persistent low-latency socket.
+
+    One reconnect is allowed if Chromium replaces/closes the DevTools endpoint.
+    """
+    last_error = None
+    for attempt in range(2):
+        channel = _get_persistent_browser_cdp_channel(session, timeout=timeout)
         try:
-            ws.close()
-        except Exception:
-            pass
+            with channel["lock"]:
+                mid = int(message_id) if message_id is not None else int(channel.get("next_message_id", 2000))
+                if message_id is None:
+                    channel["next_message_id"] = mid + 1
+                result = _cdp_call(channel["ws"], method, params or {}, message_id=mid, timeout=timeout)
+                channel["calls"] = int(channel.get("calls", 0)) + 1
+                return result
+        except Exception as exc:
+            last_error = exc
+            _close_persistent_browser_cdp_channel(session)
+            if attempt == 0:
+                continue
+            raise
+    raise RuntimeError(f"Persistent browser CDP call failed: {method}") from last_error
 
 
 def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstrap: bool = False):
@@ -1485,21 +1801,19 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
                 _browser_cdp_call(
                     session, "Target.activateTarget", {"targetId": target_id}, message_id=102
                 )
-                # Navigate through the page websocket so the original app target
-                # remains the visible native surface.
-                page_ws = _open_devtools_websocket(bootstrap["webSocketDebuggerUrl"], timeout=5)
-                try:
-                    _cdp_call(page_ws, "Page.enable", message_id=1)
-                    if str(url or "about:blank") != str(bootstrap.get("url") or ""):
-                        _cdp_call(
-                            page_ws, "Page.navigate", {"url": str(url or "about:blank")},
-                            message_id=2, timeout=5.0,
-                        )
-                finally:
-                    try:
-                        page_ws.close()
-                    except Exception:
-                        pass
+                # v9.4: Chromium was launched directly at the requested app URL.
+                # Do not open a page websocket or send Page.enable when that target
+                # already has the destination; that was pure cold-start latency.
+                # Only navigate when the bootstrap URL genuinely differs.
+                if str(url or "about:blank") != str(bootstrap.get("url") or ""):
+                    _persistent_page_cdp_call(
+                        session, "Page.navigate", {"url": str(url or "about:blank")},
+                        target_id=target_id, timeout=5.0, purpose="control",
+                    )
+                    session["bootstrap_navigation_required"] = True
+                else:
+                    session["bootstrap_navigation_required"] = False
+                    session["bootstrap_socket_skipped"] = True
         except Exception as exc:
             session["native_app_target_reuse_error"] = str(exc)
             target_id = None
@@ -1528,13 +1842,18 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
         )
         session["native_app_target_reused"] = False
     session["target_id"] = target_id
-    # Every page target receives the browser-wide zoom bootstrap immediately,
-    # including 100%. Applying 100% matters too: it clears any stale per-page
-    # state and makes the invariant explicit that *all* web pages are governed
-    # by the same saved preference, regardless of host or subdomain.
+    # v9.4: 100% is Chromium's native zoom. Calling the extension for the
+    # default value on every newly claimed target adds synchronous CDP/extension
+    # work before first paint for no visual benefit. Non-default preferences are
+    # still applied immediately; 100% is verified asynchronously by the UI.
     try:
         inherited_zoom = int(session.get("default_page_zoom_percent", 100))
-        set_embedded_chromium_zoom(inherited_zoom, target_id=target_id, timeout=3)
+        if inherited_zoom != 100:
+            set_embedded_chromium_zoom(inherited_zoom, target_id=target_id, timeout=3)
+            session["target_zoom_bootstrap_applied"] = True
+        else:
+            session["target_zoom_bootstrap_applied"] = False
+            session["target_zoom_bootstrap_skipped_default"] = True
     except Exception:
         pass
     return target_id
@@ -1571,6 +1890,33 @@ def activate_embedded_chromium_target(target_id: str):
         except Exception:
             return False
     session["target_id"] = target_id
+    # v8.3: Target.activateTarget can complete before Windows/DWM has presented
+    # the new compositor frame. Give the already-existing native source a cheap
+    # repaint pulse without resizing/reparenting it. This keeps the v7.5 fast
+    # path cheap while avoiding the visible old-tab frame that could linger
+    # behind Tekzite's tab chrome.
+    if os.name == "nt" and session.get("presentation_mode") != "software":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = _typed_user32()
+            render = _as_hwnd(session.get("render_hwnd") or 0)
+            owner = _as_hwnd(session.get("embedded_hwnd") or 0)
+            RDW_INVALIDATE = 0x0001
+            RDW_ALLCHILDREN = 0x0080
+            RDW_UPDATENOW = 0x0100
+            flags = RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW
+            for hwnd in (render, owner):
+                if hwnd and user32.IsWindow(hwnd):
+                    user32.RedrawWindow(hwnd, None, None, flags)
+                    user32.UpdateWindow(hwnd)
+            try:
+                ctypes.windll.dwmapi.DwmFlush()
+                session["tab_switch_dwm_flush"] = True
+            except Exception:
+                session["tab_switch_dwm_flush"] = False
+        except Exception as exc:
+            session["tab_switch_present_error"] = str(exc)
     session["tab_switch_fast_path_count"] = int(session.get("tab_switch_fast_path_count", 0)) + 1
     return True
 
@@ -1924,10 +2270,9 @@ def _kick_cold_start_native_resize(session):
             max(1, width + int(crop_left) + int(crop_right) - 1),
             max(1, height + int(crop_top) + int(crop_bottom)), flags,
         )
-        try:
-            ctypes.windll.dwmapi.DwmFlush()
-        except Exception:
-            _time.sleep(0.02)
+        # v9.6: do not wait for a compositor tick between the 1px nudge and
+        # restore. The final flush below is sufficient and the readiness loop
+        # verifies the resulting RenderWidgetHost geometry.
         user32.SetWindowPos(
             _as_hwnd(owner), _as_hwnd(0), -int(crop_left), -int(crop_top),
             max(1, width + int(crop_left) + int(crop_right)),
@@ -1947,38 +2292,52 @@ def _kick_cold_start_native_resize(session):
         return False
 
 
-def _wait_for_attached_first_frame(session, timeout: float = 6.0):
-    """Verify a usable frame after the native HWND has been attached.
+def _wait_for_attached_first_frame(session, timeout: float = 2.0):
+    """Verify the first hidden native frame using the already-hot input lane.
 
-    Modern SPA pages can keep ``document.readyState`` at ``loading`` for a long
-    time even after Chromium already has a healthy visible compositor surface.
-    The off-screen pre-attach probe must therefore be advisory, not fatal. Once
-    the owner is embedded and visible, accept either a visually non-blank CDP
-    screenshot or meaningful page content regardless of readyState.
+    v9.3 removes another cold-start tax: the frame gate no longer creates a
+    temporary DevTools websocket or enables Page/Runtime domains just for
+    readiness probing.  It reuses Tekzite's persistent critical input channel,
+    which remains alive for the user's first click/keystroke.  PNG capture is a
+    late fallback only, so normal pages stay on the cheap DOM+native-geometry
+    path from navigation through reveal.
     """
     frame_generation = int(session.get("navigation_generation") or 0)
     session["attached_frame_generation"] = frame_generation
-    page = _pick_devtools_page(session["port"], session, target_id=session.get("target_id"))
-    ws = _open_devtools_websocket(page["webSocketDebuggerUrl"], timeout=5)
-    deadline = time.monotonic() + max(1.0, float(timeout))
-    msg = 80
+    target_id = str(session.get("target_id") or "")
+    deadline = time.monotonic() + max(0.25, float(timeout))
+    started = time.monotonic()
     last_ready = ""
     last_text = 0
     last_nodes = 0
+    attempts = 0
+    # Open the exact socket that will later carry real input.  This folds input
+    # prewarming into frame readiness instead of paying for a second handshake.
     try:
-        _cdp_call(ws, "Page.enable", message_id=msg); msg += 1
-        _cdp_call(ws, "Runtime.enable", message_id=msg); msg += 1
-        while time.monotonic() < deadline:
-            state = _cdp_call(
-                ws,
+        _get_persistent_page_cdp_channel(
+            session, target_id=target_id, timeout=min(0.8, max(0.2, float(timeout))),
+            purpose="input",
+        )
+        session["input_channel_warmed_target"] = target_id
+        session["input_channel_warmed_at"] = time.monotonic()
+    except Exception:
+        pass
+
+    while time.monotonic() < deadline:
+        attempts += 1
+        remaining = max(0.04, deadline - time.monotonic())
+        try:
+            state = _persistent_page_cdp_call(
+                session,
                 "Runtime.evaluate",
                 {
                     "expression": "({ready:document.readyState,text:(document.body&&document.body.innerText||'').trim().length,nodes:document.body?document.body.childElementCount:0,w:document.documentElement?document.documentElement.scrollWidth:0,h:document.documentElement?document.documentElement.scrollHeight:0})",
                     "returnByValue": True,
                 },
-                message_id=msg, timeout=2.0,
+                target_id=target_id,
+                timeout=min(0.30, max(0.04, remaining)),
+                purpose="input",
             )
-            msg += 1
             value = state.get("result", {}).get("value", {}) if isinstance(state, dict) else {}
             ready = str(value.get("ready") or "")
             text_len = int(value.get("text") or 0)
@@ -1987,30 +2346,7 @@ def _wait_for_attached_first_frame(session, timeout: float = 6.0):
             height = int(value.get("h") or 0)
             last_ready, last_text, last_nodes = ready, text_len, nodes
 
-            screenshot_chars = 0
-            metrics = {}
-            try:
-                shot = _cdp_call(
-                    ws, "Page.captureScreenshot",
-                    {"format":"png", "fromSurface":True, "captureBeyondViewport":False, "optimizeForSpeed":True},
-                    message_id=msg, timeout=1.5,
-                )
-                msg += 1
-                data = shot.get("data", "") if isinstance(shot, dict) else ""
-                if isinstance(data, str):
-                    screenshot_chars = len(data)
-                    metrics = _analyze_embedded_frame_png(data)
-            except Exception:
-                pass
-
-            screenshot_ready = screenshot_chars >= 128 and bool(metrics.get("visual"))
-            semantic_ready = text_len >= 8 and nodes >= 2 and width > 0 and height > 0
-
-            # v5.01: on the very first navigation, semantic DOM readiness alone
-            # is not enough. Chromium can expose a fully populated Startpage DOM
-            # while its native RWH is still stuck at the launch viewport. A reload
-            # then fixes it, which is a strong sign that the missing piece is the
-            # first native resize/layout cycle rather than network or JS loading.
+            elapsed = time.monotonic() - started
             cold_start = frame_generation <= 1
             expected_size = session.get("embedded_size") or session.get("embedded_parent_client_size") or (0, 0)
             expected_w, expected_h = int(expected_size[0] or 0), int(expected_size[1] or 0)
@@ -2019,24 +2355,47 @@ def _wait_for_attached_first_frame(session, timeout: float = 6.0):
             if live_size and expected_w > 0 and expected_h > 0:
                 rw, rh = live_size
                 geometry_ready = (rw >= int(expected_w * 0.94) and rh >= int(expected_h * 0.94))
-            session["cold_start_geometry_wait"] = bool(cold_start and not screenshot_ready and not geometry_ready)
-            session["cold_start_render_size"] = live_size
-            session["cold_start_expected_size"] = (expected_w, expected_h)
-            if cold_start and not screenshot_ready:
+
+            semantic_ready = text_len >= 8 and nodes >= 2 and width > 0 and height > 0
+            if cold_start:
                 semantic_ready = semantic_ready and geometry_ready
-                if not geometry_ready and not session.get("cold_start_resize_kick_attempted"):
+                if (not geometry_ready and elapsed >= 0.030
+                        and not session.get("cold_start_resize_kick_attempted")):
                     _kick_cold_start_native_resize(session)
 
+            session["cold_start_geometry_wait"] = bool(cold_start and not geometry_ready)
+            session["cold_start_render_size"] = live_size
+            session["cold_start_expected_size"] = (expected_w, expected_h)
             session["attached_frame_ready_state"] = ready
             session["attached_frame_text_len"] = text_len
             session["attached_frame_nodes"] = nodes
+
+            screenshot_chars = 0
+            metrics = {}
+            screenshot_ready = False
+            # v9.3: screenshot encoding is expensive. Give semantic/geometry
+            # readiness a short head start and only use the visual fallback for
+            # sparse/non-text pages or when the normal proof is genuinely late.
+            if not semantic_ready and (elapsed >= 0.10 or remaining <= 0.18):
+                try:
+                    shot = _persistent_page_cdp_call(
+                        session, "Page.captureScreenshot",
+                        {"format":"png", "fromSurface":True, "captureBeyondViewport":False, "optimizeForSpeed":True},
+                        target_id=target_id,
+                        timeout=min(0.40, max(0.04, remaining)),
+                        purpose="input",
+                    )
+                    data = shot.get("data", "") if isinstance(shot, dict) else ""
+                    if isinstance(data, str):
+                        screenshot_chars = len(data)
+                        metrics = _analyze_embedded_frame_png(data)
+                        screenshot_ready = screenshot_chars >= 128 and bool(metrics.get("visual"))
+                except Exception:
+                    pass
+
             session["attached_frame_png_chars"] = screenshot_chars
             session["attached_frame_visual"] = bool(metrics.get("visual"))
             if screenshot_ready or semantic_ready:
-                # Only commit evidence that belongs to the navigation we started
-                # probing. A SPA/client redirect can begin a new navigation while
-                # this loop is still alive; without a generation guard the old
-                # frame could incorrectly mark the new document as ready.
                 if int(session.get("navigation_generation") or 0) != frame_generation:
                     session["attached_frame_stale_generation"] = True
                     return False
@@ -2047,77 +2406,89 @@ def _wait_for_attached_first_frame(session, timeout: float = 6.0):
                 session["first_frame_text_len"] = text_len
                 session["first_frame_nodes"] = nodes
                 session["first_frame_png_chars"] = screenshot_chars
-                session["first_frame_probe"] = "attached-visual-screenshot" if screenshot_ready else "attached-semantic-dom"
+                session["first_frame_probe"] = "attached-semantic-geometry" if semantic_ready else "attached-visual-screenshot"
                 session["attached_frame_timeout"] = False
                 session["attached_frame_stale_generation"] = False
+                session["attached_frame_attempts"] = attempts
                 return True
+        except Exception as exc:
+            session["attached_frame_last_error"] = type(exc).__name__
 
-            # The visible native surface may need one Windows repaint cycle
-            # after SetParent before DComp submits pixels.
-            try:
-                _show_embedded_render_host(
-                    session,
-                    int((session.get("embedded_size") or (1,1))[0]),
-                    int((session.get("embedded_size") or (1,1))[1]),
-                )
-                import ctypes
-                ctypes.windll.dwmapi.DwmFlush()
-            except Exception:
-                pass
-            time.sleep(0.12)
-    finally:
+        # Do not DwmFlush inside the polling loop: DwmFlush deliberately waits
+        # for compositor cadence and can add a whole refresh interval per miss.
         try:
-            ws.close()
+            _show_embedded_render_host(
+                session,
+                int((session.get("embedded_size") or (1,1))[0]),
+                int((session.get("embedded_size") or (1,1))[1]),
+            )
         except Exception:
             pass
+        time.sleep(0.006)
+
     session["attached_frame_timeout"] = True
     session["attached_frame_ready_state"] = last_ready
     session["attached_frame_text_len"] = last_text
     session["attached_frame_nodes"] = last_nodes
-    # Do not fail navigation here. Chromium's native surface is already attached
-    # and may continue loading asynchronously; a hard timeout would tear down a
-    # healthy SPA just because readyState remained 'loading'.
+    session["attached_frame_attempts"] = attempts
     return False
 
 def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame: bool = False, target_id: str = None, create_new_target: bool = False):
-    """Navigate the persistent Chromium helper and return its session.
+    """Navigate Chromium with a persistent hot-path control channel.
 
-    With ``wait_for_first_frame`` the helper remains off-screen until CDP has
-    observed a real rendered frame.  That mode is used by Tekzite's embedded
-    surface to avoid exposing a dead gray host while Chromium is still
-    initializing its compositor.
+    v9.4 avoids /json/list, a fresh page WebSocket handshake and Page.enable on
+    ordinary navigation when Tekzite already knows the target id.  Cold/bootstrap
+    discovery still uses the target list once, while steady-state Page.navigate
+    becomes one command on the tab's persistent control socket.
     """
     session = _start_persistent_chromium_session(timeout=min(timeout, 12))
     if create_new_target:
         target_id = create_embedded_chromium_target("about:blank")
-    page = _pick_devtools_page(session["port"], session, target_id=target_id)
-    if target_id:
-        activate_embedded_chromium_target(target_id)
-    ws = _open_devtools_websocket(page["webSocketDebuggerUrl"], timeout=5)
+
+    known_target = str(target_id or "")
     direct_app_target = bool(
-        session.get("native_direct_app_launch")
+        known_target
+        and session.get("native_direct_app_launch")
         and session.get("native_direct_app_target_match")
-        and page.get("id") == session.get("native_app_target_id")
-        and str(page.get("url") or "").lower() not in {"about:blank", "chrome://newtab/"}
+        and known_target == str(session.get("native_app_target_id") or "")
+        and str(session.get("native_direct_app_url") or "").lower() == str(url or "").lower()
     )
-    try:
-        _cdp_call(ws, "Page.enable", message_id=1)
+
+    if known_target:
+        # Target.activateTarget is browser-level and now also rides a persistent
+        # socket.  Do it only when switching the browser's current target.
+        if str(session.get("target_id") or "") != known_target:
+            activate_embedded_chromium_target(known_target)
         if direct_app_target:
             session["native_direct_app_navigation_skipped"] = True
         else:
-            _cdp_call(ws, "Page.navigate", {"url": str(url)}, message_id=2)
+            _persistent_page_cdp_call(
+                session, "Page.navigate", {"url": str(url)},
+                target_id=known_target, timeout=min(5.0, float(timeout)), purpose="control",
+            )
             session["native_direct_app_navigation_skipped"] = False
-    finally:
-        try:
-            ws.close()
-        except Exception:
-            pass
-    session["target_id"] = page.get("id")
+        resolved_target = known_target
+    else:
+        # Bootstrap discovery is necessarily one-time target enumeration.
+        page = _pick_devtools_page(session["port"], session, target_id=None)
+        resolved_target = str(page.get("id") or "")
+        direct_app_target = bool(
+            session.get("native_direct_app_launch")
+            and session.get("native_direct_app_target_match")
+            and resolved_target == str(session.get("native_app_target_id") or "")
+            and str(page.get("url") or "").lower() not in {"about:blank", "chrome://newtab/"}
+        )
+        if direct_app_target:
+            session["native_direct_app_navigation_skipped"] = True
+        else:
+            _persistent_page_cdp_call(
+                session, "Page.navigate", {"url": str(url)},
+                target_id=resolved_target, timeout=min(5.0, float(timeout)), purpose="control",
+            )
+            session["native_direct_app_navigation_skipped"] = False
+
+    session["target_id"] = resolved_target
     session["last_url"] = str(url)
-    # v4.98: frame-readiness diagnostics belong to one navigation only.
-    # Increment the generation and erase attached-frame evidence from the
-    # previous document so debug/recovery code cannot combine old visual proof
-    # with a newly reset first_frame_ready flag.
     session["navigation_generation"] = int(session.get("navigation_generation") or 0) + 1
     session["first_frame_ready"] = False
     session["first_frame_committed"] = False
@@ -2130,6 +2501,7 @@ def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame
     session["attached_frame_visual"] = False
     session["attached_frame_timeout"] = None
     session["attached_frame_stale_generation"] = False
+    session["hot_navigation_persistent_control"] = bool(known_target)
     if wait_for_first_frame:
         _wait_for_embedded_first_frame(
             session, timeout=max(4.0, min(float(timeout), 15.0)), soft_timeout=True
@@ -2188,12 +2560,13 @@ def _windows_descendant_pids(root_pid):
 
 
 def _find_chromium_window(session, timeout=8.0):
-    """Find the *main* Chromium top-level HWND for this Tekzite session.
+    """Find Chromium's main top-level HWND with a cheap-first startup path.
 
-    Chromium creates several top-level Chrome_WidgetWin* utility windows.
-    Selecting the first one is unstable and can return a tiny/hidden helper
-    instead of the real page window. Prefer a parentless Chrome_WidgetWin_1
-    with a substantial client rectangle, then fall back by area.
+    v9.6 avoids rebuilding the full descendant process tree every 10 ms. Most
+    Chromium app windows belong to the launched browser PID, so each poll first
+    does only EnumWindows against that PID. Descendants are refreshed at a much
+    lower cadence and are used only as a fallback for launcher/process layouts
+    where the real app window lives below the original browser process.
     """
     if os.name != "nt":
         raise RuntimeError("Native Chromium embedding is currently Windows-only")
@@ -2206,8 +2579,11 @@ def _find_chromium_window(session, timeout=8.0):
 
     user32 = ctypes.windll.user32
     deadline = time.monotonic() + float(timeout)
-    while time.monotonic() < deadline:
-        pids = _windows_descendant_pids(process.pid)
+    root_pid = int(process.pid)
+    descendant_pids = {root_pid}
+    next_descendant_refresh = 0.0
+
+    def collect(allowed_pids):
         found = []
         WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -2215,7 +2591,7 @@ def _find_chromium_window(session, timeout=8.0):
         def enum_proc(hwnd, lparam):
             pid = wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if int(pid.value) not in pids or not user32.IsWindow(hwnd):
+            if int(pid.value) not in allowed_pids or not user32.IsWindow(hwnd):
                 return True
             cls = ctypes.create_unicode_buffer(256)
             user32.GetClassNameW(hwnd, cls, len(cls))
@@ -2232,11 +2608,6 @@ def _find_chromium_window(session, timeout=8.0):
                 left = top = 0
                 width = height = area = 0
             parent = user32.GetParent(hwnd)
-            # v4.23: identify the window Tekzite itself launched, rather than
-            # letting an unrelated large Chrome_WidgetWin_0 win by raw area.
-            # The helper is intentionally created as an 800x600 app window at
-            # (-32000,-32000). That launch fingerprint is far stronger than
-            # size alone and remained stable in the user's v4.22 diagnostics.
             launch_position_match = left <= -30000 and top <= -30000
             launch_size_match = 600 <= width <= 1200 and 400 <= height <= 900
             score = area
@@ -2254,6 +2625,22 @@ def _find_chromium_window(session, timeout=8.0):
             return True
 
         user32.EnumWindows(enum_proc, 0)
+        return found
+
+    while time.monotonic() < deadline:
+        # Cheap common case: the app window belongs directly to the process
+        # Tekzite launched. No process snapshot is needed here.
+        found = collect({root_pid})
+        now = time.monotonic()
+        if not found:
+            if now >= next_descendant_refresh:
+                try:
+                    descendant_pids = _windows_descendant_pids(root_pid) or {root_pid}
+                except Exception:
+                    descendant_pids = {root_pid}
+                next_descendant_refresh = now + 0.05
+            if len(descendant_pids) > 1:
+                found = collect(descendant_pids)
         if found:
             found.sort(reverse=True)
             selected = found[0]
@@ -2265,9 +2652,8 @@ def _find_chromium_window(session, timeout=8.0):
             session["main_class"] = selected[7]
             session["main_launch_fingerprint"] = bool(selected[4] <= -30000 and selected[5] <= -30000)
             return selected[6]
-        time.sleep(0.10)
+        time.sleep(0.005)
     raise RuntimeError("Could not find Chromium window for embedding")
-
 
 def _hide_chromium_session_window(session):
     """Hide the non-headless compatibility engine's native Windows surface.
@@ -3489,7 +3875,23 @@ def _park_chromium_top_level_presenters(session, source_hwnd=0, passes=1, settle
                 # v7.8: auxiliary presenter windows are not DWM sources and do
                 # not need to stay mapped. Hide them after parking so neither a
                 # black helper square nor Chromium chrome can leak behind Tekzite.
-                if hwnd_i != source_hwnd:
+                # v9.9: never hide a top-level Chrome_WidgetWin_1 presenter.
+                # Chromium can replace/recreate its live app presenter during the
+                # first few compositor frames. The asynchronous late-presenter
+                # cleanup used to protect only the source HWND captured when the
+                # worker started; a replacement live presenter could therefore be
+                # mistaken for an auxiliary window and hidden, leaving DWM mirroring
+                # a stale/black source. Keep all plausible live app presenters mapped
+                # off-screen and hide only auxiliary presenter classes. Also protect
+                # every source handle currently known by the shared session.
+                protected_sources = {
+                    _hwnd_int(source_hwnd or 0),
+                    _hwnd_int(session.get("dwm_thumbnail_source") or 0),
+                    _hwnd_int(session.get("dwm_source_hwnd") or 0),
+                    _hwnd_int(session.get("embedded_hwnd") or 0),
+                }
+                is_live_presenter_class = (cls.value == "Chrome_WidgetWin_1")
+                if hwnd_i not in protected_sources and not is_live_presenter_class:
                     user32.ShowWindow(hwnd, 0)  # SW_HIDE
                 row = {
                     "hwnd": hwnd_i, "class": cls.value, "pid": int(pid.value),
@@ -3732,7 +4134,8 @@ def _position_native_chromium_overlay(session, width: int, height: int):
                 ctypes.windll.dwmapi.DwmFlush()
             except Exception:
                 pass
-            time.sleep(0.012)
+            # v9.6: DwmFlush already waits for the compositor to consume the
+            # resize; an additional fixed 12 ms sleep only delays first reveal.
 
         resized_rect = wintypes.RECT()
         resized_client = wintypes.RECT()
@@ -3815,7 +4218,8 @@ def _position_native_chromium_overlay(session, width: int, height: int):
                 ctypes.windll.dwmapi.DwmFlush()
             except Exception:
                 pass
-            time.sleep(0.012)
+            # v9.6: DwmFlush already synchronizes the resize with the compositor.
+            # Sleeping another 12 ms here was a fixed cold-start tax.
             if user32.GetWindowRect(_as_hwnd(source), ctypes.byref(resized_rect)):
                 src_w = max(1, int(resized_rect.right - resized_rect.left))
                 src_h = max(1, int(resized_rect.bottom - resized_rect.top))
@@ -3911,10 +4315,15 @@ def _position_native_chromium_overlay(session, width: int, height: int):
         if hr != 0:
             raise RuntimeError(f"DwmUpdateThumbnailProperties failed HRESULT=0x{hr & 0xffffffff:08X}")
         dwmapi.DwmFlush()
-        # Chromium can materialize an auxiliary top-level presenter shortly
-        # after its first committed frame. Re-scan a few times so a late
-        # Chrome_WidgetWin_0 never leaks onto the desktop.
-        _park_chromium_top_level_presenters(session, source, passes=3, settle_delay=0.04)
+        # v9.6: do not hold first reveal behind three 40 ms presenter-settle
+        # passes. An immediate presenter pass already ran above. Late auxiliary
+        # Chromium windows are maintenance work and can be parked asynchronously.
+        def _park_late_presenters():
+            try:
+                _park_chromium_top_level_presenters(session, source, passes=3, settle_delay=0.04)
+            except Exception:
+                pass
+        threading.Thread(target=_park_late_presenters, name="tekzite-dwm-presenter-park", daemon=True).start()
 
         session["native_embed_mode"] = "dwm-thumbnail"
         session["native_setparent_used"] = False
@@ -4131,7 +4540,7 @@ def _initial_chromium_launch_geometry(parent_hwnd: int, width: int, height: int)
         return None
 
 def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, target_id: str = None, create_new_target: bool = False, attach_native: bool = True, preferred_zoom_percent: int = 100):
-    """Load off-screen, wait for a real frame, then embed the painted window.
+    """Load Chromium, using a strict cold-start gate and a fast hot-navigation path.
 
     v4.40 optionally binds the navigation to a dedicated Chromium target so
     each Tekzite tab can retain a live JS/media page without reloading it.
@@ -4142,11 +4551,25 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
     so it is safe to navigate there first, verify a paintable frame via CDP,
     and only then re-parent it into Tekzite.
     """
+    # v9.1: distinguish cold bootstrap from steady-state navigation. Once the
+    # native Chromium surface is already attached, a normal navigation must not
+    # pay the first-start frame/input/reattach ceremony again. Page.navigate can
+    # return as soon as Chromium accepts the navigation and the live DWM surface
+    # will paint progressively, which materially improves perceived load time.
+    session_was_running = _EDGE_SESSION is not None
     launch_geometry = _initial_chromium_launch_geometry(parent_hwnd, width, height) if attach_native else None
-    first_native_bootstrap = bool(attach_native and not target_id and not create_new_target and _EDGE_SESSION is None)
+    first_native_bootstrap = bool(attach_native and not target_id and not create_new_target and not session_was_running)
     direct_launch_url = str(url or "about:blank") if first_native_bootstrap else None
     session = _start_persistent_chromium_session(
         launch_geometry=launch_geometry, launch_url=direct_launch_url
+    )
+    hot_native_navigation = bool(
+        attach_native
+        and session_was_running
+        and target_id
+        and not create_new_target
+        and session.get("embedded_parent")
+        and session.get("presentation_mode") == "native"
     )
     # v6.3: Preferences owns page zoom browser-wide. Seed the persistent
     # Chromium session *before* a target is created/claimed so every new tab
@@ -4180,21 +4603,40 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
     # ``loading``.
     session["preferences_zoom_pre_navigation_applied"] = False
 
+    # v9.2: native Chromium stays hidden behind the DWM destination while it
+    # boots, so a separate *pre-attach* first-frame proof only duplicates work.
+    # Attach immediately after Page.navigate and use the single attached-frame
+    # gate below. Software presentation still needs the off-screen proof.
     session = navigate_embedded_chromium(
-        url, wait_for_first_frame=True, target_id=target_id,
-        create_new_target=create_new_target,
+        url, wait_for_first_frame=bool((not attach_native) and (not hot_native_navigation)),
+        target_id=target_id, create_new_target=create_new_target,
     )
-    # Try once after navigation. If the document is still ``loading`` the zoom
-    # helper intentionally defers; the UI-side retry window will apply the saved
-    # preference once the document reaches interactive/complete.
-    try:
-        set_embedded_chromium_zoom(
-            preferred_zoom_percent, target_id=session.get("target_id"), timeout=3
-        )
-        session["preferences_zoom_post_navigation_applied"] = True
-    except Exception:
+    # v9.1 hot navigation: do not synchronously invoke the zoom extension while
+    # the destination document is just starting. The UI already schedules zoom
+    # verification asynchronously; keeping it out of this worker lets the DWM
+    # surface start painting immediately after Page.navigate is accepted.
+    if hot_native_navigation or (attach_native and preferred_zoom_percent == 100):
+        # v9.2: 100% is Chromium's native default, so synchronously invoking the
+        # zoom extension during cold startup is pure latency. Non-default zoom
+        # still applies before reveal; hot navigation remains asynchronous.
         session["preferences_zoom_post_navigation_applied"] = False
+        session["hot_navigation_fast_path"] = bool(hot_native_navigation)
+    else:
+        try:
+            set_embedded_chromium_zoom(
+                preferred_zoom_percent, target_id=session.get("target_id"), timeout=3
+            )
+            session["preferences_zoom_post_navigation_applied"] = True
+        except Exception:
+            session["preferences_zoom_post_navigation_applied"] = False
     if attach_native:
+        if hot_native_navigation:
+            # The source is already attached and the latency-sensitive CDP lanes
+            # are already hot. Reattaching/waiting here only delays navigation.
+            session["presentation_mode"] = "native"
+            session["embedded_after_first_frame"] = True
+            session["hot_navigation_reused_native_surface"] = True
+            return session
         session["presentation_mode"] = "native"
         # A tab that previously used the CDP software surface may still have a
         # device-metrics override installed. Clear it before native embedding so
@@ -4205,11 +4647,32 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
             pass
         attach_embedded_chromium(parent_hwnd, width, height)
         session["embedded_after_first_frame"] = True
-        attached_ready = _wait_for_attached_first_frame(session, timeout=6.0)
+        attached_ready = _wait_for_attached_first_frame(session, timeout=2.0)
         if attached_ready:
             session["first_frame_ready"] = True
             session["first_frame_committed"] = True
             session["first_frame_generation"] = int(session.get("navigation_generation") or 0)
+        # v8.8: warm every latency-sensitive CDP lane while the page is hidden,
+        # then prove the *critical input lane* with a real renderer round-trip.
+        # A DWM frame can be paintable a few milliseconds before CDP Input is
+        # consumable; revealing in that gap creates the "I can see Startpage but
+        # my first click does nothing" feeling.  The harmless mouseMoved probe
+        # makes first visible frame == first interactive frame.
+        # v9.2: only the critical input lane belongs on the reveal path. Scroll
+        # and hover sockets are useful, but opening them serially delays the
+        # first visible frame. Warm those in the background from the UI after
+        # reveal while click/typing readiness remains guaranteed here.
+        # v9.3: the frame gate itself opens and retains the critical input lane.
+        _wait_for_embedded_chromium_input_ready(
+            session, session.get("target_id"), timeout=1.2
+        )
+        # v9.0: make the first visible page immediately typeable as well as
+        # clickable. Focus the page's natural search/text control while the
+        # DWM source is still hidden, using the already-warmed critical lane.
+        if first_native_bootstrap:
+            _focus_embedded_chromium_startup_input(
+                session, session.get("target_id"), timeout=0.8
+            )
     else:
         session["presentation_mode"] = "software"
         session["embedded_after_first_frame"] = False
@@ -5225,7 +5688,8 @@ def dispatch_embedded_chromium_mouse(event_type: str, x: float, y: float, *,
                                      button: str = "none", buttons: int = None,
                                      delta_x: float = 0.0, delta_y: float = 0.0,
                                      click_count: int = 1,
-                                     target_id: str = None, timeout: int = 3):
+                                     target_id: str = None, timeout: int = 3,
+                                     purpose: str = "input"):
     """Forward pointer/wheel input over the tab's persistent CDP channel."""
     session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
@@ -5239,7 +5703,7 @@ def dispatch_embedded_chromium_mouse(event_type: str, x: float, y: float, *,
             params["buttons"] = int(buttons)
     _persistent_page_cdp_call(
         session, "Input.dispatchMouseEvent", params,
-        target_id=target_id, timeout=timeout, purpose="input",
+        target_id=target_id, timeout=timeout, purpose=str(purpose or "input"),
     )
     return True
 
@@ -5269,7 +5733,7 @@ def get_embedded_chromium_cursor(x: float, y: float, *, target_id: str = None, t
     result = _persistent_page_cdp_call(
         session, "Runtime.evaluate",
         {"expression": expr, "returnByValue": True},
-        target_id=target_id, timeout=timeout, purpose="input",
+        target_id=target_id, timeout=timeout, purpose="cursor",
     )
     value = (((result or {}).get("result") or {}).get("value"))
     return str(value or "auto")
@@ -5575,6 +6039,7 @@ def close_embedded_chromium(clear_profile=False):
             except Exception:
                 pass
         _close_persistent_page_cdp_channels(session)
+        _close_persistent_browser_cdp_channel(session)
         process = session.get("process")
         if process is not None and process.poll() is None:
             _terminate_helper_process_tree(process)
