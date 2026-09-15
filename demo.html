@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+<style>
+body { margin:0; font-family:Arial; background:#eef2f6; }
+header { background:#1d2632; color:white; padding:20px; }
+main { padding:20px; }
+.card { background:white; padding:18px; margin-bottom:16px; border:1px solid #ccd2d9; border-radius:10px; }
+iframe, video, canvas { width:100%; }
+</style>
+</head>
+<body>
+<header>
+    <h1>Tekzite Browser v0.9</h1>
+    <p>Events, async resources, embedded content, and stronger TinyJS.</p>
+</header>
+<main>
+    <div class="card">
+        <h2 id="title">TinyJS event demo</h2>
+        <a id="event-link" href="https://example.com">Click me</a>
+    </div>
+    <div class="card">
+        <h2>iframe</h2>
+        <iframe src="https://example.com" width="700" height="180"></iframe>
+    </div>
+    <div class="card">
+        <h2>video placeholder</h2>
+        <video src="movie.mp4" width="640" height="240"></video>
+    </div>
+    <div class="card">
+        <h2>canvas surface</h2>
+        <canvas width="600" height="140"></canvas>
+    </div>
+</main>
+<script>
+const title = document.getElementById("title");
+const link = document.getElementById("event-link");
+link.addEventListener("click", () => { title.textContent = "The DOM click event fired"; });
+</script>
+</body>
+</html>

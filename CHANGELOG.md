@@ -1,0 +1,369 @@
+# Changelog
+
+## v8.2 — GitHub-ready repository
+
+- Reworked the root README into contributor-friendly setup and architecture documentation.
+- Added GitHub Actions CI, issue templates and a pull-request template.
+- Added CONTRIBUTING, SECURITY, repository ignore/line-ending/editor configuration and release documentation.
+- Added a current-architecture test suite while preserving historical version-specific tests under `tests/legacy/`.
+- Added `tools/doctor.py`, Windows launch helpers and deterministic build dependencies for the optional network helper executable.
+- Browser runtime behavior remains based on v8.1.
+
+Historical release notes preserved from the pre-GitHub Tekzite Browser builds.
+
+## v8.1 — Smooth UI animations
+
+- Lightweight eased hover transitions for tabs, toolbar buttons, the + tab button, and close buttons.
+- Animated address-bar focus colors.
+- Find in Page now slides open and closed instead of snapping.
+- Preferences fades in after it has been measured and centered.
+- Loading tabs use a lightweight animated spinner without touching Chromium/DWM.
+- Animations are coalesced/cancelled per widget option so rapid mouse movement cannot build a Tk `after()` backlog.
+- Chromium rendering, DWM presentation, native zoom, input mapping, networking, and fast tab switching are unchanged.
+
+# Tekzite Browser v8.1 — Browser UX
+
+v8.0 is the first dedicated browser-UX release on top of the Chromium/DWM architecture.
+
+- Live Chromium page titles in the tab strip.
+- Favicons are fetched from inside Chromium and displayed per tab.
+- Per-tab loading indicator.
+- Middle-click a tab to close it.
+- Ctrl+Shift+T reopens the most recently closed tab.
+- Ctrl+F opens Tekzite Find in Page, with Enter/Shift+Enter for next/previous.
+- Ctrl+Tab / Ctrl+Shift+Tab cycles tabs; Ctrl+1..9 jumps directly.
+- Address-bar context menu now includes Paste and Go; Ctrl+Shift+V does the same while the omnibox is focused.
+- Existing v7.5 fast native tab switching remains intact.
+
+# Tekzite Browser v7.9
+
+## UI polish
+
+- Refined OLED-first browser chrome with clearer active, hover, and muted states.
+- Active tabs now use a thin accent indicator instead of a bright boxed border.
+- Inactive tabs are quieter and gain contrast only on hover.
+- Tab close controls stay understated until interaction and use a clear danger hover state.
+- More compact 58 px toolbar and tighter navigation/address-bar spacing.
+- Smaller, quieter new-tab control and softer chrome separators.
+- No Chromium/DWM, zoom, input, network, or rendering architecture changes in this release.
+
+# Tekzite Browser v7.8
+
+- Chromium background window is now born off-screen and remains off-screen.
+- DWM source is parked before it is mapped, preventing Chromium window flashes behind Tekzite.
+- Auxiliary Chrome presenter windows are hidden after parking.
+- DWM continues to mirror the live Chromium source at 1:1.
+
+# Tekzite Browser v7.7
+
+## Text selection over DWM
+
+- Added full left-button drag forwarding from Tekzite's DWM input plane to Chromium.
+- Text on webpages and text inside inputs can now be selected by click-dragging.
+- Drag coordinates use the existing native Chromium zoom-aware mapping from v7.2.
+- The explicit click-focus bridge is skipped after a real drag so it cannot collapse the selection.
+- CDP mouse dispatch now carries Chromium's `buttons` bitfield during press/drag/release.
+
+# Tekzite Browser v7.6
+
+## Built-in Tekzite Adblock
+
+- Built-in ad blocker is enabled by default.
+- Blocks dedicated advertising hosts in Tekzite's loopback proxy before DNS/upstream connection.
+- HTTPS remains end-to-end; Tekzite does not decrypt or rewrite page traffic.
+- Conservative rules cover major ad-serving networks such as DoubleClick, Google ad serving, Xandr/AppNexus, Criteo, Taboola, Outbrain, PubMatic and OpenX.
+- Normal YouTube, Google, Microsoft and Startpage hosts are not blanket-blocked.
+- Preferences includes **Block ads with Tekzite Adblock**. Restart Tekzite after changing it because the network helper is started per browser session.
+- Existing browser/vendor telemetry blocking remains independent of ad blocking.
+
+# Tekzite Browser v7.5
+
+## Faster tab switching
+- Existing native Chromium tabs now use a DWM hot-switch path.
+- The live DWM host stays visible and keeps its current geometry during normal tab switches.
+- No repeated host hide/show, `update_idletasks()`, Chromium viewport resize, or full geometry rebuild when the viewport is unchanged.
+- `Target.activateTarget` now uses the persistent browser CDP connection first; `/json/list` is only a fallback if activation fails.
+- Native zoom verification for the newly selected tab is deferred until after the visual switch instead of synchronously re-applying zoom to every open tab.
+- Full Debug includes `tab_switch_fast_path_count`.
+
+# Tekzite Browser v7.4
+
+- Removed the Microsoft/telemetry explanatory sentence from Preferences.
+- Microsoft website access and the existing telemetry protection remain unchanged.
+- All v7.3 typography and Chromium/DWM behavior is preserved.
+
+# Tekzite Browser v7.3
+
+## Typography pass
+
+- Keeps Chromium on its native Windows LCD/subpixel text path. Tekzite removes any accidental `--disable-lcd-text`, `--disable-font-subpixel-positioning`, or `--disable-directwrite-for-ui` launch switches before Chromium starts.
+- Does not inject global CSS font smoothing or replace website fonts, so page layout, metrics, popovers, and SPA behavior remain Chromium-native.
+- DWM remains a 1:1 presentation surface, avoiding resampling blur.
+- Tekzite chrome now prefers `Segoe UI Variable Text` and `Segoe UI Variable Display` when Windows provides them, with `Segoe UI` fallback.
+- Full Debug reports the active typography safeguards.
+
+# Tekzite Browser v7.2
+
+- Fixes DWM pointer hit-testing after native Chromium browser zoom.
+- Converts visible DWM physical-pixel coordinates to Chromium CSS viewport coordinates using the verified native zoom factor.
+- The correction is centralized in the shared input transform, so click, focus, hover, cursor probing, context menus and wheel position stay aligned at 125%, 150%, 175%, 200%, etc.
+- Falls back to 1:1 input coordinates unless the native zoom extension has actually been verified active.
+- Adds `dwm_input_zoom_factor` and `dwm_input_zoom_active` to Full Debug.
+
+# Tekzite Browser v7.1
+
+- Fixes native Chromium zoom not visibly scaling pages.
+- Uses `chrome.tabs.setZoomSettings(..., {mode: "automatic", scope: "per-tab"})` before `chrome.tabs.setZoom()`.
+- The zoom bridge now verifies every eligible tab with `chrome.tabs.getZoom()` after applying the Preferences value.
+- Keeps the v7.0 native Chromium zoom watchdog and DWM 1:1 presentation.
+
+# v7.0 - Native Chromium zoom
+
+- Replaces CSS `documentElement.style.zoom` with Chromium's real `chrome.tabs.setZoom()` API.
+- Bundles a local-only Manifest V3 Tekzite Native Zoom Bridge extension.
+- Uses `chrome.tabs.onZoomChange` to restore the Preferences zoom immediately if it changes.
+- Reapplies zoom on tab creation, navigation/update and activation.
+- Keeps DWM at a strict 1:1 presentation scale.
+- Fixes fixed/popover UI such as YouTube's profile menu being clipped by CSS-root zoom.
+- No page DOM mutation is used for zoom.
+
+# Tekzite Browser v6.9
+
+- Microsoft websites are no longer globally blocked by Tekzite Network.
+- Microsoft pages, Microsoft account login, Outlook, Office, OneDrive, Bing, Azure-backed page assets and related Microsoft web/CDN traffic can pass normally.
+- The narrow browser/vendor telemetry deny-list remains active, including explicit `*.events.data.microsoft.com` and `*.telemetry.microsoft.com` endpoints.
+- Tekzite still uses its dedicated Chromium backend; allowing Microsoft websites does not switch the browser engine to Microsoft Edge.
+
+# v6.8 - Preferences visibility + webpage cursor sync
+
+- Preferences is built hidden, measured, centered on the active monitor, then explicitly shown/focused with safe fallback geometry.
+- DWM webpage input now mirrors the effective CSS cursor under the pointer via a coalesced CDP probe.
+- Links/buttons show a hand cursor, editable text shows a text cursor, resize/move/crosshair/wait styles are mapped to native Tk/Windows cursors where available.
+- Cursor probing is single-flight and piggybacks on the existing coalesced hover path to avoid flooding CDP.
+
+# v6.8 - Preferences visibility fail-safe
+
+- Preferences is built while withdrawn instead of starting as a 1-pixel window.
+- Natural content size is measured before the dialog becomes visible.
+- The dialog is centered on Tekzite's current monitor work area.
+- If Win32 monitor detection fails, a safe Tk screen fallback is used.
+- Preferences is explicitly deiconified, raised, grabbed and focused after final geometry is set.
+- Keeps v6.7 zoom watchdog behavior.
+
+# v6.7 - Zoom watchdog + monitor-centered Preferences
+
+- Actively monitors every live Chromium tab's effective page zoom every 1.5 seconds.
+- Reapplies the authoritative Preferences zoom only when a settled page has changed/reset it.
+- Does not mutate pages while `document.readyState` is still `loading`.
+- Preferences opens centered on the monitor containing the Tekzite browser window.
+- Preferences height follows its actual content height, capped only if the monitor cannot contain it.
+- Keeps v6.6 buffered CONNECT relay and v6.5 post-load zoom behavior.
+
+# v6.6 - buffered Chromium CONNECT tunnels
+
+- Fixes a transport bug in Tekzite Network that could stall heavy HTTP/2 sites such as YouTube on skeleton placeholders.
+- Replaces non-blocking `sendall()` with a select-driven buffered relay that handles temporary socket backpressure instead of dropping the CONNECT tunnel.
+- Preserves half-close semantics and limits queued bytes per direction.
+- Keeps v6.5 post-load Preferences zoom, Chromium-only rendering, and DWM presentation unchanged.
+
+# v6.5 - YouTube-safe post-load zoom
+
+- Removes all pre-navigation/document-start zoom mutation.
+- Never touches documentElement while document.readyState is `loading`.
+- Applies the saved Preferences zoom only after the document becomes interactive/complete.
+- Keeps retry checks after navigation so every page still receives the saved zoom once safe.
+- Retains Chromium-only architecture and DWM 1:1 presentation.
+
+# v6.4 - SPA-safe universal zoom
+
+- Keeps Preferences zoom universal across all Chromium pages.
+- Applies CSS zoom once per document instead of continuously observing/re-writing SPA DOM trees.
+- Removes YouTube-specific popup inverse-zoom mutation.
+- Keeps new-document bootstrap so redirects and new pages inherit the saved zoom.
+- DWM remains a 1:1 presentation layer.
+
+# v6.3 - Preferences zoom is authoritative on every web page
+
+- The saved **Default page zoom** from Preferences is passed into Chromium before each target is created, claimed, or navigated.
+- New tabs inherit the saved zoom immediately from the persistent Chromium session instead of starting from a 100% session default.
+- Existing tabs install the zoom new-document bootstrap before address-bar navigation, so redirects and renderer swaps inherit the same value.
+- Zoom is reasserted after navigation and across the short settle window as a safety net for target/renderer swaps.
+- DWM remains a 1:1 presentation mirror and never performs image-level zoom.
+- Full Debug now reports the Preferences zoom seed and pre/post-navigation application status.
+
+# v6.2 - Stable navigation viewport
+
+- Stops Chromium/DWM navigation recrops from repeatedly shrinking and expanding the real page viewport.
+- Keeps the last proven Chromium custom-chrome height locked while a new site settles.
+- A changed chrome measurement must repeat three consecutive times before it can alter the physical source viewport.
+- Skips off-screen Chromium source resizes entirely when the current source size already satisfies the 1:1 DWM contract.
+- Removes the old two-pass `viewport -> measure -> viewport+chrome` resize cycle that made scrollbars visibly jump during navigation.
+- Retains v6.1 hidden startup DWM surface and smoother ~60 Hz window dragging.
+
+# v6.1 - hidden DWM startup + smoother window movement
+
+- Keeps the raw Win32 DWM presentation host hidden until Chromium has produced a usable first frame and received the real Tekzite viewport.
+- Coalesces DWM host move/resize traffic to roughly one update every 16 ms instead of reacting to every Tk Configure event.
+- Pure top-level window movement now repositions only the DWM destination. Chromium is resized only when the page viewport dimensions actually change.
+- DWM host geometry updates preserve z-order instead of repeatedly forcing HWND_TOP while dragging.
+- Chromium-only v6 architecture remains unchanged.
+
+# Tekzite Browser v6.0 - Chromium-only architecture
+
+- Chromium is now the **only web engine**.
+- Removed Tekzite's legacy HTML parser, CSS/layout engine, painter, TinyJS runtime, webfont/layout debug engine, and automatic native-renderer fallback.
+- Tekzite keeps its own browser chrome: tabs, omnibox, menus, preferences, history controls, debug controls, DWM host and input forwarding.
+- Every web navigation goes directly to Chromium/CDP.
+- DWM remains the native presentation layer, with Tekzite-only right-click handling and Chromium page zoom.
+- Preferences no longer expose `auto` or `native` renderer choices.
+- Full Debug is now Chromium/DWM-focused rather than reporting the removed renderer pipeline.
+
+# v5.44 - DWM-aware page zoom
+
+- Keeps Tekzite zoom as real Chromium page zoom/reflow rather than scaling the DWM thumbnail.
+- Every successful zoom apply schedules short DWM geometry/crop refreshes while Chromium settles.
+- DWM remains a strict 1:1 mirror of the current Chromium viewport at every zoom level.
+- Full Debug records `dwm_zoom_percent`, `dwm_zoom_refresh_count`, and thumbnail X/Y scale.
+- Retains v5.43 source-local crop measurement and v5.41 Tekzite-only context menu.
+
+# v5.43 - DWM source-local renderer crop
+
+- Fixes Chromium title/app chrome reappearing after URL-bar navigation.
+- Measures the page RenderWidgetHost directly inside the active DWM source (`Chrome_WidgetWin_1`) instead of reusing the separate presenter window's renderer.
+- Uses the source-local renderer Y offset as the authoritative DWM top crop (31 px in the captured YouTube navigation case).
+- Re-measures the source-local renderer on every v5.42 navigation recrop pass.
+- Keeps the known-good outer DWM source, 1:1 presentation, Tekzite-only context menu, form focus, and presenter quarantine.
+
+# v5.42 - navigation-aware DWM chrome recrop
+
+- Re-measures the live Chromium RenderWidgetHost before every DWM source-crop calculation.
+- Adds delayed DWM re-crop passes after navigation so YouTube/consent/SPA geometry can settle without exposing Chromium's custom title bar.
+- Keeps the known-good Chrome_WidgetWin_1 DWM source from v5.40/v5.41.
+- Retains Tekzite-only right-click menus, form focus, pointer alignment, presenter quarantine, and hands-off RenderWidgetHost behavior.
+
+# v5.41 - Tekzite-only right-click menu
+
+- Chromium no longer receives right-button mousePressed/mouseReleased events from the DWM/native input plane.
+- Tekzite still resolves link, image, selection and editable-field context through CDP `elementFromPoint()` and shows its own browser context menu.
+- This prevents Chromium's native context menu from ever being triggered, including on pages where JavaScript contextmenu suppression would be unreliable.
+- Left-click, typing, wheel, hover and the existing DWM presentation remain unchanged.
+
+# v5.40 - working outer DWM source with dynamic custom-chrome crop
+
+- Reverts the DWM source to the proven `Chrome_WidgetWin_1` path from v5.38.
+- Measures the real page RenderWidgetHost height after sizing the source client to the Tekzite viewport.
+- Treats a sane render-height shortfall as Chromium custom-drawn top chrome (31 px in the observed Startpage run).
+- Expands the parked Chromium source client by that measured amount, then crops exactly that top strip in DWM.
+- Keeps a 1:1 page pixel contract and avoids the black presenter-only DWM source from v5.39.
+- Adds debug fields for measured custom chrome and render sizes before/after expansion.
+
+# v5.38 - DWM client-area-only source
+
+- Removes Chromium's native title bar / minimize / maximize / close controls from the DWM mirror.
+- Uses `DWM_TNP_SOURCECLIENTAREAONLY` with `fSourceClientAreaOnly=True` instead of manually mixing outer-window and presenter coordinates.
+- Resizes the parked Chromium outer window so its client area matches the Tekzite viewport 1:1.
+- Keeps v5.37 top-page visibility, v5.36 pointer alignment, form focus, context menu placement, and presenter quarantine.
+
+# v5.37 - DWM top-edge visual alignment
+
+- Fixes top-edge webpage UI being clipped in DWM mode, including Startpage's hamburger menu.
+- Uses the live page-renderer origin to correct the DWM visual source crop instead of only correcting mouse coordinates.
+- Recalculates pointer alignment after the visual crop correction, so the picture and CDP input use the same origin.
+- Keeps the v5.34 1:1 pixel contract, v5.35 form focus, and v5.36 dynamic pointer measurement.
+
+# v5.36 - DWM pointer coordinate alignment
+
+- Fixes needing to click below visible controls such as the Startpage search field.
+- Measures the live page-renderer offset before Chromium presenters are parked.
+- Converts DWM source-crop coordinates into CDP page coordinates instead of assuming both origins are identical.
+- Applies the same correction to click, hover, wheel, context-menu hit testing, and editable-element focus.
+- Keeps v5.35 form focus, v5.34 1:1 DWM sizing, presenter quarantine, and native DWM presentation.
+
+# v5.35 - DWM form focus + keyboard fallback
+
+- Fixes clicks on Startpage/search/form fields not accepting typed text in DWM mode.
+- After mouse release, Tekzite explicitly focuses the editable DOM element under the clicked page coordinate over CDP.
+- Adds a root-level DWM keyboard fallback for cases where Tk leaves focus on the toplevel instead of `edge_host`.
+- Address-bar editing revokes page keyboard ownership so typing cannot leak into the webpage.
+- Retains v5.34 1:1 DWM maximize/zoom behavior and v5.33 context-menu positioning.
+
+# v5.34 - 1:1 DWM viewport / maximize crop fix
+
+- Keeps a stable Chromium app-frame crop instead of recomputing it after maximize/restore.
+- Resizes the parked Chromium source window to `Tekzite viewport + stable chrome margins` on every native resize.
+- Mirrors an exact page-sized source rectangle into an equal-sized DWM destination, eliminating DWM stretch/softness.
+- Prevents Chromium title/window bars from leaking into the thumbnail when Tekzite is maximized.
+- Page zoom remains Chromium/CSS zoom; DWM presentation no longer introduces a second visual scale.
+
+# v5.33 - DWM context-menu cursor coordinates
+
+- Fixes the browser context menu appearing at the top-left of the desktop in DWM mode.
+- Popup placement now uses Win32 `GetCursorPos()` at right-click time instead of relying on Tk `event.x_root` / `event.y_root`.
+- Chromium element hit-testing still uses page-local coordinates, so popup screen placement and page context are kept separate.
+- Retains v5.32 click-to-focus, keyboard input, DWM presentation, and presenter quarantine.
+
+# Tekzite Browser v5.32
+
+- Makes the DWM browser viewport focusable and interactive instead of presentation-only.
+- Binds click, release, hover, wheel, keyboard and right-click input to `edge_host`, the Tk input plane beneath the hit-test-transparent DWM popup.
+- Clicking the webpage now gives the browser surface keyboard focus and forwards the click to Chromium over CDP.
+- Printable text uses `Input.insertText`; navigation keys and Ctrl shortcuts use CDP key events.
+- Right-click first forwards the gesture to Chromium, then opens Tekzite's browser-style context menu using live DOM metadata for links, images, selections and editable controls.
+- DWM presentation, v5.31 presenter quarantine and hands-off RenderWidgetHost behavior remain unchanged.
+
+# Tekzite Browser v5.31
+
+- Keeps the working v5.30 DWM live webpage surface.
+- Parks every top-level Chromium `Chrome_WidgetWin_*` presenter from the dedicated Tekzite Chromium process tree, not only the DWM source window.
+- Prevents auxiliary `Chrome_WidgetWin_0` windows from leaking onto the desktop as a giant black square.
+- Chromium child `Chrome_RenderWidgetHostHWND` surfaces remain completely hands-off.
+- Re-scans briefly after DWM registration to catch late-created Chromium presenters.
+
+# Tekzite Browser v5.30
+
+- Replaces the Tkinter DWM thumbnail destination with a genuine raw Win32 `WS_POPUP` HWND owned by Tekzite.
+- Avoids Tk `TkTopLevel` wrappers that still report `WS_CHILD` and are rejected by `DwmRegisterThumbnail`.
+- The raw DWM host uses `WM_NCHITTEST -> HTTRANSPARENT`, so mouse input falls through to Tekzite's existing CDP input surface.
+- Keeps Chromium source presentation untouched and retains strict app-target binding / direct app launch.
+
+# Tekzite Browser v5.29
+
+## Real top-level HWND fix for DWM thumbnails
+
+- Fixes `DwmRegisterThumbnail` failing with `HRESULT=0x80070057` when Tkinter `winfo_id()` returns the inner Tk client HWND rather than the native top-level wrapper.
+- Resolves both DWM destination and Chromium source through Win32 `GetAncestor(..., GA_ROOT)` before registration.
+- Validates that both resolved handles are top-level (no `WS_CHILD`) and that the destination belongs to the Tekzite process, as required by DWM.
+- Full Debug now records requested/resolved HWNDs, window classes, PIDs, and top-level validation.
+- Keeps the v5.28 DWM presentation design: no `SetParent`, no RenderWidgetHost mutation, Chromium remains the live DComp source.
+
+# Tekzite Browser v5.28
+
+## DWM thumbnail native presentation
+
+- Chromium remains an untouched top-level DirectComposition source.
+- Tekzite creates a borderless owned top-level viewport over its content area because Windows requires DWM thumbnail destinations to be top-level windows.
+- `DwmRegisterThumbnail` / `DwmUpdateThumbnailProperties` mirror the Chromium app surface into Tekzite.
+- The Chromium source window is parked off-screen and kept mapped; it is not reparented.
+- The RenderWidgetHost HWND remains completely hands-off.
+- Mouse, wheel, keyboard, and context-menu input continue through the existing CDP input lane.
+- Legacy `SetParent` fallback is disabled for this path.
+
+# Tekzite Browser v5.27
+
+Treats Chromium child overflow as valid native geometry. Tekzite now aligns the visible owner/RenderWidgetHost intersection to the viewport instead of rejecting negative raw crop margins, preventing the successful top-level overlay from falling back into legacy SetParent embedding. The RenderWidgetHost remains completely Chromium-owned.
+
+# Tekzite Browser v5.26
+
+Maps and positions the Chromium owner before measuring the untouched RenderWidgetHost. The page RWH remains fully Chromium-owned; Tekzite only shows and positions its top-level owner, preventing hidden-owner 1x1 geometry collapse.
+
+# Tekzite Browser v5.25 — hands-off native RenderWidgetHost
+
+- Chromium's `Chrome_RenderWidgetHostHWND` is now strictly read-only from Tekzite.
+- Removed direct `SetWindowPos`, `ShowWindow`, `RedrawWindow`, and `UpdateWindow` operations on the page render host.
+- Removed the legacy compositor-prime mutation pass; direct-app launch now lets Chromium establish its own DirectComposition tree.
+- Tekzite still positions only the Chromium owner window and keeps strict app-target binding, direct `--app=<URL>` launch, and live owner geometry alignment.
+- New debug fields expose `render_host_hands_off`, `render_host_mutation_calls`, and compositor-prime touch state.
+
+# Tekzite Browser v5.24
+
+v5.24 makes the first native Chromium tab a true direct-app launch. Chromium starts with the requested URL in `--app=<URL>` instead of `--app=about:blank`, Tekzite claims that exact original app target, and the first-tab path skips the redundant CDP `Page.navigate` when the launch target is already the requested page. This removes the final about:blank -> navigation compositor transition while preserving strict app-target binding, native GPU defaults, and live-render geometry alignment.
