@@ -1,0 +1,23 @@
+v10.0 validation on Linux
+
+Passed:
+- Python compilation for changed runtime modules.
+- 8 existing state tests and 12 new feature behavior tests via unittest.
+- 63 existing regression test functions via direct invocation (pytest unavailable).
+- JavaScript syntax checks for background worker and feature services.
+- Extension service tests using mocked Chrome APIs: rule changes, downloads, cancel, resume/retry, show, unsupported retry URLs and error paths.
+
+Not verified here:
+- Windows executable build and installer.
+- Live Chromium service-worker attachment and permissions on the chosen Chromium distribution.
+- Real downloads, network rule enforcement, native DWM rendering and visual dialog layout.
+
+Windows smoke check:
+1. Build with build_windows.ps1 and open a website; confirm normal display, typing and tab switching.
+2. Download a small file; open Ctrl+J, check progress and Open folder. Try cancel and retry on a larger file.
+3. Open Ctrl+H; search the page title/address, open it, then clear history.
+4. Toggle ad blocking for the current site from Tools and verify the page reloads; compare an unrelated site.
+5. Pin a tab, switch tabs, use Close Other Tabs, and restart; confirm pin and selection survive.
+6. Toggle Quiet Mode; verify debug/status controls hide and return and navigation remains available.
+7. After changing tabs, wait at least three seconds, terminate Tekzite and restart; confirm the latest saved tabs recover.
+8. Disable Restore open tabs; after the next checkpoint restart and verify the startup preference is used.

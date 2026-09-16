@@ -1,0 +1,16 @@
+v10.1.0 validation in build environment
+
+Automated:
+- python -m py_compile main.py browser_features.py engine/net.py engine/features.py browser_state.py tekzite_network.py: PASS
+- python -m pytest -q: PASS (104 tests)
+
+Coverage added for:
+- extension preference normalization and duplicate handling
+- unpacked extension launch-directory validation
+- private Chromium profile override
+- private session/history persistence guards
+- origin-scoped Site Info / Clear Site Data CDP wiring
+- UI wiring for Private Window, Site Info and Extension Manager
+
+Windows manual smoke test still required for DWM presentation, Chromium startup,
+private-window profile deletion, unpacked-extension loading and Site Info against live sites.

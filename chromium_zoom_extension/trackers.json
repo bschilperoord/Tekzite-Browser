@@ -1,0 +1,38 @@
+[
+  {
+    "id": 10001,
+    "priority": 100,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "requestDomains": [
+        "google-analytics.com",
+        "analytics.google.com",
+        "googletagmanager.com",
+        "stats.g.doubleclick.net",
+        "bat.bing.com",
+        "clarity.ms",
+        "script.hotjar.com",
+        "static.hotjar.com",
+        "vars.hotjar.com",
+        "in.hotjar.com",
+        "scorecardresearch.com",
+        "api.segment.io",
+        "cdn.segment.com",
+        "api-js.mixpanel.com",
+        "api.mixpanel.com",
+        "api2.amplitude.com",
+        "bam.nr-data.net",
+        "js-agent.newrelic.com",
+        "browser-intake-datadoghq.com",
+        "edge.fullstory.com",
+        "rs.fullstory.com",
+        "cdn.mouseflow.com",
+        "heapanalytics.com",
+        "cdn.heapanalytics.com",
+        "app-measurement.com"
+      ]
+    }
+  }
+]

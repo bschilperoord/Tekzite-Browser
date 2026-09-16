@@ -17,6 +17,7 @@ import threading
 from pathlib import Path
 from urllib.request import urlopen as _stdlib_urlopen
 from urllib.parse import urlsplit
+from loopback_policy import allow_loopback_port, revoke_loopback_port, snapshot as loopback_policy_snapshot
 
 
 _ORIGINAL_URLOPEN = urlopen
@@ -58,6 +59,7 @@ _COOKIE_JAR = CookieJar()
 _NETWORK_ENGINE = None
 _NETWORK_OPENER = None
 _NETWORK_ENGINE_LOG_HANDLE = None
+_NETWORK_ENGINE_LOCK = threading.RLock()
 
 
 def _network_engine_root():
@@ -69,6 +71,52 @@ TEKZITE_ZOOM_EXTENSION_ID = "afhkpeiilpolfogelgpkdijgnmofdiho"
 
 def _zoom_extension_dir():
     return (_network_engine_root() / "chromium_zoom_extension").resolve()
+
+
+def _configured_user_extension_dirs():
+    """Return validated unpacked extension directories requested by Tekzite.
+
+    ``main.py`` exports the enabled Extension Manager entries as JSON. Keeping
+    the parsing here means the Chromium launch command remains the final source
+    of truth and malformed/stale paths are simply ignored rather than breaking
+    browser startup.
+    """
+    raw = os.environ.get("TEKZITE_USER_EXTENSIONS", "")
+    if not raw:
+        return []
+    try:
+        values = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(values, list):
+        return []
+    result = []
+    seen = set()
+    builtin = os.path.normcase(str(_zoom_extension_dir()))
+    for value in values:
+        try:
+            path = Path(str(value)).expanduser().resolve()
+        except Exception:
+            continue
+        # Chromium's switch uses a comma-separated path list. Reject the rare
+        # ambiguous path rather than silently loading the wrong directory.
+        if "," in str(path) or not path.is_dir() or not (path / "manifest.json").is_file():
+            continue
+        key = os.path.normcase(str(path))
+        if key == builtin or key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+
+def _chromium_extension_dirs():
+    return [_zoom_extension_dir(), *_configured_user_extension_dirs()]
+
+def _set_adblock_fallback(enabled):
+    from browser_state import write_json
+    write_json(_network_engine_state_dir() / "adblock-policy.json", {"enabled": bool(enabled)})
+
 
 def _network_engine_state_dir():
     if os.name == "nt":
@@ -97,11 +145,17 @@ def _wait_tcp_port(host, port, process, timeout=8.0):
 
 
 def _stop_network_engine():
+    with _NETWORK_ENGINE_LOCK:
+        return _stop_network_engine_unlocked()
+
+
+def _stop_network_engine_unlocked():
     global _NETWORK_ENGINE, _NETWORK_OPENER, _NETWORK_ENGINE_LOG_HANDLE
     state = _NETWORK_ENGINE
     _NETWORK_ENGINE = None
     _NETWORK_OPENER = None
     if state:
+        state_port = state.get("port")
         proc = state.get("process")
         if proc is not None and proc.poll() is None:
             try:
@@ -112,6 +166,8 @@ def _stop_network_engine():
                     proc.kill()
                 except Exception:
                     pass
+        if state_port:
+            revoke_loopback_port(state_port)
     if _NETWORK_ENGINE_LOG_HANDLE is not None:
         try:
             _NETWORK_ENGINE_LOG_HANDLE.close()
@@ -123,18 +179,37 @@ def _stop_network_engine():
 atexit.register(_stop_network_engine)
 
 
-def ensure_network_engine():
-    """Start/reuse Tekzite's loopback network process and return its state."""
+def _ensure_network_engine_locked():
+    """Start/reuse the loopback proxy while holding _NETWORK_ENGINE_LOCK."""
     global _NETWORK_ENGINE, _NETWORK_OPENER, _NETWORK_ENGINE_LOG_HANDLE
+    preferred_port = None
+    recovering = False
     if _NETWORK_ENGINE:
         proc = _NETWORK_ENGINE.get("process")
         if proc is not None and proc.poll() is None:
             return _NETWORK_ENGINE
+        # Chromium keeps the proxy URL it received at process launch. If the
+        # local proxy crashes, restart it on the exact same port so open tabs
+        # recover without forcing a Chromium/browser restart.
+        preferred_port = _NETWORK_ENGINE.get("port")
+        recovering = preferred_port is not None
         _NETWORK_ENGINE = None
         _NETWORK_OPENER = None
+        if _NETWORK_ENGINE_LOG_HANDLE is not None:
+            try:
+                _NETWORK_ENGINE_LOG_HANDLE.close()
+            except Exception:
+                pass
+            _NETWORK_ENGINE_LOG_HANDLE = None
 
     host = "127.0.0.1"
-    port = _free_loopback_port()
+    try:
+        port = int(preferred_port) if preferred_port is not None else _free_loopback_port()
+    except (TypeError, ValueError):
+        port = _free_loopback_port()
+    # Python may connect to loopback only for explicitly registered Tekzite
+    # services. Register the proxy destination before the readiness probe.
+    allow_loopback_port(port, "Tekzite Network proxy (HTTP/HTTPS filtering and ad blocking)", owner="tekzite-network")
     root = _network_engine_root()
     exe = root / "tekzite-network.exe"
     script = root / "tekzite_network.py"
@@ -162,9 +237,19 @@ def ensure_network_engine():
     else:
         log_handle = open(log_path, "a", encoding="utf-8", buffering=1)
     command += ["--log-level", log_level]
+    command += ["--privacy-stats", str(state_dir / "privacy-stats.json")]
     adblock_enabled = str(os.environ.get("TEKZITE_ADBLOCK_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    tracker_blocking = str(os.environ.get("TEKZITE_TRACKER_BLOCKING", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    https_first = str(os.environ.get("TEKZITE_HTTPS_FIRST", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    # Retain proxy protection until the optional extension confirms its rules.
+    _set_adblock_fallback(adblock_enabled)
+    command += ["--adblock-policy", str(state_dir / "adblock-policy.json")]
     if not adblock_enabled:
         command.append("--disable-adblock")
+    if not tracker_blocking:
+        command.append("--disable-tracker-blocking")
+    if not https_first:
+        command.append("--disable-https-first")
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -182,6 +267,7 @@ def ensure_network_engine():
             proc.kill()
         except Exception:
             pass
+        revoke_loopback_port(port)
         log_handle.close()
         raise
 
@@ -209,20 +295,56 @@ def ensure_network_engine():
         "mode": mode,
         "command": command,
         "log_path": str(log_path),
+        "recovered_same_port": bool(recovering),
     }
     return _NETWORK_ENGINE
 
 
-def network_engine_debug():
-    state = ensure_network_engine()
-    proc = state.get("process")
+def ensure_network_engine():
+    """Thread-safe network-engine bootstrap and same-port crash recovery."""
+    with _NETWORK_ENGINE_LOCK:
+        return _ensure_network_engine_locked()
+
+
+def network_engine_debug(start=True):
+    """Return network-helper state; optionally avoid starting it for diagnostics UI."""
+    state = ensure_network_engine() if start else (_NETWORK_ENGINE or {})
+    proc = state.get("process") if state else None
     return {
-        "mode": state.get("mode"),
+        "mode": state.get("mode") if state else None,
         "pid": getattr(proc, "pid", None),
         "alive": bool(proc is not None and proc.poll() is None),
-        "proxy": state.get("proxy_url"),
-        "log_path": state.get("log_path"),
+        "proxy": state.get("proxy_url") if state else None,
+        "log_path": state.get("log_path") if state else None,
+        "loopback_policy": loopback_policy_snapshot(),
     }
+
+
+def privacy_stats():
+    """Return aggregate counters for the currently running helper only."""
+    state = _NETWORK_ENGINE or {}
+    proc = state.get("process") if state else None
+    if proc is None or proc.poll() is not None:
+        return {"telemetry_blocked": 0, "trackers_blocked": 0, "ads_blocked": 0, "https_upgrades": 0, "started_at": None}
+    path = _network_engine_state_dir() / "privacy-stats.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {
+                "telemetry_blocked": int(data.get("telemetry_blocked", 0) or 0),
+                "trackers_blocked": int(data.get("trackers_blocked", 0) or 0),
+                "ads_blocked": int(data.get("ads_blocked", 0) or 0),
+                "https_upgrades": int(data.get("https_upgrades", 0) or 0),
+                "started_at": data.get("started_at"),
+            }
+    except Exception:
+        pass
+    return {"telemetry_blocked": 0, "trackers_blocked": 0, "ads_blocked": 0, "https_upgrades": 0, "started_at": None}
+
+
+def loopback_debug():
+    """Return the Python loopback allow-list and recent denied attempts."""
+    return loopback_policy_snapshot()
 
 
 def _network_urlopen(request, timeout):
@@ -355,6 +477,7 @@ def _chromium_candidates():
 
 
 _EDGE_SESSION = None
+_EDGE_SESSION_LOCK = threading.RLock()
 _CHROMIUM_LAUNCH_DEBUG = {
     "attempts": 0, "executable": None, "port": None, "profile": None,
     "recovered": False, "last_error": None, "errors": [],
@@ -363,12 +486,21 @@ _CHROMIUM_LAUNCH_DEBUG = {
 
 
 def _persistent_edge_profile_dir():
-    """Return Tekzite's dedicated persistent Chromium compatibility profile.
+    """Return Tekzite's dedicated Chromium compatibility profile.
+
+    Private windows set ``TEKZITE_CHROMIUM_PROFILE`` to a process-unique
+    temporary directory. Normal windows retain the long-lived Tekzite profile.
 
     The profile has a Tekzite/Chromium identity only.  On first v4.43 launch
     we migrate the older Edge-named bridge directory in place so cookies,
     storage and sign-ins survive the branding cleanup.
     """
+    override = os.environ.get("TEKZITE_CHROMIUM_PROFILE", "").strip()
+    if override:
+        path = os.path.abspath(os.path.expanduser(override))
+        os.makedirs(path, exist_ok=True)
+        return path
+
     if os.name == "nt":
         root = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
         base = os.path.join(root, "Tekzite Browser")
@@ -1113,11 +1245,24 @@ def _get_persistent_page_cdp_channel(session, target_id=None, timeout=5.0, purpo
     else:
         try:
             _cdp_call(ws, "Network.enable", {}, message_id=901, timeout=timeout)
-            _cdp_call(
-                ws, "Network.setExtraHTTPHeaders",
-                {"headers": {"DNT": "1", "Sec-GPC": "1"}},
-                message_id=902, timeout=timeout,
-            )
+            privacy_headers = {"DNT": "1", "Sec-GPC": "1"}
+            strip_referrer = str(os.environ.get("TEKZITE_STRIP_REFERRER", "1")).strip().lower() not in {"0", "false", "no", "off"}
+            if strip_referrer:
+                privacy_headers["Referer"] = ""
+            try:
+                _cdp_call(
+                    ws, "Network.setExtraHTTPHeaders",
+                    {"headers": privacy_headers},
+                    message_id=902, timeout=timeout,
+                )
+            except Exception:
+                # Some Chromium builds may reject an empty Referer override.
+                # Keep GPC/DNT active and let the bundled DNR rules strip it.
+                _cdp_call(
+                    ws, "Network.setExtraHTTPHeaders",
+                    {"headers": {"DNT": "1", "Sec-GPC": "1"}},
+                    message_id=903, timeout=timeout,
+                )
             channel["enabled_domains"].add("Network")
             channel["privacy_headers"] = True
             channel["next_message_id"] = max(channel["next_message_id"], 1000)
@@ -1394,6 +1539,14 @@ def _apply_privacy_profile_preferences(profile_dir):
             "media_stream_mic": 2,
             "media_stream_camera": 2,
             "sensors": 2,
+            "midi_sysex": 2,
+            "bluetooth_guard": 2,
+            "usb_guard": 2,
+            "serial_guard": 2,
+            "hid_guard": 2,
+            "idle_detection": 2,
+            "window_placement": 2,
+            "automatic_downloads": 2,
         })
         prefs.setdefault("credentials_enable_service", False)
         prefs.setdefault("autofill", {}).update({"profile_enabled": False, "credit_card_enabled": False})
@@ -1406,8 +1559,15 @@ def _apply_privacy_profile_preferences(profile_dir):
         sandbox = prefs.setdefault("privacy_sandbox", {})
         sandbox.update({
             "apis_enabled": False,
+            "topics_enabled": False,
+            "fledge_enabled": False,
+            "ad_measurement_enabled": False,
             "m1": {"topics_enabled": False, "fledge_enabled": False, "ad_measurement_enabled": False},
         })
+        prefs.setdefault("privacy_guide", {})["viewed"] = True
+        prefs.setdefault("privacy", {})["sandbox_enabled"] = False
+        prefs.setdefault("browser", {})["enable_spellchecking"] = False
+        prefs.setdefault("alternate_error_pages", {})["enabled"] = False
         tmp = pref_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(prefs, separators=(",", ":")), encoding="utf-8")
         tmp.replace(pref_path)
@@ -1417,6 +1577,14 @@ def _apply_privacy_profile_preferences(profile_dir):
 
 
 def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_url=None):
+    """Serialize Chromium bootstrap/recovery so only one helper can win."""
+    with _EDGE_SESSION_LOCK:
+        return _start_persistent_chromium_session_unlocked(
+            timeout=timeout, launch_geometry=launch_geometry, launch_url=launch_url
+        )
+
+
+def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None, launch_url=None):
     """Launch a real Chromium-family session with persistent state.
 
     v5.05 makes helper startup self-healing. A crashed Chromium can leave its
@@ -1430,12 +1598,26 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
     if _EDGE_SESSION:
         process = _EDGE_SESSION.get("process")
         if process is not None and process.poll() is None:
+            # A busy renderer can miss one short DevTools probe. Require two
+            # misses before declaring the persistent browser session broken.
+            for probe_timeout in (0.35, 0.75):
+                try:
+                    _devtools_json(_EDGE_SESSION["port"], "/json/version", timeout=probe_timeout)
+                    return _EDGE_SESSION
+                except Exception:
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.04)
+        stale_session = _EDGE_SESSION
+        try:
+            close_embedded_chromium(clear_profile=False)
+        except Exception:
+            _EDGE_SESSION = None
             try:
-                _devtools_json(_EDGE_SESSION["port"], "/json/version", timeout=0.5)
-                return _EDGE_SESSION
+                _close_persistent_page_cdp_channels(stale_session)
+                _close_persistent_browser_cdp_channel(stale_session)
             except Exception:
                 pass
-        _EDGE_SESSION = None
 
     _CHROMIUM_LAUNCH_DEBUG = {
         "attempts": 0, "executable": None, "port": None, "profile": None,
@@ -1454,6 +1636,7 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
         # retry after terminating any partial process and clearing stale locks.
         for attempt in (1, 2):
             port = _free_loopback_port()
+            allow_loopback_port(port, "Chromium DevTools/CDP (tab control, input, zoom and diagnostics)", owner="chromium")
             _CHROMIUM_LAUNCH_DEBUG.update({
                 "attempts": int(_CHROMIUM_LAUNCH_DEBUG.get("attempts", 0)) + 1,
                 "executable": executable, "port": port, "profile": profile,
@@ -1498,6 +1681,10 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
                         launch_w, launch_h = max(320, launch_w), max(240, launch_h)
                     except Exception:
                         launch_x, launch_y, launch_w, launch_h = (-32000, -32000, 800, 600)
+                extension_dirs = _chromium_extension_dirs()
+                extension_arg = ",".join(str(path) for path in extension_dirs)
+                _CHROMIUM_LAUNCH_DEBUG["extension_dirs"] = [str(path) for path in extension_dirs]
+                _CHROMIUM_LAUNCH_DEBUG["private_profile"] = bool(os.environ.get("TEKZITE_PRIVATE_MODE") == "1")
                 command = [
                     executable,
                     f"--remote-debugging-port={port}",
@@ -1506,19 +1693,20 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
                     f"--user-data-dir={profile}",
                     "--no-first-run", "--no-default-browser-check",
                     "--disable-save-password-bubble", "--disable-translate",
-                    "--disable-search-engine-choice-screen", "--disable-notifications",
-                    "--disable-geolocation", "--disable-sync", "--disable-component-update",
+                    "--disable-search-engine-choice-screen",
+                    "--disable-sync", "--disable-component-update",
                     "--disable-background-networking", "--disable-breakpad",
                     "--disable-crash-reporter", "--disable-domain-reliability",
                     "--disable-client-side-phishing-detection", "--disable-default-apps",
                     "--disable-logging", "--metrics-recording-only", "--no-pings",
-                    "--disable-features=EdgeFirstRunExperience,msEdgeSidebarV2,AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion",
+                    "--disable-hyperlink-auditing", "--disable-preconnect",
+                    "--disable-features=EdgeFirstRunExperience,msEdgeSidebarV2,AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion,BrowsingTopics,InterestCohortAPI,SharedStorageAPI,FencedFrames,AttributionReporting,PrivateAggregationApi,FedCm,WebBluetooth,WebUSB,WebSerial,WebHID,IdleDetection,WebNFC,Prerender2,SpeculationRulesPrefetchProxy",
                     "--disable-session-crashed-bubble", "--disable-background-mode",
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
                     "--disable-background-timer-throttling",
-                    f"--disable-extensions-except={_zoom_extension_dir()}",
-                    f"--load-extension={_zoom_extension_dir()}",
+                    f"--disable-extensions-except={extension_arg}",
+                    f"--load-extension={extension_arg}",
                     f"--proxy-server={ensure_network_engine()['proxy_url']}",
                     "--proxy-bypass-list=<-loopback>", "--disable-quic",
                     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
@@ -1526,6 +1714,8 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
                     f"--window-size={launch_w},{launch_h}",
                     f"--app={str(launch_url or 'about:blank')}",
                 ]
+                if os.environ.get("TEKZITE_DOWNLOAD_PROMPT") == "1":
+                    command.append("--download-prompt-for-download")
                 # v7.3 typography guard: Chromium's best Windows text path is
                 # the default one. Never let legacy/debug switches disable LCD
                 # text, subpixel positioning, or DirectWrite UI rendering.
@@ -1630,6 +1820,7 @@ def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_
                     _clear_profile_owner(profile, getattr(process, "pid", None))
                 except Exception:
                     pass
+                revoke_loopback_port(port)
                 if attempt == 1:
                     # A failed Chromium may not have written Tekzite's owner PID
                     # yet, so clear its private singleton locks before retry 2.
@@ -1663,6 +1854,7 @@ def _pick_devtools_page(port, session=None, target_id=None):
     candidates = [
         page for page in pages
         if page.get("type") == "page" and page.get("webSocketDebuggerUrl")
+        and not str(page.get("url", "")).startswith("chrome-extension://")
     ]
     if not candidates:
         raise RuntimeError("Chromium bridge exposed no debuggable page")
@@ -1767,53 +1959,89 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
         except Exception:
             target_id = None
 
-    # Claim the launch app target exactly once.  Reusing the bootstrap target is
+    # Claim the launch app target exactly once. Reusing the bootstrap target is
     # important: creating a second target at startup can cause Chromium to
-    # manufacture another Chrome_WidgetWin_0 presenter, which defeats app-mode
-    # and was implicated in the detached-overlay surface churn.
+    # manufacture another Chrome_WidgetWin_0 presenter, which defeats app-mode.
+    #
+    # v10.5.0: cold startup always launches Chromium at about:blank, then claims
+    # that neutral app target before navigating to the user's real URL. DevTools
+    # can become reachable a few milliseconds before /json/list contains the app
+    # page, so poll briefly instead of treating one empty/mismatched list as a
+    # fatal bootstrap failure. A sole page target is a safe final fallback: the
+    # dedicated Tekzite Chromium profile has only one app page at this point.
     if not target_id and not session.get("app_bootstrap_target_claimed"):
         try:
-            pages = _devtools_json(session["port"], "/json/list", timeout=1.0)
             expected_launch_url = str(session.get("launch_url") or "about:blank")
-            expected_lower = expected_launch_url.lower()
-            bootstrap = next(
-                (p for p in pages
-                 if p.get("type") == "page"
-                 and p.get("webSocketDebuggerUrl")
-                 and str(p.get("url") or "").lower() == expected_lower),
-                None,
-            )
-            if bootstrap is None:
-                bootstrap = next(
-                    (p for p in pages
-                     if p.get("type") == "page"
-                     and p.get("webSocketDebuggerUrl")
-                     and str(p.get("url") or "").lower() in {"about:blank", "chrome://newtab/"}),
-                    None,
-                )
+            expected_lower = expected_launch_url.strip().lower()
+            neutral_urls = {"about:blank", "chrome://newtab", "chrome://newtab/"}
+            deadline = time.monotonic() + (1.5 if require_bootstrap else 0.35)
+            bootstrap = None
+            claim_reason = None
+            last_pages = []
+            last_list_error = None
+            while True:
+                try:
+                    pages = _devtools_json(session["port"], "/json/list", timeout=0.5)
+                    last_pages = list(pages or [])
+                    page_candidates = [
+                        p for p in last_pages
+                        if p.get("type") == "page" and p.get("webSocketDebuggerUrl")
+                    ]
+                    bootstrap = next(
+                        (p for p in page_candidates
+                         if str(p.get("url") or "").strip().lower() == expected_lower),
+                        None,
+                    )
+                    if bootstrap is not None:
+                        claim_reason = "expected-url"
+                    if bootstrap is None:
+                        bootstrap = next(
+                            (p for p in page_candidates
+                             if str(p.get("url") or "").strip().lower() in neutral_urls),
+                            None,
+                        )
+                        if bootstrap is not None:
+                            claim_reason = "neutral-url"
+                    if bootstrap is None and len(page_candidates) == 1:
+                        bootstrap = page_candidates[0]
+                        claim_reason = "sole-page-fallback"
+                    if bootstrap is not None:
+                        break
+                    last_list_error = None
+                except Exception as exc:
+                    last_list_error = exc
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.03)
+
+            session["bootstrap_page_urls"] = [str(p.get("url") or "") for p in last_pages if p.get("type") == "page"]
+            session["bootstrap_claim_reason"] = claim_reason
             if bootstrap and bootstrap.get("id"):
                 target_id = bootstrap.get("id")
+                actual_url = str(bootstrap.get("url") or "")
+                actual_lower = actual_url.strip().lower()
                 session["app_bootstrap_target_claimed"] = True
                 session["native_app_target_reused"] = True
                 session["native_app_target_id"] = target_id
-                session["native_direct_app_url"] = expected_launch_url if expected_lower not in {"about:blank", "chrome://newtab/"} else None
-                session["native_direct_app_target_match"] = (str(bootstrap.get("url") or "").lower() == expected_lower)
+                session["native_direct_app_url"] = expected_launch_url if expected_lower not in neutral_urls else None
+                session["native_direct_app_target_match"] = (actual_lower == expected_lower)
                 _browser_cdp_call(
                     session, "Target.activateTarget", {"targetId": target_id}, message_id=102
                 )
-                # v9.4: Chromium was launched directly at the requested app URL.
-                # Do not open a page websocket or send Page.enable when that target
-                # already has the destination; that was pure cold-start latency.
-                # Only navigate when the bootstrap URL genuinely differs.
-                if str(url or "about:blank") != str(bootstrap.get("url") or ""):
+                requested_url = str(url or "about:blank")
+                requested_lower = requested_url.strip().lower()
+                neutral_equivalent = requested_lower in neutral_urls and actual_lower in neutral_urls
+                if requested_url != actual_url and not neutral_equivalent:
                     _persistent_page_cdp_call(
-                        session, "Page.navigate", {"url": str(url or "about:blank")},
+                        session, "Page.navigate", {"url": requested_url},
                         target_id=target_id, timeout=5.0, purpose="control",
                     )
                     session["bootstrap_navigation_required"] = True
                 else:
                     session["bootstrap_navigation_required"] = False
                     session["bootstrap_socket_skipped"] = True
+            elif last_list_error is not None:
+                raise last_list_error
         except Exception as exc:
             session["native_app_target_reuse_error"] = str(exc)
             target_id = None
@@ -2433,6 +2661,19 @@ def _wait_for_attached_first_frame(session, timeout: float = 2.0):
     session["attached_frame_attempts"] = attempts
     return False
 
+def stop_embedded_chromium_loading(target_id: str = None, timeout: float = 2.0):
+    """Stop the active network/document load for one Tekzite Chromium tab."""
+    session = _start_persistent_chromium_session(timeout=min(float(timeout), 2.0))
+    target_id = str(target_id or session.get("target_id") or "")
+    if not target_id:
+        return False
+    _persistent_page_cdp_call(
+        session, "Page.stopLoading", {}, target_id=target_id,
+        timeout=max(0.5, min(float(timeout), 2.0)), purpose="control",
+    )
+    return True
+
+
 def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame: bool = False, target_id: str = None, create_new_target: bool = False):
     """Navigate Chromium with a persistent hot-path control channel.
 
@@ -2455,10 +2696,21 @@ def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame
     )
 
     if known_target:
-        # Target.activateTarget is browser-level and now also rides a persistent
-        # socket.  Do it only when switching the browser's current target.
+        # Target ids belong to one Chromium process. If Chromium restarted after
+        # a crash, Tekzite tabs still carry the old ids. Detect that here and
+        # transparently claim/create a replacement target for the requested tab.
+        target_valid = True
         if str(session.get("target_id") or "") != known_target:
-            activate_embedded_chromium_target(known_target)
+            target_valid = bool(activate_embedded_chromium_target(known_target))
+        if not target_valid:
+            stale_target = known_target
+            known_target = str(create_embedded_chromium_target("about:blank") or "")
+            if not known_target:
+                raise RuntimeError("Chromium could not recover the stale tab target")
+            session["recovered_stale_target_id"] = stale_target
+            session["recovered_target_id"] = known_target
+            session["target_recovery_count"] = int(session.get("target_recovery_count", 0)) + 1
+            direct_app_target = False
         if direct_app_target:
             session["native_direct_app_navigation_skipped"] = True
         else:
@@ -3074,6 +3326,10 @@ def embedded_chromium_debug_report():
     lines.append(f"native_direct_app_url: {session.get('native_direct_app_url')}")
     lines.append(f"native_direct_app_target_match: {session.get('native_direct_app_target_match')}")
     lines.append(f"native_direct_app_navigation_skipped: {session.get('native_direct_app_navigation_skipped')}")
+    lines.append(f"native_blank_bootstrap_launch: {session.get('native_blank_bootstrap_launch')}")
+    lines.append(f"native_requested_initial_url: {session.get('native_requested_initial_url')}")
+    lines.append(f"bootstrap_claim_reason: {session.get('bootstrap_claim_reason')}")
+    lines.append(f"bootstrap_page_urls: {session.get('bootstrap_page_urls')}")
     lines.append(f"helper_pid: {getattr(process, 'pid', None)}")
     lines.append(f"embedded_hwnd: {session.get('embedded_hwnd')}")
     lines.append(f"content_hwnd: {session.get('content_hwnd')}")
@@ -3221,6 +3477,13 @@ def embedded_chromium_debug_report():
     lines.append(f"dwm_chrome_measurement: {session.get('dwm_chrome_measurement')}")
     lines.append(f"dwm_thumbnail_source_rect: {session.get('dwm_thumbnail_source_rect')}")
     lines.append(f"dwm_thumbnail_destination_rect: {session.get('dwm_thumbnail_destination_rect')}")
+    lines.append(f"dwm_last_resize_path: {session.get('dwm_last_resize_path')}")
+    lines.append(f"dwm_fast_resize_count: {session.get('dwm_fast_resize_count')}")
+    lines.append(f"dwm_fast_resize_noop_count: {session.get('dwm_fast_resize_noop_count')}")
+    lines.append(f"dwm_fast_source_resize_count: {session.get('dwm_fast_source_resize_count')}")
+    lines.append(f"dwm_full_reflow_count: {session.get('dwm_full_reflow_count')}")
+    lines.append(f"dwm_cold_register_flush_count: {session.get('dwm_cold_register_flush_count')}")
+    lines.append(f"dwm_presenter_park_thread_running: {session.get('dwm_presenter_park_thread_running')}")
     lines.append(f"dwm_input_offset: {session.get('dwm_input_offset')}")
     lines.append(f"dwm_input_render_offset: {session.get('dwm_input_render_offset')}")
     lines.append(f"dwm_input_page_owner_rect: {session.get('dwm_input_page_owner_rect')}")
@@ -3232,6 +3495,10 @@ def embedded_chromium_debug_report():
     lines.append(f"preferences_zoom_percent: {session.get('preferences_zoom_percent')}")
     lines.append(f"page_zoom_strategy: {session.get('page_zoom_strategy')}")
     lines.append(f"zoom_watchdog_strategy: {session.get('zoom_watchdog_strategy')}")
+    lines.append(f"embed_owner_wait_attempts: {session.get('embed_owner_wait_attempts')}")
+    lines.append(f"embed_owner_activation_error: {session.get('embed_owner_activation_error')}")
+    lines.append(f"feature_services_ready: {session.get('feature_services_ready')}")
+    lines.append(f"feature_services_error: {session.get('feature_services_error')}")
     lines.append(f"native_zoom_extension_id: {session.get('native_zoom_extension_id')}")
     lines.append(f"native_zoom_extension_loaded: {session.get('native_zoom_extension_loaded')}")
     lines.append(f"native_zoom_bridge_apply_count: {session.get('native_zoom_bridge_apply_count')}")
@@ -3916,6 +4183,105 @@ def _park_chromium_top_level_presenters(session, source_hwnd=0, passes=1, settle
         session["dwm_presenter_park_error"] = f"{type(exc).__name__}: {exc}"
         return []
 
+
+
+def _resize_existing_dwm_thumbnail_fast(session, width: int, height: int):
+    """Fast steady-state DWM resize path.
+
+    Once the thumbnail/source/crop contract is established, normal window
+    resizes should not repeat the expensive cold attach work (window-tree
+    enumeration, presenter parking, crop discovery and compositor flushes).
+    Return True on success, None when the caller should fall back to the full
+    positioning path.
+    """
+    if os.name != "nt" or not session or session.get("native_embed_mode") != "dwm-thumbnail":
+        return None
+    thumb_handle = _hwnd_int(session.get("dwm_thumbnail_handle") or 0)
+    source = _hwnd_int(session.get("dwm_thumbnail_source") or session.get("dwm_source_hwnd") or 0)
+    destination = _hwnd_int(session.get("dwm_thumbnail_destination") or session.get("dwm_destination_hwnd") or 0)
+    if not thumb_handle or not source or not destination:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = _typed_user32()
+        if not user32.IsWindow(_as_hwnd(source)) or not user32.IsWindow(_as_hwnd(destination)):
+            return None
+
+        width, height = max(1, int(width)), max(1, int(height))
+        old_contract = tuple(session.get("dwm_thumbnail_pixel_contract") or ())
+        if old_contract == (width, height):
+            session["dwm_fast_resize_noop_count"] = int(session.get("dwm_fast_resize_noop_count") or 0) + 1
+            return True
+
+        nonclient = session.get("dwm_source_nonclient_margins") or (0, 0)
+        try:
+            nonclient_w, nonclient_h = max(0, int(nonclient[0])), max(0, int(nonclient[1]))
+        except Exception:
+            nonclient_w = nonclient_h = 0
+        chrome_h = max(0, int(session.get("dwm_custom_chrome_height") or 0))
+        target_src_w = max(1, width + nonclient_w)
+        target_src_h = max(1, height + chrome_h + nonclient_h)
+        park_x, park_y = session.get("dwm_source_park_position") or (-32000, -32000)
+        cached_target = tuple(session.get("dwm_source_target_size") or ())
+        if cached_target != (target_src_w, target_src_h):
+            HWND_BOTTOM = 1
+            SWP_NOACTIVATE = 0x0010
+            user32.SetWindowPos(
+                _as_hwnd(source), _as_hwnd(HWND_BOTTOM), int(park_x), int(park_y),
+                target_src_w, target_src_h, SWP_NOACTIVATE,
+            )
+            session["dwm_source_target_size"] = (target_src_w, target_src_h)
+            session["dwm_fast_source_resize_count"] = int(session.get("dwm_fast_source_resize_count") or 0) + 1
+
+        dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+        HTHUMBNAIL = wintypes.HANDLE
+
+        class DWM_THUMBNAIL_PROPERTIES(ctypes.Structure):
+            _fields_ = [
+                ("dwFlags", wintypes.DWORD),
+                ("rcDestination", wintypes.RECT),
+                ("rcSource", wintypes.RECT),
+                ("opacity", ctypes.c_ubyte),
+                ("fVisible", wintypes.BOOL),
+                ("fSourceClientAreaOnly", wintypes.BOOL),
+            ]
+
+        dwmapi.DwmUpdateThumbnailProperties.argtypes = [HTHUMBNAIL, ctypes.POINTER(DWM_THUMBNAIL_PROPERTIES)]
+        dwmapi.DwmUpdateThumbnailProperties.restype = wintypes.HRESULT
+        DWM_TNP_RECTDESTINATION = 0x00000001
+        DWM_TNP_RECTSOURCE = 0x00000002
+        props = DWM_THUMBNAIL_PROPERTIES()
+        props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE
+        props.rcDestination = wintypes.RECT(0, 0, width, height)
+        props.rcSource = wintypes.RECT(0, chrome_h, width, chrome_h + height)
+        hr = int(dwmapi.DwmUpdateThumbnailProperties(HTHUMBNAIL(thumb_handle), ctypes.byref(props)))
+        if hr != 0:
+            session["dwm_fast_resize_hresult"] = f"0x{hr & 0xffffffff:08X}"
+            return None
+
+        # Intentionally do not DwmFlush() here. DWM property updates are queued
+        # to the compositor; synchronously flushing every interactive resize
+        # frame turns a cheap geometry update into a CPU/GPU pipeline stall.
+        session["dwm_thumbnail_destination_rect"] = (0, 0, width, height)
+        session["dwm_thumbnail_source_rect"] = (0, chrome_h, width, chrome_h + height)
+        session["dwm_thumbnail_pixel_contract"] = (width, height)
+        session["dwm_fast_resize_count"] = int(session.get("dwm_fast_resize_count") or 0) + 1
+        session["dwm_last_resize_path"] = "fast"
+        return True
+    except Exception as exc:
+        session["dwm_fast_resize_error"] = f"{type(exc).__name__}: {exc}"
+        return None
+
+
+def request_embedded_chromium_dwm_recrop():
+    """Force the next DWM resize through the full crop-discovery path."""
+    if not _EDGE_SESSION:
+        return False
+    _EDGE_SESSION["dwm_force_full_recrop"] = True
+    return True
+
 def _position_native_chromium_overlay(session, width: int, height: int):
     """Present Chromium through a DWM thumbnail owned by Tekzite.
 
@@ -4250,7 +4616,11 @@ def _position_native_chromium_overlay(session, width: int, height: int):
         # Park every Chromium top-level presenter, not just the app source.
         # This prevents auxiliary Chrome_WidgetWin_0 surfaces from appearing as
         # giant black squares next to Tekzite while DWM is mirroring the page.
-        _park_chromium_top_level_presenters(session, source, passes=1)
+        now_mono = time.monotonic()
+        last_park = float(session.get("dwm_presenter_last_park_at") or 0.0)
+        if (not session.get("dwm_thumbnail_handle")) or (now_mono - last_park) >= 1.0:
+            _park_chromium_top_level_presenters(session, source, passes=1)
+            session["dwm_presenter_last_park_at"] = now_mono
 
         dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
         HTHUMBNAIL = wintypes.HANDLE
@@ -4314,16 +4684,27 @@ def _position_native_chromium_overlay(session, width: int, height: int):
         hr = int(dwmapi.DwmUpdateThumbnailProperties(thumb, ctypes.byref(props)))
         if hr != 0:
             raise RuntimeError(f"DwmUpdateThumbnailProperties failed HRESULT=0x{hr & 0xffffffff:08X}")
-        dwmapi.DwmFlush()
+        # Only the cold/new-registration path needs a synchronous compositor
+        # barrier. Steady-state resizes use _resize_existing_dwm_thumbnail_fast
+        # and deliberately avoid DwmFlush() to prevent frame-by-frame stalls.
+        if not old_thumb or old_source != source or old_destination != destination:
+            dwmapi.DwmFlush()
+            session["dwm_cold_register_flush_count"] = int(session.get("dwm_cold_register_flush_count") or 0) + 1
         # v9.6: do not hold first reveal behind three 40 ms presenter-settle
         # passes. An immediate presenter pass already ran above. Late auxiliary
         # Chromium windows are maintenance work and can be parked asynchronously.
-        def _park_late_presenters():
-            try:
-                _park_chromium_top_level_presenters(session, source, passes=3, settle_delay=0.04)
-            except Exception:
-                pass
-        threading.Thread(target=_park_late_presenters, name="tekzite-dwm-presenter-park", daemon=True).start()
+        late_park_due = (time.monotonic() - float(session.get("dwm_presenter_last_park_at") or 0.0)) >= 1.0
+        if not session.get("dwm_presenter_park_thread_running") and (not old_thumb or late_park_due):
+            session["dwm_presenter_park_thread_running"] = True
+            def _park_late_presenters():
+                try:
+                    _park_chromium_top_level_presenters(session, source, passes=3, settle_delay=0.04)
+                    session["dwm_presenter_last_park_at"] = time.monotonic()
+                except Exception:
+                    pass
+                finally:
+                    session["dwm_presenter_park_thread_running"] = False
+            threading.Thread(target=_park_late_presenters, name="tekzite-dwm-presenter-park", daemon=True).start()
 
         session["native_embed_mode"] = "dwm-thumbnail"
         session["native_setparent_used"] = False
@@ -4339,6 +4720,8 @@ def _position_native_chromium_overlay(session, width: int, height: int):
         session["native_overlay_style_mutated"] = False
         session["native_overlay_render_forced"] = False
         session["native_overlay_region_used"] = False
+        session["dwm_full_reflow_count"] = int(session.get("dwm_full_reflow_count") or 0) + 1
+        session["dwm_last_resize_path"] = "full"
         return True
     except Exception as exc:
         session["dwm_thumbnail_registered"] = False
@@ -4346,6 +4729,37 @@ def _position_native_chromium_overlay(session, width: int, height: int):
         session["dwm_thumbnail_error"] = f"{type(exc).__name__}: {exc}"
         session["native_overlay_error"] = session["dwm_thumbnail_error"]
         return False
+
+def _wait_for_live_embed_owner(session, candidate, width, height):
+    """Allow a short owner-transition window without embedding an invalid HWND.
+
+    The normal path has exactly one validation and no delay. Retries run on
+    the navigation worker, before presentation, and retain the live-host check.
+    """
+    owner = _validate_embed_owner_before_reparent(session, candidate, width, height)
+    session["embed_owner_wait_attempts"] = 1
+    if owner:
+        session.pop("pre_attach_owner_error", None)
+        return owner
+    # Re-activate only the intended page, never create a replacement tab/window.
+    target = session.get("target_id")
+    if target:
+        try:
+            _browser_cdp_call(session, "Target.activateTarget", {"targetId": target}, timeout=1)
+        except Exception as exc:
+            session["embed_owner_activation_error"] = str(exc)
+    for attempt in range(2, 5):
+        process = session.get("process")
+        if process is not None and process.poll() is not None:
+            break
+        time.sleep(0.05)
+        owner = _validate_embed_owner_before_reparent(session, candidate, width, height)
+        session["embed_owner_wait_attempts"] = attempt
+        if owner:
+            session.pop("pre_attach_owner_error", None)
+            return owner
+    return 0
+
 
 def attach_embedded_chromium(parent_hwnd: int, width: int, height: int):
     """Re-parent Chromium's web-content HWND into a native Tk host frame.
@@ -4383,7 +4797,7 @@ def attach_embedded_chromium(parent_hwnd: int, width: int, height: int):
     # Validate that the candidate still owns a page-sized RenderWidgetHost
     # immediately before compositor priming/reparenting. Never embed a stale
     # Chrome_WidgetWin just because IsWindow() still returns true.
-    hwnd = _validate_embed_owner_before_reparent(session, hwnd, width, height)
+    hwnd = _wait_for_live_embed_owner(session, hwnd, width, height)
     if not hwnd:
         raise RuntimeError("Chromium page owner lost its live render host before embedding")
 
@@ -4395,7 +4809,7 @@ def attach_embedded_chromium(parent_hwnd: int, width: int, height: int):
     # once more at the last safe point before SetParent(). If ownership moved,
     # prime the newly selected owner instead of carrying a dead compositor into
     # Tekzite.
-    verified_hwnd = _validate_embed_owner_before_reparent(session, hwnd, width, height)
+    verified_hwnd = _wait_for_live_embed_owner(session, hwnd, width, height)
     if not verified_hwnd:
         raise RuntimeError("Chromium page owner became stale during compositor prime")
     if _hwnd_int(verified_hwnd) != _hwnd_int(hwnd):
@@ -4559,9 +4973,13 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
     session_was_running = _EDGE_SESSION is not None
     launch_geometry = _initial_chromium_launch_geometry(parent_hwnd, width, height) if attach_native else None
     first_native_bootstrap = bool(attach_native and not target_id and not create_new_target and not session_was_running)
-    direct_launch_url = str(url or "about:blank") if first_native_bootstrap else None
+    # v10.5.0: never launch the cold app window directly at an arbitrary site.
+    # Redirects/canonicalization can change the URL before Tekzite claims the
+    # app target, making strict target matching fail. Claim about:blank first,
+    # then perform exactly one normal Page.navigate below.
+    bootstrap_launch_url = "about:blank" if first_native_bootstrap else None
     session = _start_persistent_chromium_session(
-        launch_geometry=launch_geometry, launch_url=direct_launch_url
+        launch_geometry=launch_geometry, launch_url=bootstrap_launch_url
     )
     hot_native_navigation = bool(
         attach_native
@@ -4582,7 +5000,11 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
     session["dwm_zoom_percent"] = preferred_zoom_percent
     session["preferences_zoom_percent"] = preferred_zoom_percent
     session["preferences_zoom_seeded_before_target"] = True
-    session["native_direct_app_launch"] = bool(first_native_bootstrap and direct_launch_url)
+    session["native_direct_app_launch"] = False
+    session["native_blank_bootstrap_launch"] = bool(
+        first_native_bootstrap and str(session.get("launch_url") or "").lower() == "about:blank"
+    )
+    session["native_requested_initial_url"] = str(url or "about:blank") if first_native_bootstrap else None
     if launch_geometry and not session.get("native_launch_in_place"):
         session["native_launch_in_place"] = True
         session["native_launch_geometry"] = tuple(launch_geometry)
@@ -4594,7 +5016,8 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
     # recreate the extra Chrome_WidgetWin_0 topology we were trying to avoid.
     if attach_native and not target_id and not create_new_target:
         target_id = create_embedded_chromium_target(
-            str(url or "about:blank"), require_bootstrap=True
+            "about:blank" if first_native_bootstrap else str(url or "about:blank"),
+            require_bootstrap=True,
         )
 
     # v6.5: never mutate document zoom before navigation.  Keep only the saved
@@ -4813,6 +5236,11 @@ def resize_embedded_chromium(width: int, height: int):
         width, height = _native_client_size(parent_hwnd, width, height)
         _EDGE_SESSION["embedded_parent_client_size"] = (int(width), int(height))
         if _EDGE_SESSION.get("native_embed_mode") in {"top-level-overlay", "detached-top-level-overlay", "detached-unclipped-top-level-overlay", "dwm-thumbnail"}:
+            force_full = bool(_EDGE_SESSION.pop("dwm_force_full_recrop", False))
+            if _EDGE_SESSION.get("native_embed_mode") == "dwm-thumbnail" and not force_full:
+                fast_result = _resize_existing_dwm_thumbnail_fast(_EDGE_SESSION, width, height)
+                if fast_result is True:
+                    return True
             return _position_native_chromium_overlay(_EDGE_SESSION, width, height)
         SWP_NOZORDER = 0x0004
         SWP_NOACTIVATE = 0x0010
@@ -5826,6 +6254,137 @@ def dispatch_embedded_chromium_key(key: str = "", *, text: str = "",
 
 
 
+def get_embedded_chromium_site_info(*, target_id: str = None, timeout: int = 5):
+    """Return privacy/security metadata for the current Chromium target.
+
+    Cookie values are intentionally never returned. The UI receives counts and
+    non-secret attributes only, together with origin-scoped storage usage when
+    Chromium exposes it through CDP.
+    """
+    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    if not session or not session.get("port"):
+        return {}
+
+    expr = r'''(() => {
+      let localCount = 0, sessionCount = 0;
+      try { localCount = localStorage.length; } catch (_) {}
+      try { sessionCount = sessionStorage.length; } catch (_) {}
+      return {
+        title: String(document.title || ''),
+        url: String(location.href || ''),
+        origin: String(location.origin || ''),
+        scheme: String(location.protocol || '').replace(':', ''),
+        host: String(location.hostname || ''),
+        localStorageEntries: Number(localCount || 0),
+        sessionStorageEntries: Number(sessionCount || 0),
+        cookieEnabled: !!navigator.cookieEnabled,
+        secureContext: !!window.isSecureContext
+      };
+    })()'''
+    result = _persistent_page_cdp_call(
+        session, "Runtime.evaluate",
+        {"expression": expr, "returnByValue": True},
+        target_id=target_id, timeout=timeout, purpose="site-info",
+    )
+    info = (((result or {}).get("result") or {}).get("value"))
+    if not isinstance(info, dict):
+        info = {}
+
+    url = str(info.get("url") or "")
+    origin = str(info.get("origin") or "")
+    info["cookieCount"] = 0
+    info["cookies"] = []
+    if url.startswith(("http://", "https://")):
+        try:
+            cookie_result = _persistent_page_cdp_call(
+                session, "Network.getCookies", {"urls": [url]},
+                target_id=target_id, timeout=timeout, purpose="site-info",
+            )
+            cookies = (cookie_result or {}).get("cookies") or []
+            if isinstance(cookies, list):
+                info["cookieCount"] = len(cookies)
+                info["cookies"] = [
+                    {
+                        "name": str(item.get("name") or ""),
+                        "domain": str(item.get("domain") or ""),
+                        "secure": bool(item.get("secure")),
+                        "httpOnly": bool(item.get("httpOnly")),
+                        "sameSite": str(item.get("sameSite") or ""),
+                    }
+                    for item in cookies[:100] if isinstance(item, dict)
+                ]
+        except Exception:
+            pass
+
+    info["securityState"] = "secure" if str(info.get("scheme")) == "https" else "neutral"
+    info["schemeIsCryptographic"] = str(info.get("scheme")) == "https"
+    try:
+        _persistent_page_cdp_call(
+            session, "Security.enable", {}, target_id=target_id,
+            timeout=timeout, purpose="site-info",
+        )
+        security = _persistent_page_cdp_call(
+            session, "Security.getSecurityState", {}, target_id=target_id,
+            timeout=timeout, purpose="site-info",
+        )
+        if isinstance(security, dict):
+            info["securityState"] = str(security.get("securityState") or info["securityState"])
+            info["schemeIsCryptographic"] = bool(
+                security.get("schemeIsCryptographic", info["schemeIsCryptographic"])
+            )
+            explanations = security.get("explanations") or []
+            if isinstance(explanations, list):
+                info["securityExplanations"] = [
+                    str(row.get("summary") or row.get("description") or "")
+                    for row in explanations[:10] if isinstance(row, dict)
+                ]
+    except Exception:
+        pass
+
+    info["usageBytes"] = None
+    info["quotaBytes"] = None
+    info["usageBreakdown"] = []
+    if origin.startswith(("http://", "https://")):
+        try:
+            usage = _persistent_page_cdp_call(
+                session, "Storage.getUsageAndQuota", {"origin": origin},
+                target_id=target_id, timeout=timeout, purpose="site-info",
+            )
+            if isinstance(usage, dict):
+                info["usageBytes"] = usage.get("usage")
+                info["quotaBytes"] = usage.get("quota")
+                breakdown = usage.get("usageBreakdown") or []
+                if isinstance(breakdown, list):
+                    info["usageBreakdown"] = [
+                        {"type": str(row.get("storageType") or ""), "bytes": row.get("usage")}
+                        for row in breakdown if isinstance(row, dict) and row.get("usage")
+                    ]
+        except Exception:
+            pass
+    return info
+
+
+def clear_embedded_chromium_site_data(*, target_id: str = None, timeout: int = 5):
+    """Clear Chromium data for only the current page origin."""
+    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    if not session or not session.get("port"):
+        return False
+    result = _persistent_page_cdp_call(
+        session, "Runtime.evaluate",
+        {"expression": "String(location.origin || '')", "returnByValue": True},
+        target_id=target_id, timeout=timeout, purpose="site-info",
+    )
+    origin = str((((result or {}).get("result") or {}).get("value")) or "")
+    if not origin.startswith(("http://", "https://")):
+        return False
+    _persistent_page_cdp_call(
+        session, "Storage.clearDataForOrigin",
+        {"origin": origin, "storageTypes": "all"},
+        target_id=target_id, timeout=timeout, purpose="site-info",
+    )
+    return True
+
+
 def get_embedded_chromium_page_state(*, target_id: str = None, include_favicon: bool = False, timeout: int = 3):
     """Return lightweight live page metadata for Tekzite's browser chrome."""
     session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
@@ -5837,7 +6396,8 @@ def get_embedded_chromium_page_state(*, target_id: str = None, include_favicon: 
         title: String(document.title || ''),
         url: String(location.href || ''),
         readyState: String(document.readyState || ''),
-        favicon: icon ? String(icon.href || '') : ((location.protocol === 'http:' || location.protocol === 'https:') ? String(new URL('/favicon.ico', location.href)) : '')
+        favicon: icon ? String(icon.href || '') : ((location.protocol === 'http:' || location.protocol === 'https:') ? String(new URL('/favicon.ico', location.href)) : ''),
+        audible: !!Array.from(document.querySelectorAll('audio,video')).find(m => !m.paused && !m.ended && m.readyState > 1)
       };
     })()'''
     result = _persistent_page_cdp_call(
@@ -6022,11 +6582,18 @@ def embedded_chromium_history(delta: int):
 
 
 def close_embedded_chromium(clear_profile=False):
+    """Serialize shutdown against concurrent Chromium bootstrap/recovery."""
+    with _EDGE_SESSION_LOCK:
+        return _close_embedded_chromium_unlocked(clear_profile=clear_profile)
+
+
+def _close_embedded_chromium_unlocked(clear_profile=False):
     """Shut down Chromium; optionally erase all compatibility profile data."""
     global _EDGE_SESSION
     session = _EDGE_SESSION
     _EDGE_SESSION = None
     if session:
+        session_loopback_port = session.get("port")
         thumb = session.get("dwm_thumbnail_handle")
         if thumb and os.name == "nt":
             try:
@@ -6050,6 +6617,8 @@ def close_embedded_chromium(clear_profile=False):
                 shutil.rmtree(profile, ignore_errors=True)
             except Exception:
                 pass
+        if session_loopback_port:
+            revoke_loopback_port(session_loopback_port)
     if clear_profile:
         try:
             _COOKIE_JAR.clear()
@@ -6150,3 +6719,62 @@ def clear_network_cache():
     fetch_bytes.cache_clear()
     fetch_document.cache_clear()
     fetch_url.cache_clear()
+
+
+def set_embedded_chromium_permission(origin: str, permission: str, setting: str, *, timeout: int = 4):
+    """Apply one site permission to Chromium through the browser DevTools domain.
+
+    Tekzite persists the policy itself; this function only applies it to the
+    current Chromium session. ``setting`` is one of granted/denied/prompt.
+    """
+    origin = str(origin or '').strip()
+    permission = str(permission or '').strip()
+    setting = str(setting or '').strip().lower()
+    if not origin.startswith(('http://', 'https://')):
+        raise ValueError('A normal http/https origin is required')
+    if setting not in {'granted', 'denied', 'prompt'}:
+        raise ValueError('Permission setting must be granted, denied, or prompt')
+    allowed = {
+        'notifications', 'geolocation', 'audioCapture', 'videoCapture',
+        'clipboardReadWrite', 'clipboardSanitizedWrite', 'sensors', 'midi', 'midiSysex',
+    }
+    if permission not in allowed:
+        raise ValueError('Unsupported permission')
+    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    _browser_cdp_call(
+        session, 'Browser.setPermission',
+        {'permission': {'name': permission}, 'setting': setting, 'origin': origin},
+        timeout=timeout,
+    )
+    return True
+
+
+def get_embedded_chromium_process_info(*, timeout: int = 4):
+    """Return Chromium process CPU metadata for Tekzite's Task Manager."""
+    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    result = _browser_cdp_call(session, 'SystemInfo.getProcessInfo', timeout=timeout)
+    rows = result.get('processInfo', []) if isinstance(result, dict) else []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def get_embedded_chromium_target_metrics(target_id: str, *, timeout: int = 3):
+    """Return lightweight renderer metrics for one live Tekzite tab target."""
+    if not target_id:
+        return {}
+    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    try:
+        _persistent_page_cdp_call(
+            session, 'Performance.enable', {}, target_id=target_id,
+            timeout=timeout, purpose='task-manager',
+        )
+    except Exception:
+        pass
+    result = _persistent_page_cdp_call(
+        session, 'Performance.getMetrics', {}, target_id=target_id,
+        timeout=timeout, purpose='task-manager',
+    )
+    metrics = {}
+    for item in (result or {}).get('metrics', []):
+        if isinstance(item, dict) and item.get('name'):
+            metrics[str(item['name'])] = item.get('value')
+    return metrics

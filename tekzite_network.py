@@ -9,9 +9,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import ipaddress
 import select
 import socket
 import socketserver
+from loopback_policy import install as install_loopback_policy
 import sys
 import threading
 import time
@@ -23,6 +25,18 @@ IDLE_TIMEOUT = 60.0
 LOG_LEVEL = "off"
 ALLOW_BROWSER_TELEMETRY = False
 ADBLOCK_ENABLED = True
+ADBLOCK_POLICY = None
+TRACKER_BLOCKING = True
+HTTPS_FIRST = True
+PRIVACY_STATS_PATH = None
+_PRIVACY_STATS_LOCK = threading.RLock()
+_PRIVACY_STATS = {
+    "started_at": time.time(),
+    "telemetry_blocked": 0,
+    "trackers_blocked": 0,
+    "ads_blocked": 0,
+    "https_upgrades": 0,
+}
 
 # v4.54: browser telemetry is denied in the proxy before DNS or an upstream
 # socket is opened.  This list is deliberately limited to browser/vendor
@@ -90,13 +104,110 @@ ADBLOCK_SUFFIXES = (
     ".quantserve.com",
 )
 
+# Dedicated analytics/fingerprinting endpoints. This list intentionally avoids
+# broad first-party domains such as facebook.com so normal site visits are not
+# turned into collateral damage.
+TRACKER_HOSTS = {
+    "www.google-analytics.com",
+    "ssl.google-analytics.com",
+    "analytics.google.com",
+    "www.googletagmanager.com",
+    "googletagmanager.com",
+    "stats.g.doubleclick.net",
+    "bat.bing.com",
+    "www.clarity.ms",
+    "clarity.ms",
+    "script.hotjar.com",
+    "static.hotjar.com",
+    "vars.hotjar.com",
+    "in.hotjar.com",
+    "api.segment.io",
+    "cdn.segment.com",
+    "api-js.mixpanel.com",
+    "api.mixpanel.com",
+    "api2.amplitude.com",
+    "bam.nr-data.net",
+    "js-agent.newrelic.com",
+    "browser-intake-datadoghq.com",
+    "edge.fullstory.com",
+    "rs.fullstory.com",
+    "cdn.mouseflow.com",
+    "heapanalytics.com",
+    "cdn.heapanalytics.com",
+    "app-measurement.com",
+}
+TRACKER_SUFFIXES = (
+    ".google-analytics.com",
+    ".googletagmanager.com",
+    ".hotjar.com",
+    ".hotjar.io",
+    ".scorecardresearch.com",
+    ".segment.io",
+    ".mixpanel.com",
+    ".amplitude.com",
+    ".nr-data.net",
+    ".fullstory.com",
+    ".mouseflow.com",
+    ".heapanalytics.com",
+    ".app-measurement.com",
+)
+
+
+def _write_privacy_stats():
+    if not PRIVACY_STATS_PATH:
+        return
+    try:
+        path = os.path.abspath(PRIVACY_STATS_PATH)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(_PRIVACY_STATS, handle, separators=(",", ":"))
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _privacy_stat(key: str):
+    with _PRIVACY_STATS_LOCK:
+        _PRIVACY_STATS[key] = int(_PRIVACY_STATS.get(key, 0) or 0) + 1
+        _write_privacy_stats()
+
+
+def _is_tracker_host(host: str) -> bool:
+    if not TRACKER_BLOCKING:
+        return False
+    host = (host or "").strip().rstrip(".").lower()
+    return host in TRACKER_HOSTS or any(host.endswith(suffix) for suffix in TRACKER_SUFFIXES)
+
+
+def _deny_tracker(client: socket.socket, host: str, method: str):
+    _privacy_stat("trackers_blocked")
+    _log("tracker_blocked", host=host, method=method)
+    client.sendall(
+        b"HTTP/1.1 403 Forbidden\r\n"
+        b"Connection: close\r\n"
+        b"Content-Length: 0\r\n"
+        b"X-Tekzite-Blocked: tracker\r\n\r\n"
+    )
+
+
 def _is_ad_host(host: str) -> bool:
-    if not ADBLOCK_ENABLED:
+    enabled = ADBLOCK_ENABLED
+    if ADBLOCK_POLICY:
+        try:
+            with open(ADBLOCK_POLICY, encoding="utf-8") as handle:
+                policy = json.load(handle)
+            if isinstance(policy.get("enabled"), bool):
+                enabled = policy["enabled"]
+        except (OSError, ValueError, AttributeError):
+            pass  # Keep the configured default when the policy is unreadable.
+    if not enabled:
         return False
     host = (host or "").strip().rstrip(".").lower()
     return host in ADBLOCK_HOSTS or any(host.endswith(suffix) for suffix in ADBLOCK_SUFFIXES)
 
 def _deny_ad(client: socket.socket, host: str, method: str):
+    _privacy_stat("ads_blocked")
     _log("ad_blocked", host=host, method=method)
     client.sendall(
         b"HTTP/1.1 403 Forbidden\r\n"
@@ -118,6 +229,7 @@ def _is_browser_telemetry_host(host: str) -> bool:
     return host in TELEMETRY_HOSTS or any(host.endswith(suffix) for suffix in TELEMETRY_SUFFIXES)
 
 def _deny_telemetry(client: socket.socket, host: str, method: str):
+    _privacy_stat("telemetry_blocked")
     _log("telemetry_blocked", host=host, method=method)
     client.sendall(
         b"HTTP/1.1 403 Forbidden\r\n"
@@ -289,6 +401,17 @@ def _tune_latency_socket(sock: socket.socket):
     return sock
 
 
+def _is_local_network_host(host: str) -> bool:
+    value = (host or "").strip().strip("[]").lower()
+    if value in {"localhost", "127.0.0.1", "::1"} or value.endswith((".local", ".lan")):
+        return True
+    try:
+        ip = ipaddress.ip_address(value)
+        return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
+    except ValueError:
+        return False
+
+
 class ProxyHandler(socketserver.BaseRequestHandler):
     def handle(self):
         client: socket.socket = self.request
@@ -319,6 +442,9 @@ class ProxyHandler(socketserver.BaseRequestHandler):
         host, port = _split_host_port(target, 443)
         if _is_browser_telemetry_host(host):
             _deny_telemetry(client, host, "CONNECT")
+            return
+        if _is_tracker_host(host):
+            _deny_tracker(client, host, "CONNECT")
             return
         if _is_ad_host(host):
             _deny_ad(client, host, "CONNECT")
@@ -353,8 +479,26 @@ class ProxyHandler(socketserver.BaseRequestHandler):
         if _is_browser_telemetry_host(host):
             _deny_telemetry(client, host, method.upper())
             return
+        if _is_tracker_host(host):
+            _deny_tracker(client, host, method.upper())
+            return
         if _is_ad_host(host):
             _deny_ad(client, host, method.upper())
+            return
+        if HTTPS_FIRST and int(port) == 80 and not _is_local_network_host(host):
+            _privacy_stat("https_upgrades")
+            location_host = host
+            if ":" in host and not host.startswith("["):
+                location_host = f"[{host}]"
+            location = f"https://{location_host}{path}"
+            encoded = location.encode("iso-8859-1", "replace")
+            client.sendall(
+                b"HTTP/1.1 307 Temporary Redirect\r\n"
+                b"Connection: close\r\n"
+                b"Cache-Control: no-store\r\n"
+                b"Location: " + encoded + b"\r\n"
+                b"Content-Length: 0\r\n\r\n"
+            )
             return
         _log("http", method=method.upper(), host=host, port=port, path=path[:512])
         upstream = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
@@ -411,7 +555,14 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 def main(argv=None):
-    global LOG_LEVEL, ALLOW_BROWSER_TELEMETRY, ADBLOCK_ENABLED
+    global LOG_LEVEL, ALLOW_BROWSER_TELEMETRY, ADBLOCK_ENABLED, ADBLOCK_POLICY
+    global TRACKER_BLOCKING, HTTPS_FIRST, PRIVACY_STATS_PATH, _PRIVACY_STATS
+    # The helper accepts Chromium on loopback, but it never needs to initiate
+    # a loopback connection itself. Its public upstream TCP connections remain
+    # unaffected by this process-local policy.
+    strict_loopback = str(os.environ.get("TEKZITE_STRICT_PYTHON_LOOPBACK", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    os.environ["TEKZITE_LOOPBACK_ROLE"] = "network-helper"
+    install_loopback_policy(strict_loopback)
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=17890)
@@ -419,10 +570,26 @@ def main(argv=None):
     ap.add_argument("--log-level", choices=("off", "errors", "full"), default="off")
     ap.add_argument("--allow-browser-telemetry", action="store_true")
     ap.add_argument("--disable-adblock", action="store_true")
+    ap.add_argument("--disable-tracker-blocking", action="store_true")
+    ap.add_argument("--disable-https-first", action="store_true")
+    ap.add_argument("--adblock-policy")
+    ap.add_argument("--privacy-stats")
     args = ap.parse_args(argv)
     LOG_LEVEL = args.log_level
     ALLOW_BROWSER_TELEMETRY = bool(args.allow_browser_telemetry)
     ADBLOCK_ENABLED = not bool(args.disable_adblock)
+    TRACKER_BLOCKING = not bool(args.disable_tracker_blocking)
+    HTTPS_FIRST = not bool(args.disable_https_first)
+    ADBLOCK_POLICY = args.adblock_policy
+    PRIVACY_STATS_PATH = args.privacy_stats
+    _PRIVACY_STATS = {
+        "started_at": time.time(),
+        "telemetry_blocked": 0,
+        "trackers_blocked": 0,
+        "ads_blocked": 0,
+        "https_upgrades": 0,
+    }
+    _write_privacy_stats()
     if args.host not in {"127.0.0.1", "::1", "localhost"}:
         raise SystemExit("Tekzite Network Engine only binds to loopback")
 

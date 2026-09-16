@@ -5,13 +5,20 @@ import sys
 import subprocess
 import json
 import base64
+import tempfile
+import shutil
+import traceback
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog, filedialog, colorchooser
+from browser_features import BrowserFeatures
+from browser_state import load_bookmarks, load_session, read_json, session_snapshot, write_json, valid_url
 from PIL import Image, ImageTk, ImageGrab
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote_plus, urlsplit, urlunsplit, parse_qsl, urlencode
+from privacy_core import strip_tracking_parameters, upgrade_to_https
+import loopback_policy
 
 from engine.net import (
     open_embedded_chromium,
@@ -27,16 +34,203 @@ from engine.net import (
     get_embedded_chromium_page_state, find_embedded_chromium_text,
     set_embedded_chromium_presentation, set_embedded_chromium_zoom, check_embedded_chromium_zoom,
     validate_and_recover_embedded_chromium_frame, record_embedded_surface_probe, record_embedded_native_recovery, sync_embedded_chromium_native_geometry,
-    warm_embedded_chromium_io_channels,
+    warm_embedded_chromium_io_channels, stop_embedded_chromium_loading,
+    request_embedded_chromium_dwm_recrop, network_engine_debug, privacy_stats,
 )
 
 
 
 START_URL = "https://www.startpage.com/"
 
+
+UI_COLOR_DEFAULTS = {
+    "bg": "#06080d",
+    "chrome": "#0d1118",
+    "chrome_2": "#121826",
+    "chrome_hover": "#1a2233",
+    "field": "#141c2a",
+    "field_focus": "#1b2537",
+    "border": "#2c3850",
+    "border_soft": "#1a2233",
+    "border_focus": "#8f7dff",
+    "text": "#f5f7fb",
+    "muted": "#9aa4bc",
+    "muted_dim": "#69738a",
+    "accent": "#8b75ff",
+    "accent_hover": "#a08dff",
+    "danger": "#ff6d87",
+    "success": "#4ad594",
+}
+
+TOOLBAR_ITEM_IDS = ("back", "forward", "reload", "home", "address", "downloads", "menu")
+TOOLBAR_ITEM_NAMES = {
+    "back": "Back", "forward": "Forward", "reload": "Reload / Stop",
+    "home": "Home", "address": "Address bar", "downloads": "Downloads", "menu": "Main menu",
+}
+
+CUSTOMIZATION_PRESETS = {
+    "Aurora Glass": {
+        **UI_COLOR_DEFAULTS,
+        "bg": "#05070c", "chrome": "#0b111a", "chrome_2": "#111a28",
+        "chrome_hover": "#1a2740", "field": "#121c2b", "field_focus": "#1b2940",
+        "border": "#30415d", "border_soft": "#18263b", "border_focus": "#9b8aff",
+        "text": "#f7f8fd", "muted": "#a3aec6", "muted_dim": "#6c7891",
+        "accent": "#8f79ff", "accent_hover": "#aa9bff", "danger": "#ff6c87", "success": "#4fe0a0",
+    },
+    "OLED Neon": {
+        **UI_COLOR_DEFAULTS,
+        "bg": "#000000", "chrome": "#030609", "chrome_2": "#07100f",
+        "chrome_hover": "#0c1d1a", "field": "#081311", "field_focus": "#0d211d",
+        "border": "#153b32", "border_soft": "#0b211c", "border_focus": "#69f6c8",
+        "text": "#effff9", "muted": "#9bc9bb", "muted_dim": "#55796e",
+        "accent": "#64ebbf", "accent_hover": "#91ffd8", "danger": "#ff637d", "success": "#64ebbf",
+    },
+    "Aurora": dict(UI_COLOR_DEFAULTS),
+    "Midnight": {
+        **UI_COLOR_DEFAULTS, "bg": "#090b10", "chrome": "#0f131b", "chrome_2": "#151a24",
+        "chrome_hover": "#1b2230", "field": "#181e29", "field_focus": "#202838",
+        "border": "#2a3242", "border_soft": "#1d2430",
+        "border_focus": "#7c68ff", "muted": "#929caf", "muted_dim": "#6f788a",
+        "accent": "#7965ff", "accent_hover": "#8c7aff", "danger": "#ff6078", "success": "#45d483",
+    },
+    "OLED Black": {
+        **UI_COLOR_DEFAULTS, "bg": "#000000", "chrome": "#050505", "chrome_2": "#0b0b0b",
+        "chrome_hover": "#171717", "field": "#101010", "field_focus": "#1a1a1a",
+        "border": "#292929", "border_soft": "#151515",
+    },
+    "Graphite": {
+        **UI_COLOR_DEFAULTS, "bg": "#17191d", "chrome": "#202328", "chrome_2": "#292d33",
+        "chrome_hover": "#333841", "field": "#252930", "field_focus": "#303640",
+        "border": "#414750", "border_soft": "#2a2f36", "accent": "#6f8cff", "accent_hover": "#88a0ff",
+    },
+    "Light": {
+        "bg": "#f4f6f9", "chrome": "#ffffff", "chrome_2": "#edf0f5", "chrome_hover": "#e3e7ee",
+        "field": "#ffffff", "field_focus": "#f6f8fb", "border": "#c9d0da", "border_soft": "#dfe4ea",
+        "border_focus": "#6355e8", "text": "#161a22", "muted": "#5d6675", "muted_dim": "#7c8592",
+        "accent": "#6556e8", "accent_hover": "#7669ee", "danger": "#d63f55", "success": "#168f55",
+    },
+}
+
+DEFAULT_CUSTOMIZATION = {
+    "preset": "Aurora Glass",
+    "colors": dict(CUSTOMIZATION_PRESETS["Aurora Glass"]),
+    "font_family": "",
+    "display_font_family": "",
+    "monospace_font_family": "",
+    "font_size": 10,
+    "menu_font_size": 10,
+    "tab_font_size": 9,
+    "toolbar_font_size": 10,
+    "ui_scale": 1.0,
+    "density": "comfortable",
+    "animations": True,
+    "window_control_style": "traffic_lights",
+    "tab_style": "soft",
+    "show_app_bar": True,
+    "show_brand_badge": True,
+    "show_title_text": True,
+    "show_version_in_title": False,
+    "show_menu_bar": True,
+    "show_window_controls": True,
+    "show_tab_bar": True,
+    "show_toolbar": True,
+    "show_new_tab_button": True,
+    "new_tab_button_position": "right",
+    "show_tab_favicons": True,
+    "show_tab_close_buttons": True,
+    "show_tab_group_chips": True,
+    "show_tab_active_indicator": True,
+    "tab_title_chars": 24,
+    "tab_position": "above_toolbar",
+    "toolbar_order": list(TOOLBAR_ITEM_IDS),
+    "toolbar_visible": {item: True for item in TOOLBAR_ITEM_IDS},
+    "toolbar_label_style": "icons",
+    "show_site_info_button": True,
+    "show_bookmark_button": True,
+    "show_scrollbar": True,
+    "show_chrome_separator": True,
+    "show_status_activity_dot": True,
+    "show_status_version": True,
+    "app_bar_height": 38,
+    "tab_bar_height": 44,
+    "toolbar_height": 62,
+    "status_bar_height": 26,
+    "find_bar_height": 40,
+    "window_width": 1360,
+    "window_height": 860,
+    "window_min_width": 900,
+    "window_min_height": 600,
+    "start_maximized": False,
+}
+
+def _valid_hex_color(value, fallback):
+    text = str(value or "").strip()
+    return text.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", text) else str(fallback)
+
+def _normalized_customization(value):
+    src = value if isinstance(value, dict) else {}
+    out = dict(DEFAULT_CUSTOMIZATION)
+    default_colors = dict(DEFAULT_CUSTOMIZATION.get("colors") or UI_COLOR_DEFAULTS)
+    raw_colors = src.get("colors") if isinstance(src.get("colors"), dict) else {}
+    colors = dict(default_colors) if not raw_colors else {}
+    if raw_colors:
+        for key, fallback in UI_COLOR_DEFAULTS.items():
+            colors[key] = _valid_hex_color(raw_colors.get(key), fallback)
+    out["colors"] = colors
+    for key in out:
+        if key in ("colors", "toolbar_visible", "toolbar_order"):
+            continue
+        if key in src:
+            out[key] = src[key]
+    for key in ("show_app_bar", "show_brand_badge", "show_title_text", "show_version_in_title", "show_menu_bar",
+                "show_window_controls", "show_tab_bar", "show_toolbar", "show_new_tab_button", "show_tab_favicons",
+                "show_tab_close_buttons", "show_tab_group_chips", "show_tab_active_indicator", "animations",
+                "show_site_info_button", "show_bookmark_button", "show_scrollbar", "show_chrome_separator", "show_status_activity_dot", "show_status_version", "start_maximized"):
+        out[key] = bool(out.get(key, DEFAULT_CUSTOMIZATION[key]))
+    for key, low, high in (("font_size", 7, 22), ("menu_font_size", 7, 20), ("tab_font_size", 7, 20),
+                           ("toolbar_font_size", 7, 22), ("tab_title_chars", 6, 80),
+                           ("app_bar_height", 24, 80), ("tab_bar_height", 28, 90), ("toolbar_height", 38, 100),
+                           ("status_bar_height", 18, 60), ("find_bar_height", 28, 80),
+                           ("window_width", 720, 7680), ("window_height", 480, 4320),
+                           ("window_min_width", 640, 3840), ("window_min_height", 400, 2160)):
+        try:
+            out[key] = max(low, min(high, int(out.get(key, DEFAULT_CUSTOMIZATION[key]))))
+        except Exception:
+            out[key] = DEFAULT_CUSTOMIZATION[key]
+    try:
+        out["ui_scale"] = max(0.70, min(1.60, float(out.get("ui_scale", 1.0))))
+    except Exception:
+        out["ui_scale"] = 1.0
+    out["density"] = str(out.get("density") or "comfortable") if str(out.get("density") or "comfortable") in ("compact", "comfortable", "spacious") else "comfortable"
+    out["window_control_style"] = str(out.get("window_control_style") or "traffic_lights") if str(out.get("window_control_style") or "traffic_lights") in ("tekzite", "traffic_lights") else "traffic_lights"
+    out["tab_style"] = str(out.get("tab_style") or "soft") if str(out.get("tab_style") or "soft") in ("soft", "classic") else "soft"
+    out["toolbar_label_style"] = str(out.get("toolbar_label_style") or "icons") if str(out.get("toolbar_label_style") or "icons") in ("icons", "text", "both") else "icons"
+    out["tab_position"] = str(out.get("tab_position") or "above_toolbar") if str(out.get("tab_position") or "above_toolbar") in ("above_toolbar", "below_toolbar") else "above_toolbar"
+    out["new_tab_button_position"] = str(out.get("new_tab_button_position") or "right") if str(out.get("new_tab_button_position") or "right") in ("left", "right") else "right"
+    order = []
+    for item in src.get("toolbar_order", DEFAULT_CUSTOMIZATION["toolbar_order"]):
+        item = str(item)
+        if item in TOOLBAR_ITEM_IDS and item not in order:
+            order.append(item)
+    for item in TOOLBAR_ITEM_IDS:
+        if item not in order:
+            order.append(item)
+    out["toolbar_order"] = order
+    visible_src = src.get("toolbar_visible") if isinstance(src.get("toolbar_visible"), dict) else {}
+    out["toolbar_visible"] = {item: bool(visible_src.get(item, True)) for item in TOOLBAR_ITEM_IDS}
+    out["font_family"] = str(out.get("font_family") or "").strip()[:80]
+    out["display_font_family"] = str(out.get("display_font_family") or "").strip()[:80]
+    out["monospace_font_family"] = str(out.get("monospace_font_family") or "").strip()[:80]
+    out["preset"] = str(out.get("preset") or "Custom")[:40]
+    return out
+
+
 DEFAULT_PREFERENCES = {
     "homepage": START_URL,
     "startup": "homepage",
+    "restore_tabs": False,
+    "quiet_mode": False,
+    "adblock_sites": [],
     "new_tab": "blank",
     "renderer": "chromium",
     "reuse_open_tabs": True,
@@ -46,13 +240,55 @@ DEFAULT_PREFERENCES = {
     "chromium_presentation": "native",
     # v4.56 privacy-first defaults.
     "network_diagnostics": "off",
+    "strict_python_loopback": True,
+    # v10.4 Privacy Core. Lockdown deliberately keeps browsing history/session
+    # in memory only; bookmarks and explicit downloads remain user-owned data.
+    "privacy_lockdown": True,
+    "tracker_blocking_enabled": True,
+    "strip_tracking_parameters": True,
+    "strip_referrer": True,
+    "https_first": True,
     "clear_browsing_data_on_exit": True,
     "page_zoom_percent": 100,
     "adblock_enabled": True,
+    # User-managed unpacked Chromium extensions. Tekzite's built-in local
+    # services extension is always loaded separately and cannot be removed.
+    "extensions": [],
+    # v10.2 productivity + resource controls.
+    "sleeping_tabs_enabled": True,
+    "sleeping_tabs_minutes": 30,
+    "tab_groups": {},
+    "site_permissions": {},
+    "download_prompt": False,
+    "update_repository": "",
+    "search_url_template": "https://www.startpage.com/sp/search?query={query}",
+    "customization": dict(DEFAULT_CUSTOMIZATION),
 }
 
+def _profile_slug(value):
+    value = re.sub(r"[^A-Za-z0-9._ -]+", "", str(value or "")).strip().replace(" ", "-")
+    value = re.sub(r"-+", "-", value).strip(".-_")
+    return value[:48] or "Default"
+
+
+def _requested_profile_name(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for index, item in enumerate(argv):
+        if item == "--profile" and index + 1 < len(argv):
+            return _profile_slug(argv[index + 1])
+        if str(item).startswith("--profile="):
+            return _profile_slug(str(item).split("=", 1)[1])
+    return "Default"
+
+
+def _state_root_for_profile(profile=None):
+    root = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Tekzite Browser"
+    profile = _profile_slug(profile or os.environ.get("TEKZITE_BROWSER_PROFILE") or "Default")
+    return root if profile == "Default" else root / "Profiles" / profile
+
+
 def _preferences_path():
-    base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Tekzite Browser"
+    base = _state_root_for_profile()
     try:
         base.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -66,66 +302,102 @@ def _normalized_zoom_percent(value, default=100):
         value = int(default)
     return max(50, min(300, value))
 
+def _normalized_extension_entries(value):
+    """Normalize persisted Extension Manager entries without touching disk."""
+    result = []
+    seen = set()
+    if not isinstance(value, list):
+        return result
+    for item in value:
+        if isinstance(item, str):
+            item = {"path": item, "enabled": True}
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        try:
+            normalized = str(Path(path).expanduser().resolve())
+        except Exception:
+            normalized = os.path.abspath(os.path.expanduser(path))
+        key = os.path.normcase(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"path": normalized, "enabled": bool(item.get("enabled", True))})
+    return result
+
+
+def _enabled_extension_paths(prefs):
+    return [
+        row["path"] for row in _normalized_extension_entries(prefs.get("extensions", []))
+        if row.get("enabled")
+    ]
+
+
 def load_preferences():
     prefs = dict(DEFAULT_PREFERENCES)
-    try:
-        data = json.loads(_preferences_path().read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            for key in prefs:
-                if key in data:
-                    prefs[key] = data[key]
-    except Exception:
-        pass
+    data = read_json(_preferences_path(), {})
+    if isinstance(data, dict):
+        for key in prefs:
+            if key in data:
+                prefs[key] = data[key]
     # Keep zoom canonical in memory. Older builds could leave a string value
     # behind; normalizing it here prevents a later dialog save from silently
     # restoring 100%.
     prefs["page_zoom_percent"] = _normalized_zoom_percent(
         prefs.get("page_zoom_percent", 100)
     )
+    prefs["extensions"] = _normalized_extension_entries(prefs.get("extensions", []))
+    try:
+        prefs["sleeping_tabs_minutes"] = max(5, min(240, int(prefs.get("sleeping_tabs_minutes", 30))))
+    except Exception:
+        prefs["sleeping_tabs_minutes"] = 30
+    prefs["sleeping_tabs_enabled"] = bool(prefs.get("sleeping_tabs_enabled", True))
+    prefs["download_prompt"] = bool(prefs.get("download_prompt", False))
+    prefs["strict_python_loopback"] = bool(prefs.get("strict_python_loopback", True))
+    if not isinstance(prefs.get("tab_groups"), dict):
+        prefs["tab_groups"] = {}
+    if not isinstance(prefs.get("site_permissions"), dict):
+        prefs["site_permissions"] = {}
+    prefs["update_repository"] = str(prefs.get("update_repository") or "").strip()[:160]
+    template = str(prefs.get("search_url_template") or "https://www.startpage.com/sp/search?query={query}").strip()[:500]
+    prefs["search_url_template"] = template if "{query}" in template else "https://www.startpage.com/sp/search?query={query}"
+    prefs["customization"] = _normalized_customization(prefs.get("customization"))
     return prefs
 
 def save_preferences(prefs):
-    """Atomically save preferences and verify that the committed file is readable.
+    """Atomically save preferences with retry and one-generation recovery.
 
-    Antivirus/indexers can briefly race an atomic replace on Windows. Retry the
-    tiny commit and verify the zoom value so a successful Save really survives
-    the next Tekzite launch.
+    ``write_json`` keeps the previous valid file as ``preferences.json.bak``.
+    Antivirus/indexers can briefly race a replace on Windows, so preference
+    commits still get three short retries and a read-back verification.
     """
     path = _preferences_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(prefs)
     payload["page_zoom_percent"] = _normalized_zoom_percent(
         payload.get("page_zoom_percent", 100)
     )
-    encoded = json.dumps(payload, indent=2, sort_keys=True)
+    payload["extensions"] = _normalized_extension_entries(payload.get("extensions", []))
+    payload["customization"] = _normalized_customization(payload.get("customization"))
     last_error = None
     for attempt in range(3):
-        tmp = path.with_name(path.name + f".tmp.{os.getpid()}.{attempt}")
         try:
-            with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
-                fh.write(encoded)
-                fh.flush()
-                try:
-                    os.fsync(fh.fileno())
-                except Exception:
-                    pass
-            os.replace(tmp, path)
+            write_json(path, payload)
             check = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(check, dict):
+                raise OSError("saved preferences did not verify")
             if _normalized_zoom_percent(check.get("page_zoom_percent", 100)) != payload["page_zoom_percent"]:
                 raise OSError("saved zoom preference did not verify")
             return path
         except Exception as exc:
             last_error = exc
-            try:
-                tmp.unlink(missing_ok=True)
-            except Exception:
-                pass
             time.sleep(0.04 * (attempt + 1))
     raise OSError(f"Could not persist preferences: {last_error}")
 
 
 
-BROWSER_VERSION = "9.8"
+BROWSER_VERSION = "10.5.0"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -173,20 +445,118 @@ def _enable_per_monitor_dpi_awareness():
 
 
 
-class BrowserApp:
+class BrowserApp(BrowserFeatures):
+    def _write_stability_log(self, heading, details):
+        """Best-effort local diagnostics without turning an error into a crash."""
+        try:
+            folder = Path(getattr(self, "_state_directory", _preferences_path().parent))
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / "stability.log"
+            if path.exists() and path.stat().st_size > 512 * 1024:
+                rotated = path.with_name("stability.log.1")
+                try:
+                    rotated.unlink(missing_ok=True)
+                    os.replace(path, rotated)
+                except OSError:
+                    pass
+            with open(path, "a", encoding="utf-8", newline="\n") as handle:
+                handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {heading}\n")
+                handle.write(str(details).rstrip() + "\n\n")
+        except Exception:
+            pass
+
+    def _report_tk_callback_exception(self, exc_type, exc_value, exc_tb):
+        """Contain Tk callback failures and leave a useful local breadcrumb."""
+        if getattr(self, "_closing", False):
+            return
+        details = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        self._write_stability_log("Tk callback error", details)
+        status = getattr(self, "status_var", None)
+        if status is not None:
+            try:
+                status.set(f"Recovered UI error: {exc_type.__name__}: {exc_value}")
+            except Exception:
+                pass
+
+    def _cancel_all_tk_after_jobs(self):
+        """Cancel queued Tk timers before native/Chromium teardown begins."""
+        try:
+            jobs = self.root.tk.call("after", "info")
+        except Exception:
+            return
+        if isinstance(jobs, str):
+            jobs = (jobs,) if jobs else ()
+        for job in tuple(jobs or ()):
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+
     def __init__(self):
+        self.browser_version = BROWSER_VERSION
+        self._profile_name = _requested_profile_name()
+        os.environ["TEKZITE_BROWSER_PROFILE"] = self._profile_name
+        self._private_mode = "--private" in sys.argv[1:]
+        self._private_profile_dir = None
+        self._privacy_profile_dir = None
+        if self._private_mode:
+            # Always create a fresh profile, even when this process was spawned
+            # by another private window and inherited its environment.
+            self._private_profile_dir = tempfile.mkdtemp(prefix="Tekzite-Private-")
+            os.environ["TEKZITE_CHROMIUM_PROFILE"] = self._private_profile_dir
+            os.environ["TEKZITE_PRIVATE_MODE"] = "1"
+        else:
+            # A normal child spawned from a private process must never inherit
+            # the parent's temporary Chromium identity. Named profiles receive
+            # their own Chromium storage; Default preserves the historical path.
+            os.environ.pop("TEKZITE_PRIVATE_MODE", None)
+            if self._profile_name == "Default":
+                os.environ.pop("TEKZITE_CHROMIUM_PROFILE", None)
+            else:
+                profile_dir = _state_root_for_profile(self._profile_name) / "Chromium Bridge Profile"
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                os.environ["TEKZITE_CHROMIUM_PROFILE"] = str(profile_dir)
+
         self._dpi_awareness_enabled = _enable_per_monitor_dpi_awareness()
         self.root = tk.Tk()
+        self.preferences = load_preferences()
+        if not self._private_mode and self.preferences.get("privacy_lockdown", True):
+            # Privacy Lockdown never points Chromium at a persistent profile.
+            # Cookies/cache/storage live only in this process-owned temp tree.
+            self._privacy_profile_dir = tempfile.mkdtemp(prefix=f"Tekzite-Privacy-{os.getpid()}-")
+            os.environ["TEKZITE_CHROMIUM_PROFILE"] = self._privacy_profile_dir
+        strict_python_loopback = bool(self.preferences.get("strict_python_loopback", True))
+        os.environ["TEKZITE_STRICT_PYTHON_LOOPBACK"] = "1" if strict_python_loopback else "0"
+        os.environ["TEKZITE_PRIVACY_LOCKDOWN"] = "1" if self.preferences.get("privacy_lockdown", True) else "0"
+        os.environ["TEKZITE_TRACKER_BLOCKING"] = "1" if self.preferences.get("tracker_blocking_enabled", True) else "0"
+        os.environ["TEKZITE_STRIP_REFERRER"] = "1" if self.preferences.get("strip_referrer", True) else "0"
+        os.environ["TEKZITE_HTTPS_FIRST"] = "1" if self.preferences.get("https_first", True) else "0"
+        os.environ["TEKZITE_LOOPBACK_ROLE"] = "browser"
+        os.environ["TEKZITE_LOOPBACK_AUDIT_LOG"] = str(_preferences_path().parent / "loopback-blocked.jsonl")
+        # Process-local Python egress guard. Only ports registered by Tekzite's
+        # proxy/CDP bootstrap may receive outbound loopback connects. Public
+        # internet sockets and Chromium's own sockets are not affected.
+        loopback_policy.install(strict_python_loopback)
+        self.customization = _normalized_customization(self.preferences.get("customization"))
+        self.preferences["customization"] = self.customization
         # v7.3: prefer Windows' variable UI font for Tekzite chrome.  This keeps
         # the shell visually closer to modern native Windows/Firefox typography
         # without touching web-page CSS or changing site layout.
         self._ui_font_family = "Segoe UI"
         self._ui_display_font_family = "Segoe UI"
+        self._ui_monospace_font_family = "Consolas"
         try:
             import tkinter.font as tkfont
             families = {str(name).casefold(): str(name) for name in tkfont.families(self.root)}
-            self._ui_font_family = families.get("segoe ui variable text", families.get("segoe ui", "Segoe UI"))
-            self._ui_display_font_family = families.get("segoe ui variable display", self._ui_font_family)
+            automatic_ui_font = families.get("segoe ui variable text", families.get("segoe ui", "Segoe UI"))
+            automatic_display_font = families.get("segoe ui variable display", automatic_ui_font)
+            automatic_mono_font = families.get("cascadia mono", families.get("consolas", "Consolas"))
+            requested_ui = str(self.customization.get("font_family") or "").casefold()
+            requested_display = str(self.customization.get("display_font_family") or "").casefold()
+            requested_mono = str(self.customization.get("monospace_font_family") or "").casefold()
+            self._ui_font_family = families.get(requested_ui, automatic_ui_font) if requested_ui else automatic_ui_font
+            self._ui_display_font_family = families.get(requested_display, automatic_display_font) if requested_display else automatic_display_font
+            self._ui_monospace_font_family = families.get(requested_mono, automatic_mono_font) if requested_mono else automatic_mono_font
             for named in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkCaptionFont", "TkSmallCaptionFont"):
                 try:
                     tkfont.nametofont(named).configure(family=self._ui_font_family)
@@ -198,9 +568,10 @@ class BrowserApp:
                 pass
         except Exception:
             pass
-        self.root.title(f"Tekzite Browser v{BROWSER_VERSION}")
-        self.root.geometry("1280x840")
-        self.root.minsize(900, 600)
+        title_version = f" v{BROWSER_VERSION}" if self.customization.get("show_version_in_title", True) else ""
+        self.root.title(f"Tekzite Browser{' — Private' if self._private_mode else ''}{' — ' + self._profile_name if self._profile_name != 'Default' else ''}{title_version}")
+        self.root.geometry(f"{self.customization['window_width']}x{self.customization['window_height']}")
+        self.root.minsize(self.customization["window_min_width"], self.customization["window_min_height"])
         self.root.overrideredirect(True)
         self._window_restore_geometry = None
         self._window_maximized = False
@@ -211,7 +582,18 @@ class BrowserApp:
         self._ui_animation_serial = 0
         self._ui_animation_jobs = {}
         self._loading_spinner_frames = ("◐", "◓", "◑", "◒")
-        self.preferences = load_preferences()
+        user_extension_paths = [] if self.preferences.get("privacy_lockdown", True) else _enabled_extension_paths(self.preferences)
+        os.environ["TEKZITE_USER_EXTENSIONS"] = json.dumps(user_extension_paths)
+        self._state_directory = _preferences_path().parent
+        if self.preferences.get("privacy_lockdown", True) and not self._private_mode:
+            for sensitive_name in ("session.json", "history.json"):
+                try:
+                    (self._state_directory / sensitive_name).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        self.root.report_callback_exception = self._report_tk_callback_exception
+        self.bookmarks = load_bookmarks(self._state_directory / "bookmarks.json")
+        self._init_features()
         self._zoom_watchdog_after_id = None
         self._zoom_watchdog_interval_ms = 5000
         self._zoom_watchdog_checks = 0
@@ -221,29 +603,14 @@ class BrowserApp:
         # process is started, so the helper inherits a privacy-first policy.
         os.environ["TEKZITE_NETWORK_LOG_LEVEL"] = str(self.preferences.get("network_diagnostics", "off"))
         os.environ["TEKZITE_ADBLOCK_ENABLED"] = "1" if self.preferences.get("adblock_enabled", True) else "0"
+        os.environ["TEKZITE_DOWNLOAD_PROMPT"] = "1" if self.preferences.get("download_prompt", False) else "0"
 
         # v4.28 visual shell: OLED-friendly, compact and intentionally distinct
         # from the embedded Chromium content surface.
         # v7.9: tighter OLED chrome.  Keep the shell low-clutter, but give
         # active/hover states a clearer hierarchy so the interface reads as one
         # coherent browser rather than a collection of Tk controls.
-        self.ui = {
-            "bg": "#090b10",
-            "chrome": "#0f131b",
-            "chrome_2": "#151a24",
-            "chrome_hover": "#1b2230",
-            "field": "#181e29",
-            "field_focus": "#202838",
-            "border": "#2a3242",
-            "border_soft": "#1d2430",
-            "border_focus": "#7c68ff",
-            "text": "#f3f5fa",
-            "muted": "#929caf",
-            "muted_dim": "#6f788a",
-            "accent": "#7965ff",
-            "accent_hover": "#8c7aff",
-            "danger": "#ff6078",
-        }
+        self.ui = dict(self.customization.get("colors") or UI_COLOR_DEFAULTS)
         self.root.configure(bg=self.ui["bg"])
 
         # v4.31 is fully frameless. Keep Tekzite as a normal taskbar/Alt-Tab
@@ -264,7 +631,20 @@ class BrowserApp:
             arrowcolor=self.ui["muted"],
             lightcolor=self.ui["chrome_2"],
             darkcolor=self.ui["chrome_2"],
+            width=max(8, int(12 * float(self.customization.get("ui_scale", 1.0)))),
         )
+        style.configure("Tekzite.TNotebook", background=self.ui["bg"], borderwidth=0)
+        style.configure("Tekzite.TNotebook.Tab", background=self.ui["chrome_2"], foreground=self.ui["text"], padding=(10, 6))
+        style.map("Tekzite.TNotebook.Tab", background=[("selected", self.ui["accent"]), ("active", self.ui["chrome_hover"])], foreground=[("selected", "#ffffff")])
+        style.configure("Treeview", background=self.ui["field"], fieldbackground=self.ui["field"], foreground=self.ui["text"],
+                        rowheight=max(20, self._font_size(22)), bordercolor=self.ui["border"], font=(self._ui_font_family, self._font_size(9)))
+        style.map("Treeview", background=[("selected", self.ui["accent"])], foreground=[("selected", "#ffffff")])
+        style.configure("Treeview.Heading", background=self.ui["chrome_2"], foreground=self.ui["text"],
+                        bordercolor=self.ui["border"], font=(self._ui_font_family, self._font_size(9)))
+        style.configure("TCombobox", fieldbackground=self.ui["field"], background=self.ui["chrome_2"], foreground=self.ui["text"],
+                        arrowcolor=self.ui["muted"], bordercolor=self.ui["border"], font=(self._ui_font_family, self._font_size(9)))
+        style.map("TCombobox", fieldbackground=[("readonly", self.ui["field"])], foreground=[("readonly", self.ui["text"])],
+                  selectbackground=[("readonly", self.ui["accent"])], selectforeground=[("readonly", "#ffffff")])
 
         self.history = []
         # v4.40: Tekzite-owned browser tabs. Each tab keeps its own history,
@@ -282,6 +662,7 @@ class BrowserApp:
         self._page_state_poll_ms = 850
         self._page_state_inflight = set()
         self._favicon_images = {}
+        self._sleeping_tabs_after_id = None
         self._find_bar_visible = False
         # v6.0: Chromium is the only web engine.  Tekzite owns browser UI,
         # while all page parsing/layout/JS/media/storage live in Chromium.
@@ -302,6 +683,7 @@ class BrowserApp:
         self._dwm_host_size = (1, 1)
         self._dwm_host_wndproc = None
         self._dwm_host_original_wndproc = None
+        self._dwm_user32 = None
         # v6.1: keep the raw DWM destination hidden until Chromium has a
         # verified frame, and coalesce move/resize traffic while the user drags
         # the Tekzite window.
@@ -324,6 +706,7 @@ class BrowserApp:
         self._native_drag_user32 = None
         self._native_drag_hwnd = 0
         self._native_drag_dwm_offset = None
+        self._native_drag_last_xy = None
         self._embedded_future = None
         # v4.80: Tk chrome and the embedded Chromium child are separate native
         # focus domains. Delayed Chromium wake retries must never steal focus
@@ -355,6 +738,7 @@ class BrowserApp:
         self._navigation_started_at = 0.0
         self._navigation_add_history = True
         self._navigation_url = None
+        self._privacy_tracking_params_stripped = 0
 
         # Current prepared document is retained so viewport resizes can trigger
         # a true responsive reflow without downloading/parsing the page again.
@@ -367,197 +751,186 @@ class BrowserApp:
         self._last_layout_ui_yield = 0.0
 
         # ── Frameless application bar + full browser menus ───────────────────
-        app_bar = tk.Frame(
-            self.root,
-            bg=self.ui["bg"],
-            height=34,
-            highlightthickness=0,
+        self.app_bar = tk.Frame(
+            self.root, bg=self.ui["bg"], height=self._ui_metric("app_bar_height", 34), highlightthickness=0,
         )
-        app_bar.pack(fill="x")
-        app_bar.pack_propagate(False)
-        app_bar.bind("<ButtonPress-1>", self._start_window_drag)
-        app_bar.bind("<B1-Motion>", self._drag_window)
-        app_bar.bind("<ButtonRelease-1>", self._end_window_drag)
-        app_bar.bind("<Double-Button-1>", lambda event: self._toggle_maximize())
+        self.app_bar.pack(fill="x")
+        self.app_bar.pack_propagate(False)
+        self.app_bar.bind("<ButtonPress-1>", self._start_window_drag)
+        self.app_bar.bind("<B1-Motion>", self._drag_window)
+        self.app_bar.bind("<ButtonRelease-1>", self._end_window_drag)
+        self.app_bar.bind("<Double-Button-1>", lambda event: self._toggle_maximize())
 
-        app_brand = tk.Frame(app_bar, bg=self.ui["bg"])
-        app_brand.pack(side="left", padx=(12, 10), fill="y")
-        app_brand.bind("<ButtonPress-1>", self._start_window_drag)
-        app_brand.bind("<B1-Motion>", self._drag_window)
-        app_brand.bind("<ButtonRelease-1>", self._end_window_drag)
-        tk.Label(
-            app_brand,
-            text="T",
-            fg="#ffffff",
-            bg=self.ui["accent"],
-            font=(self._ui_font_family, 9, "bold"),
-            width=2,
-            padx=1,
-            pady=2,
-        ).pack(side="left", pady=5)
-        title_label = tk.Label(
-            app_brand,
-            text=f"TEKZITE  v{BROWSER_VERSION}",
-            fg=self.ui["text"],
-            bg=self.ui["bg"],
-            font=(self._ui_font_family, 9, "bold"),
+        self.app_brand = tk.Frame(self.app_bar, bg=self.ui["bg"])
+        self.app_brand.pack(side="left", padx=(self._ui_padding(12), self._ui_padding(10)), fill="y")
+        self.app_brand.bind("<ButtonPress-1>", self._start_window_drag)
+        self.app_brand.bind("<B1-Motion>", self._drag_window)
+        self.app_brand.bind("<ButtonRelease-1>", self._end_window_drag)
+        self.brand_badge = tk.Label(
+            self.app_brand, text="T", fg="#ffffff", bg=self.ui["accent"],
+            font=(self._ui_font_family, max(7, int(self._custom("menu_font_size", 9))), "bold"),
+            width=2, padx=1, pady=2,
         )
-        title_label.pack(side="left", padx=(7, 0))
-        title_label.bind("<ButtonPress-1>", self._start_window_drag)
-        title_label.bind("<B1-Motion>", self._drag_window)
-        title_label.bind("<ButtonRelease-1>", self._end_window_drag)
+        self.brand_badge.pack(side="left", pady=self._ui_padding(5))
+        title_version = f"  v{BROWSER_VERSION}" if self._custom("show_version_in_title", True) else ""
+        self.title_label = tk.Label(
+            self.app_brand, text=f"Tekzite{' • Private' if self._private_mode else ''}{title_version}",
+            fg=self.ui["text"], bg=self.ui["bg"],
+            font=(self._ui_font_family, max(7, int(self._custom("menu_font_size", 9))), "bold"),
+        )
+        self.title_label.pack(side="left", padx=(self._ui_padding(7), 0))
+        self.title_label.bind("<ButtonPress-1>", self._start_window_drag)
+        self.title_label.bind("<B1-Motion>", self._drag_window)
+        self.title_label.bind("<ButtonRelease-1>", self._end_window_drag)
 
-        menu_strip = tk.Frame(app_bar, bg=self.ui["bg"])
-        menu_strip.pack(side="left", fill="y")
-        self._build_browser_menus(menu_strip)
+        self.menu_strip = tk.Frame(self.app_bar, bg=self.ui["bg"])
+        self.menu_strip.pack(side="left", fill="y")
+        self._browser_menu_buttons = []
+        self._browser_menus = []
+        self._build_browser_menus(self.menu_strip)
 
-        window_controls = tk.Frame(app_bar, bg=self.ui["bg"])
-        window_controls.pack(side="right", fill="y")
-        self._make_window_control(window_controls, "—", self._minimize_window).pack(side="left", fill="y")
-        self._make_window_control(window_controls, "□", self._toggle_maximize).pack(side="left", fill="y")
-        self._make_window_control(window_controls, "×", self.on_close, close=True).pack(side="left", fill="y")
+        self.window_controls = tk.Frame(self.app_bar, bg=self.ui["bg"])
+        self.window_controls.pack(side="right", fill="y", padx=(self._ui_padding(6), self._ui_padding(10)), pady=self._ui_padding(5))
+        self.window_control_buttons = [
+            self._make_window_control(self.window_controls, "minimize", self._minimize_window),
+            self._make_window_control(self.window_controls, "maximize", self._toggle_maximize),
+            self._make_window_control(self.window_controls, "close", self.on_close, close=True),
+        ]
+        for button in self.window_control_buttons:
+            button.pack(side="left", padx=(0, self._ui_padding(6)))
+        if self.window_control_buttons:
+            try:
+                self.window_control_buttons[-1].pack_configure(padx=(0, 0))
+            except Exception:
+                pass
+        self._refresh_window_controls()
+        if self._custom("window_control_style", "traffic_lights") == "traffic_lights":
+            try:
+                self.window_controls.pack_forget()
+                self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(10), self._ui_padding(4)), pady=self._ui_padding(5), before=self.app_brand)
+            except Exception:
+                pass
 
         # ── Browser tab strip ───────────────────────────────────────────────
-        self.tab_bar = tk.Frame(self.root, bg=self.ui["bg"], height=40, highlightthickness=0)
+        self.tab_bar = tk.Frame(self.root, bg=self.ui["chrome"], height=self._ui_metric("tab_bar_height", 44), highlightthickness=0)
         self.tab_bar.pack(fill="x")
         self.tab_bar.pack_propagate(False)
-        self.tab_items = tk.Frame(self.tab_bar, bg=self.ui["bg"])
-        self.tab_items.pack(side="left", fill="both", expand=True, padx=(10, 4), pady=(5, 4))
+        self.tab_items = tk.Frame(self.tab_bar, bg=self.ui["chrome"])
+        self.tab_items.pack(side="left", fill="both", expand=True, padx=(self._ui_padding(12), self._ui_padding(6)), pady=(self._ui_padding(6), self._ui_padding(5)))
         self.new_tab_button = tk.Button(
-            self.tab_bar, text="+", command=self._new_tab, bg=self.ui["bg"],
+            self.tab_bar, text="+", command=self._new_tab, bg=self.ui["chrome"],
             fg=self.ui["muted"], activebackground=self.ui["chrome_hover"],
             activeforeground="#ffffff", relief="flat", bd=0, highlightthickness=0,
-            font=(self._ui_font_family, 13), cursor="hand2", width=3,
+            font=(self._ui_font_family, max(10, int(self._custom("tab_font_size", 9)) + 4)), cursor="hand2", width=3,
         )
-        self.new_tab_button.pack(side="right", padx=(2, 10), pady=(5, 4))
+        self.new_tab_button.pack(side=str(self._custom("new_tab_button_position", "right")), padx=(self._ui_padding(2), self._ui_padding(10)), pady=(self._ui_padding(5), self._ui_padding(4)))
         self.new_tab_button.bind("<Enter>", lambda e: (
             self._animate_widget_color(self.new_tab_button, "bg", self.ui["chrome_hover"], 110),
             self._animate_widget_color(self.new_tab_button, "fg", self.ui["text"], 110),
         ))
         self.new_tab_button.bind("<Leave>", lambda e: (
-            self._animate_widget_color(self.new_tab_button, "bg", self.ui["bg"], 130),
+            self._animate_widget_color(self.new_tab_button, "bg", self.ui["chrome"], 130),
             self._animate_widget_color(self.new_tab_button, "fg", self.ui["muted"], 130),
         ))
 
         # ── Tekzite browser chrome ──────────────────────────────────────────
-        toolbar = tk.Frame(
-            self.root,
-            bg=self.ui["chrome"],
-            height=58,
-            highlightthickness=0,
+        self.toolbar = tk.Frame(
+            self.root, bg=self.ui["chrome"], height=self._ui_metric("toolbar_height", 62), highlightthickness=0,
         )
-        toolbar.pack(fill="x")
-        toolbar.pack_propagate(False)
+        self.toolbar.pack(fill="x")
+        self.toolbar.pack_propagate(False)
 
         def chrome_button(parent, text, command, *, accent=False, width=None):
-            bg = self.ui["accent"] if accent else self.ui["chrome_2"]
+            bg = self.ui["accent"] if accent else self.ui["field"]
             hover = self.ui["accent_hover"] if accent else self.ui["field_focus"]
+            fg = "#ffffff" if accent else self.ui["muted"]
             button = tk.Button(
-                parent,
-                text=text,
-                command=command,
-                bg=bg,
-                fg="#ffffff" if accent else self.ui["text"],
-                activebackground=hover,
-                activeforeground="#ffffff",
-                relief="flat",
-                bd=0,
-                highlightthickness=0,
-                font=(self._ui_font_family, 10, "bold" if accent else "normal"),
-                cursor="hand2",
-                padx=11,
-                pady=6,
-                width=width,
+                parent, text=text, command=command, bg=bg, fg=fg,
+                activebackground=hover, activeforeground="#ffffff", relief="flat", bd=0,
+                highlightthickness=1, highlightbackground=self.ui["border_soft"], highlightcolor=self.ui["border_focus"],
+                font=(self._ui_font_family, max(7, int(self._custom("toolbar_font_size", 10))), "bold" if accent else "normal"),
+                cursor="hand2", padx=self._ui_padding(12), pady=self._ui_padding(7), width=width,
             )
-            button.bind("<Enter>", lambda e, b=button, c=hover: self._animate_widget_color(b, "bg", c, 105))
-            button.bind("<Leave>", lambda e, b=button, c=bg: self._animate_widget_color(b, "bg", c, 135))
+            button.bind("<Enter>", lambda e, b=button: (
+                self._animate_widget_color(b, "bg", self.ui["accent_hover"] if accent else self.ui["field_focus"], 105),
+                self._animate_widget_color(b, "fg", "#ffffff", 105),
+                self._animate_widget_color(b, "highlightbackground", self.ui["border_focus"] if not accent else self.ui["accent_hover"], 105),
+            ))
+            button.bind("<Leave>", lambda e, b=button: (
+                self._animate_widget_color(b, "bg", self.ui["accent"] if accent else self.ui["field"], 135),
+                self._animate_widget_color(b, "fg", "#ffffff" if accent else self.ui["muted"], 135),
+                self._animate_widget_color(b, "highlightbackground", self.ui["border_soft"], 135),
+            ))
             return button
 
-        nav = tk.Frame(toolbar, bg=self.ui["chrome"])
-        nav.pack(side="left", pady=8)
-
-        self.back_button = chrome_button(nav, "‹", self.go_back, width=2)
-        self.back_button.pack(side="left", padx=(0, 5))
-        self.forward_button = chrome_button(nav, "›", self.go_forward, width=2)
-        self.forward_button.pack(side="left")
+        self.back_button = chrome_button(self.toolbar, self._toolbar_text("back"), self.go_back, width=None)
+        self.forward_button = chrome_button(self.toolbar, self._toolbar_text("forward"), self.go_forward, width=None)
+        self.reload_button = chrome_button(self.toolbar, self._toolbar_text("reload"), self._reload_or_stop_current, width=None)
+        self.home_button = chrome_button(self.toolbar, self._toolbar_text("home"), self._go_home, width=None)
 
         self.url_var = tk.StringVar(value=self._homepage_url())
-
-        address_shell = tk.Frame(
-            toolbar,
-            bg=self.ui["field"],
-            highlightbackground=self.ui["border"],
-            highlightcolor=self.ui["border_focus"],
-            highlightthickness=1,
+        self.address_shell = tk.Frame(
+            self.toolbar, bg=self.ui["field"], highlightbackground=self.ui["border"],
+            highlightcolor=self.ui["border_focus"], highlightthickness=1,
         )
-        address_shell.pack(side="left", fill="x", expand=True, padx=(10, 9), pady=9)
-
-        tk.Label(
-            address_shell,
-            text="⌁",
-            fg=self.ui["muted"],
-            bg=self.ui["field"],
-            font=("Segoe UI Symbol", 12),
-        ).pack(side="left", padx=(12, 4))
+        self.site_info_button = tk.Button(
+            self.address_shell, text="◈", command=self._show_site_info, fg=self.ui["accent_hover"], bg=self.ui["field"],
+            activeforeground=self.ui["text"], activebackground=self.ui["field_focus"], relief="flat", bd=0,
+            highlightthickness=0, cursor="hand2", font=("Segoe UI Symbol", max(8, int(self._custom("toolbar_font_size", 10)) + 1)),
+            padx=self._ui_padding(5), pady=1,
+        )
+        self.site_info_button.pack(side="left", padx=(self._ui_padding(8), self._ui_padding(2)))
 
         self.address = tk.Entry(
-            address_shell,
-            textvariable=self.url_var,
-            bg=self.ui["field"],
-            fg=self.ui["text"],
-            insertbackground="#ffffff",
-            selectbackground=self.ui["accent"],
-            selectforeground="#ffffff",
-            relief="flat",
-            bd=0,
-            highlightthickness=0,
-            font=(self._ui_font_family, 10),
+            self.address_shell, textvariable=self.url_var, bg=self.ui["field"], fg=self.ui["text"],
+            insertbackground=self.ui["text"], selectbackground=self.ui["accent"], selectforeground="#ffffff",
+            relief="flat", bd=0, highlightthickness=0,
+            font=(self._ui_font_family, max(7, int(self._custom("font_size", 10)))),
         )
-        self.address.pack(side="left", fill="both", expand=True, padx=(2, 10), pady=7)
+        self.address.pack(side="left", fill="both", expand=True, padx=(self._ui_padding(2), self._ui_padding(4)), pady=self._ui_padding(7))
+
+        self.bookmark_button = tk.Button(
+            self.address_shell, text="☆", command=self._toggle_current_bookmark, fg=self.ui["muted"], bg=self.ui["field"],
+            activeforeground=self.ui["accent_hover"], activebackground=self.ui["field_focus"], relief="flat", bd=0,
+            highlightthickness=0, cursor="hand2", font=("Segoe UI Symbol", max(10, int(self._custom("toolbar_font_size", 10)) + 3)),
+            padx=self._ui_padding(7), pady=1,
+        )
+        self.bookmark_button.pack(side="right", padx=(0, self._ui_padding(4)))
         self.address.bind("<Return>", lambda event: self.navigate())
         self.address.bind(
             "<FocusIn>",
             lambda event: (
-                self._animate_widget_color(address_shell, "highlightbackground", self.ui["border_focus"], 135),
+                self._animate_widget_color(self.address_shell, "highlightbackground", self.ui["border_focus"], 135),
                 self._animate_widget_color(self.address, "bg", self.ui["field_focus"], 135),
-                self._animate_widget_color(address_shell, "bg", self.ui["field_focus"], 135),
+                self._animate_widget_color(self.address_shell, "bg", self.ui["field_focus"], 135),
             ),
         )
         self.address.bind(
             "<FocusOut>",
             lambda event: (
-                self._animate_widget_color(address_shell, "highlightbackground", self.ui["border"], 150),
+                self._animate_widget_color(self.address_shell, "highlightbackground", self.ui["border"], 150),
                 self._animate_widget_color(self.address, "bg", self.ui["field"], 150),
-                self._animate_widget_color(address_shell, "bg", self.ui["field"], 150),
+                self._animate_widget_color(self.address_shell, "bg", self.ui["field"], 150),
             ),
         )
-        # v4.80: claim Tekzite UI focus before the default Entry binding runs.
-        # The visual FocusIn/FocusOut bindings above stay unchanged; these
-        # additive handlers only arbitrate Tk-vs-Chromium keyboard ownership.
         self.address.bind("<Button-1>", self._on_address_pointer_down, add="+")
         self.address.bind("<FocusIn>", self._on_address_focus_in, add="+")
         self.address.bind("<FocusOut>", self._on_address_focus_out, add="+")
         self.address.bind("<Button-3>", self._show_address_context_menu)
         self.address.bind("<Control-Shift-v>", lambda event: self._paste_and_go())
 
-        go_button = chrome_button(toolbar, "Go", self.navigate, accent=True)
-        go_button.pack(side="right", padx=(4, 12), pady=8)
+        self.downloads_button = chrome_button(self.toolbar, self._toolbar_text("downloads"), self._show_downloads, width=None)
+        self.main_menu_button = chrome_button(self.toolbar, self._toolbar_text("menu"), self._show_main_menu, width=None)
+        self._toolbar_widgets = {
+            "back": self.back_button, "forward": self.forward_button, "reload": self.reload_button, "home": self.home_button,
+            "address": self.address_shell, "downloads": self.downloads_button, "menu": self.main_menu_button,
+        }
+        self._apply_toolbar_layout()
 
-        # Keep the exact debug button labels because they are useful landmarks
-        # in automated regression tests, while visually demoting them from the
-        # primary browsing controls.
-        debug_group = tk.Frame(toolbar, bg=self.ui["chrome"])
-        debug_group.pack(side="right", pady=8)
-        chrome_button(
-            debug_group,
-            text="Copy Full Debug",
-            command=self.copy_full_debug,
-        ).pack(side="right", padx=(5, 0))
-        chrome_button(
-            debug_group,
-            text="Copy All Debug",
-            command=self.copy_all_debug,
-        ).pack(side="right")
+        # Debug actions remain available from Tools, but they no longer occupy
+        # the primary browser toolbar. Keep an unattached frame attribute for
+        # compatibility with older diagnostics/tests that probe it.
+        self.debug_group = tk.Frame(self.toolbar, bg=self.ui["chrome"])
 
         # v8.0 find-in-page bar. It lives in Tekzite chrome and uses Chromium's
         # own live DOM selection, so no site CSS/HTML is modified.
@@ -568,7 +941,7 @@ class BrowserApp:
             self.find_bar, textvariable=self.find_var, bg=self.ui["field"], fg=self.ui["text"],
             insertbackground=self.ui["text"], selectbackground=self.ui["accent"], selectforeground="#ffffff",
             relief="flat", bd=0, highlightthickness=1, highlightbackground=self.ui["border"],
-            font=(self._ui_font_family, 9),
+            font=(self._ui_font_family, self._font_size(9)),
         )
         self.find_entry.pack(side="left", fill="x", expand=True, padx=(12, 6), pady=6)
         self.find_entry.bind("<Return>", lambda event: self._find_in_page(False))
@@ -577,11 +950,11 @@ class BrowserApp:
         for text, cmd in (("↑", lambda: self._find_in_page(True)), ("↓", lambda: self._find_in_page(False)), ("×", self._hide_find_bar)):
             b = tk.Button(self.find_bar, text=text, command=cmd, bg=self.ui["chrome_2"], fg=self.ui["text"],
                           activebackground=self.ui["field_focus"], activeforeground="#ffffff", relief="flat", bd=0,
-                          highlightthickness=0, cursor="hand2", padx=10, pady=3, font=(self._ui_font_family, 9))
+                          highlightthickness=0, cursor="hand2", padx=10, pady=3, font=(self._ui_font_family, self._font_size(9)))
             b.pack(side="left", padx=(0, 5), pady=5)
 
-        separator = tk.Frame(self.root, bg=self.ui["border_soft"], height=1)
-        separator.pack(fill="x")
+        self.chrome_separator = tk.Frame(self.root, bg=self.ui["border_soft"], height=1)
+        self.chrome_separator.pack(fill="x")
 
         canvas_frame = tk.Frame(self.root, bg=self.ui["bg"], highlightthickness=0)
         canvas_frame.pack(fill="both", expand=True)
@@ -716,7 +1089,8 @@ class BrowserApp:
         )
 
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        self.scrollbar.pack(side="right", fill="y")
+        if self._custom("show_scrollbar", True):
+            self.scrollbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.canvas.bind("<Button-3>", self._on_native_context_menu)
@@ -728,55 +1102,53 @@ class BrowserApp:
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
         self.status_var = tk.StringVar(value="Ready")
-        status_bar = tk.Frame(
-            self.root,
-            bg=self.ui["chrome"],
-            height=25,
-            highlightbackground=self.ui["border"],
-            highlightthickness=1,
+        self.status_bar = tk.Frame(
+            self.root, bg=self.ui["chrome"], height=self._ui_metric("status_bar_height", 25),
+            highlightbackground=self.ui["border"], highlightthickness=1,
         )
-        status_bar.pack(fill="x")
-        self.status_bar = status_bar
+        self.status_bar.pack(fill="x")
         if not getattr(self, "preferences", DEFAULT_PREFERENCES).get("show_status_bar", True):
             self.status_bar.pack_forget()
-        status_bar.pack_propagate(False)
-        tk.Label(
-            status_bar,
-            text="●",
-            fg="#45d483",
-            bg=self.ui["chrome"],
-            font=(self._ui_font_family, 7),
-        ).pack(side="left", padx=(12, 6))
-        tk.Label(
-            status_bar,
-            textvariable=self.status_var,
-            anchor="w",
-            fg=self.ui["muted"],
-            bg=self.ui["chrome"],
-            font=(self._ui_font_family, 9),
-        ).pack(side="left", fill="x", expand=True)
-        tk.Label(
-            status_bar,
-            text=f"v{BROWSER_VERSION}",
-            fg=self.ui["muted"],
-            bg=self.ui["chrome"],
-            font=(self._ui_font_family, 8),
-        ).pack(side="right", padx=(8, 12))
+        self.status_bar.pack_propagate(False)
+        self.status_activity_dot = tk.Label(
+            self.status_bar, text="●", fg=self.ui.get("success", "#45d483"), bg=self.ui["chrome"],
+            font=(self._ui_font_family, self._font_size(7)),
+        )
+        self.status_activity_dot.pack(side="left", padx=(self._ui_padding(12), self._ui_padding(6)))
+        self.status_text_label = tk.Label(
+            self.status_bar, textvariable=self.status_var, anchor="w", fg=self.ui["muted"], bg=self.ui["chrome"],
+            font=(self._ui_font_family, max(7, int(self._custom("menu_font_size", 9)))),
+        )
+        self.status_text_label.pack(side="left", fill="x", expand=True)
+        self.status_version_label = tk.Label(
+            self.status_bar, text=f"{'Private • ' if self._private_mode else ''}v{BROWSER_VERSION}",
+            fg=self.ui["muted"], bg=self.ui["chrome"],
+            font=(self._ui_font_family, max(7, int(self._custom("menu_font_size", 9)) - 1)),
+        )
+        self.status_version_label.pack(side="right", padx=(self._ui_padding(8), self._ui_padding(12)))
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<Control-l>", lambda event: self._focus_address())
         self.root.bind("<Control-t>", lambda event: self._new_tab())
+        self.root.bind("<Control-Shift-N>", lambda event: self._new_private_window())
         self.root.bind("<Control-w>", lambda event: self._close_active_tab())
         self.root.bind("<Control-Shift-T>", lambda event: self._restore_closed_tab())
+        self.root.bind("<Control-j>", lambda event: self._show_downloads())
+        self.root.bind("<Control-h>", lambda event: self._show_history())
+        self.root.bind("<Control-d>", lambda event: self._bookmark_current_page())
+        self.root.bind("<Control-Shift-O>", lambda event: self._show_bookmarks())
         self.root.bind("<Control-f>", lambda event: self._show_find_bar())
         self.root.bind("<Control-Tab>", lambda event: self._cycle_tab(1))
         self.root.bind("<Control-Shift-Tab>", lambda event: self._cycle_tab(-1))
         self.root.bind("<Control-r>", lambda event: self._reload_current())
         self.root.bind("<Control-u>", lambda event: self.inspect_html())
         self.root.bind("<Control-comma>", lambda event: self.show_preferences())
+        self.root.bind("<Control-Shift-comma>", lambda event: self._show_customize_browser())
+        self.root.bind("<Control-Shift-Alt-R>", lambda event: self._reset_interface_customization(confirm=True))
         self.root.bind("<F5>", lambda event: self._reload_current())
         self.root.bind("<Alt-Left>", lambda event: self.go_back())
         self.root.bind("<Alt-Right>", lambda event: self.go_forward())
+        self.root.bind("<Alt-Home>", lambda event: self._go_home())
         self.root.bind("<F11>", lambda event: self._toggle_fullscreen())
         for _n in range(1, 9):
             self.root.bind(f"<Control-Key-{_n}>", lambda event, n=_n: self._switch_tab_by_index(n - 1))
@@ -790,6 +1162,10 @@ class BrowserApp:
         # only as an empty/new-tab backing surface; all actual pages use Chromium.
         self.painter = None
         self.status_var.set("Chromium engine ready")
+
+        self._apply_customization_runtime(repack=True, refresh_tabs=False)
+        if self._custom("start_maximized", False):
+            self.root.after_idle(self._toggle_maximize)
 
         # Create the initial tab before startup navigation.
         self._new_tab(switch=True, navigate=False)
@@ -805,7 +1181,163 @@ class BrowserApp:
         )
         # v9.2: start Chromium/homepage preparation on the first Tk idle turn.
         # The old fixed 250 ms chrome-paint delay was pure startup latency.
-        self.root.after_idle(startup_action)
+        self.root.after_idle(lambda: self._feature_startup(lambda: self._restore_startup_tabs(startup_action)))
+
+    def _restore_startup_tabs(self, fallback):
+        if getattr(self, "_private_mode", False) or self.preferences.get("privacy_lockdown", False):
+            fallback()
+            return
+        session = load_session(self._state_directory / "session.json") if self.preferences.get("restore_tabs", True) else {"tabs": []}
+        if not session["tabs"]:
+            fallback()
+            return
+        if session.get("clean_exit") is False:
+            restore = messagebox.askyesno(
+                "Restore Tekzite Tabs",
+                "Tekzite did not finish its previous shutdown cleanly. Restore the previous tabs?",
+                parent=self.root,
+            )
+            if not restore:
+                try:
+                    write_json(self._state_directory / "session.json", {"tabs": [], "active": 0, "clean_exit": True})
+                except OSError:
+                    pass
+                fallback()
+                return
+        # Reuse the initial blank tab; only the selected page starts Chromium.
+        for index, saved in enumerate(session["tabs"]):
+            tab = self.tabs[0] if index == 0 else self._new_tab(switch=False, navigate=False)
+            tab.update(url=saved["url"], title=saved["title"], pinned=bool(saved.get("pinned")), group=str(saved.get("group") or ""), restore_pending=bool(saved["url"]))
+        selected = self.tabs[session["active"]]
+        self.active_tab_id = selected["id"]
+        self.history = []
+        self.history_index = -1
+        self.url_var.set(selected["url"])
+        self._refresh_tab_strip()
+        if selected.pop("restore_pending", False):
+            self.navigate_to(selected["url"], reuse_existing=False)
+        else:
+            self._focus_address()
+
+    def _save_session(self):
+        path = self._state_directory / "session.json"
+        if getattr(self, "_private_mode", False) or self.preferences.get("privacy_lockdown", False):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        if self.preferences.get("restore_tabs", True):
+            # Tab metadata contains navigated URLs, unlike unsubmitted omnibox text.
+            snapshot = session_snapshot(self.tabs, self.active_tab_id)
+            snapshot["clean_exit"] = True
+            write_json(path, snapshot)
+        else:
+            path.unlink(missing_ok=True)
+
+    def _store_bookmarks(self, updated, parent=None):
+        try:
+            write_json(self._state_directory / "bookmarks.json", updated)
+        except OSError as exc:
+            messagebox.showerror("Bookmarks", f"Could not save bookmarks:\n{exc}", parent=parent or self.root)
+            return False
+        self.bookmarks = updated
+        self._refresh_standard_toolbar_state()
+        return True
+
+    def _toggle_current_bookmark(self):
+        tab = self._active_tab() or {}
+        url = str(tab.get("url") or "")
+        if not valid_url(url):
+            self.status_var.set("Open a webpage before bookmarking it")
+            return "break"
+        existing = next((i for i, item in enumerate(self.bookmarks) if item.get("url") == url), None)
+        if existing is None:
+            updated = self.bookmarks + [{"url": url, "title": tab.get("title") or url}]
+            if self._store_bookmarks(updated):
+                self.status_var.set("Bookmark saved")
+        else:
+            updated = [item for i, item in enumerate(self.bookmarks) if i != existing]
+            if self._store_bookmarks(updated):
+                self.status_var.set("Bookmark removed")
+        return "break"
+
+    def _bookmark_current_page(self):
+        tab = self._active_tab() or {}
+        url = tab.get("url", "")
+        if not valid_url(url):
+            self.status_var.set("Open a webpage before bookmarking it")
+            return "break"
+        if any(item["url"] == url for item in self.bookmarks):
+            self.status_var.set("This page is already bookmarked — manage it in Bookmarks")
+            return "break"
+        if self._store_bookmarks(self.bookmarks + [{"url": url, "title": tab.get("title") or url}]):
+            self.status_var.set("Bookmark saved")
+        return "break"
+
+    def _show_bookmarks(self):
+        previous = getattr(self, "_bookmarks_window", None)
+        if previous is not None and previous.winfo_exists():
+            previous.lift()
+            return "break"
+        win = tk.Toplevel(self.root)
+        self._bookmarks_window = win
+        win.title("Tekzite Bookmarks")
+        win.geometry("680x400")
+        win.transient(self.root)
+        win.configure(bg=self.ui["bg"])
+        tree = ttk.Treeview(win, columns=("title", "url"), show="headings", selectmode="browse")
+        tree.heading("title", text="Name")
+        tree.heading("url", text="Address")
+        tree.column("title", width=220)
+        tree.column("url", width=400)
+        scroll = ttk.Scrollbar(win, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        controls = tk.Frame(win, bg=self.ui["bg"])
+        controls.pack(side="bottom", fill="x", padx=12, pady=12)
+        scroll.pack(side="right", fill="y")
+        tree.pack(fill="both", expand=True, padx=12, pady=12)
+
+        def refresh():
+            tree.delete(*tree.get_children())
+            for index, item in enumerate(self.bookmarks):
+                tree.insert("", "end", iid=str(index), values=(item["title"], item["url"]))
+
+        def selected():
+            rows = tree.selection()
+            return int(rows[0]) if rows else None
+
+        def open_selected(event=None):
+            index = selected()
+            if index is not None:
+                url = self.bookmarks[index]["url"]
+                win.destroy()
+                self._new_tab(url=url)
+
+        def rename():
+            index = selected()
+            if index is None:
+                return
+            title = simpledialog.askstring("Rename bookmark", "Name:", initialvalue=self.bookmarks[index]["title"], parent=win)
+            if title and title.strip():
+                updated = [dict(item) for item in self.bookmarks]
+                updated[index]["title"] = title.strip()
+                if self._store_bookmarks(updated, win):
+                    refresh()
+
+        def remove():
+            index = selected()
+            if index is not None and self._store_bookmarks([item for i, item in enumerate(self.bookmarks) if i != index], win):
+                refresh()
+
+        for label, callback in (("Open in new tab", open_selected), ("Rename", rename), ("Remove", remove), ("Close", win.destroy)):
+            tk.Button(controls, text=label, command=callback, bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat").pack(side="left", padx=4)
+        tree.bind("<Double-1>", open_selected)
+        tree.bind("<Return>", open_selected)
+        win.bind("<Escape>", lambda event: win.destroy())
+        refresh()
+        tree.focus_set()
+        return "break"
 
     # ── Tabs ──────────────────────────────────────────────────────────────
     # ── v8.1 UI animation helpers ────────────────────────────────────────
@@ -842,6 +1374,9 @@ class BrowserApp:
             except Exception:
                 pass
             return
+        if self.preferences.get("quiet_mode", False) or not self._custom("animations", True):
+            widget.configure(**{option: target})
+            return
         key = (str(widget), str(option))
         self._ui_animation_serial += 1
         token = self._ui_animation_serial
@@ -870,6 +1405,11 @@ class BrowserApp:
         frame()
 
     def _animate_widget_height(self, widget, start, end, duration=150, on_done=None):
+        if self.preferences.get("quiet_mode", False) or not self._custom("animations", True):
+            widget.configure(height=max(0, int(end)))
+            if on_done:
+                on_done()
+            return
         try:
             if not widget.winfo_exists():
                 return
@@ -913,6 +1453,9 @@ class BrowserApp:
             win.attributes("-alpha", 0.0)
         except Exception:
             return
+        if self.preferences.get("quiet_mode", False) or not self._custom("animations", True):
+            win.attributes("-alpha", 1.0)
+            return
         steps = 9
         interval = max(10, duration // steps)
         def frame(i=1):
@@ -929,6 +1472,8 @@ class BrowserApp:
         frame()
 
     def _animate_loading_icon(self, label, tab_id, frame_index=0):
+        if self.preferences.get("quiet_mode", False) or not self._custom("animations", True):
+            return
         try:
             if not label.winfo_exists():
                 return
@@ -977,52 +1522,147 @@ class BrowserApp:
             pass
         return "New Tab"
 
+    def _rounded_canvas_rect(self, canvas, x1, y1, x2, y2, radius, **kwargs):
+        radius = max(2, min(int(radius), int((x2 - x1) / 2), int((y2 - y1) / 2)))
+        points = [
+            x1 + radius, y1, x2 - radius, y1, x2, y1, x2, y1 + radius,
+            x2, y2 - radius, x2, y2, x2 - radius, y2, x1 + radius, y2,
+            x1, y2, x1, y2 - radius, x1, y1 + radius, x1, y1,
+        ]
+        return canvas.create_polygon(points, smooth=True, splinesteps=24, **kwargs)
+
+    def _draw_soft_tab(self, canvas, tab, active, hovered=False):
+        try:
+            canvas.delete("all")
+            width = max(40, int(canvas.cget("width")))
+            height = max(28, int(canvas.cget("height")))
+            fill = self.ui["field"] if active else (self.ui["field_focus"] if hovered else self.ui["chrome"])
+            outline = self.ui["border_focus"] if active else (self.ui["border"] if hovered else self.ui["border_soft"])
+            self._rounded_canvas_rect(canvas, 1, 1, width - 1, height - 1, max(8, int(height * 0.30)), fill=fill, outline=outline, width=1.2)
+            if active and self._custom("show_tab_active_indicator", True):
+                pill_w = max(24, min(64, int(width * 0.30)))
+                x1 = int((width - pill_w) / 2)
+                self._rounded_canvas_rect(canvas, x1, height - 5, x1 + pill_w, height - 2, 2, fill=self.ui["accent"], outline=self.ui["accent"])
+            icon_x = 16 if tab.get("pinned") else 18
+            icon_photo = tab.get("favicon_photo") if self._custom("show_tab_favicons", True) else None
+            if icon_photo:
+                canvas.create_image(icon_x, height / 2, image=icon_photo, anchor="center")
+            else:
+                glyph = "☾" if tab.get("sleeping") else ("◌" if tab.get("loading") else "◇")
+                canvas.create_text(icon_x, height / 2, text=glyph, fill=self.ui["accent_hover"] if tab.get("loading") else self.ui["muted_dim"], font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))))
+            title = str(tab.get("title") or "New Tab")
+            title_chars = max(6, int(self._custom("tab_title_chars", 24)))
+            if tab.get("pinned"):
+                title = ""
+            else:
+                title = title[:title_chars]
+            close_visible = (not tab.get("pinned")) and self._custom("show_tab_close_buttons", True)
+            close_space = 28 if close_visible else 10
+            canvas.create_text(icon_x + 15, height / 2, text=title, anchor="w", fill=self.ui["text"] if active or hovered else self.ui["muted"], font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))))
+            if close_visible:
+                close_x = width - 16
+                close_fill = self.ui["text"] if hovered else self.ui["muted_dim"]
+                canvas.create_text(close_x, height / 2, text="×", fill=close_fill, font=(self._ui_font_family, max(9, int(self._custom("tab_font_size", 9)) + 2)), tags=("close",))
+            canvas._tekzite_close_visible = close_visible
+            canvas._tekzite_close_x = width - close_space
+        except Exception:
+            pass
+
+    def _create_soft_tab(self, tab, active):
+        title = str(tab.get("title") or "New Tab")
+        scale = max(0.75, float(self._custom("ui_scale", 1.0)))
+        if tab.get("pinned"):
+            width = max(44, int(48 * scale))
+        else:
+            title_chars = min(len(title), max(6, int(self._custom("tab_title_chars", 24))))
+            width = max(int(112 * scale), min(int(230 * scale), int((62 + title_chars * 7.1) * scale)))
+        height = max(30, self._ui_metric("tab_bar_height", 44) - self._ui_padding(12))
+        canvas = tk.Canvas(self.tab_items, width=width, height=height, bg=self.ui["chrome"], highlightthickness=0, bd=0, cursor="hand2")
+        canvas.pack(side="left", padx=(0, self._ui_padding(5)), pady=(self._ui_padding(1), self._ui_padding(1)))
+        self._draw_soft_tab(canvas, tab, active, hovered=False)
+
+        def redraw(hovered=False, c=canvas, t=tab, a=active):
+            self._draw_soft_tab(c, t, a, hovered=hovered)
+
+        canvas.bind("<Enter>", lambda event: redraw(True))
+        canvas.bind("<Leave>", lambda event: redraw(False))
+        def left_click(event, tid=tab["id"], c=canvas):
+            if getattr(c, "_tekzite_close_visible", False) and event.x >= getattr(c, "_tekzite_close_x", 10**9):
+                self._close_tab(tid)
+            else:
+                self._switch_tab(tid)
+        canvas.bind("<Button-1>", left_click)
+        canvas.bind("<Button-2>", lambda event=None, tid=tab["id"]: self._close_tab(tid))
+        canvas.bind("<Button-3>", lambda event=None, tid=tab["id"]: self._show_tab_context_menu(event, tid))
+        return canvas
+
     def _refresh_tab_strip(self):
         if self.tab_items is None:
             return
         for child in self.tab_items.winfo_children():
             child.destroy()
 
-        for tab in self.tabs:
-            active = tab.get("id") == self.active_tab_id
-            normal_bg = self.ui["chrome"] if active else self.ui["bg"]
-            hover_bg = self.ui["chrome_hover"]
-            normal_fg = self.ui["text"] if active else self.ui["muted"]
+        groups = self._normalized_tab_groups()
+        group_rows = groups.items() if self._custom("show_tab_group_chips", True) else ()
+        for group_name, meta in group_rows:
+            count = sum(1 for tab in self.tabs if tab.get("group") == group_name)
+            if not count:
+                continue
+            chip = tk.Button(
+                self.tab_items, text=("▸ " if meta.get("collapsed") else "▾ ") + f"{group_name} ({count})",
+                command=lambda g=group_name: self._toggle_tab_group(g),
+                bg=self.ui["field"], fg=meta.get("color", self.ui["accent"]),
+                activebackground=self.ui["field_focus"], activeforeground=self.ui["text"],
+                relief="flat", bd=0, highlightthickness=1, highlightbackground=self.ui["border_soft"], font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)) - 1), "bold"), padx=self._ui_padding(8), pady=self._ui_padding(3), cursor="hand2",
+            )
+            chip.pack(side="left", padx=(0, 3), fill="y")
 
-            # v7.9: tabs use a quiet surface plus a 2px active indicator rather
-            # than a bright rectangular border. This keeps many-tab layouts
-            # calmer while the current tab remains immediately obvious.
+        for tab in self.tabs:
+            group_name = str(tab.get("group") or "")
+            group_meta = groups.get(group_name, {})
+            if group_name and group_meta.get("collapsed") and tab.get("id") != self.active_tab_id:
+                continue
+            active = tab.get("id") == self.active_tab_id
+            if self._custom("tab_style", "soft") == "soft":
+                self._create_soft_tab(tab, active)
+                continue
+            normal_bg = self.ui["field"] if active else self.ui["chrome"]
+            hover_bg = self.ui["field_focus"]
+            normal_fg = self.ui["text"] if active else self.ui["muted"]
+            normal_border = self.ui["border"] if active else self.ui["border_soft"]
+
             frame = tk.Frame(
                 self.tab_items,
                 bg=normal_bg,
                 highlightthickness=1,
-                highlightbackground=self.ui["border_soft"] if active else self.ui["bg"],
+                highlightbackground=normal_border,
             )
-            frame.pack(side="left", padx=(0, 3), fill="y")
+            frame.pack(side="left", padx=(0, 5), pady=(self._ui_padding(2), self._ui_padding(2)), fill="y")
 
             body = tk.Frame(frame, bg=normal_bg)
-            body.pack(side="top", fill="both", expand=True)
+            body.pack(side="top", fill="both", expand=True, padx=self._ui_padding(2))
 
             # v8.0: favicon/loading glyph and live page title. Keep the icon in
             # its own label so the title remains compact as tabs get narrower.
-            icon_photo = tab.get("favicon_photo")
+            icon_photo = tab.get("favicon_photo") if self._custom("show_tab_favicons", True) else None
             icon = tk.Label(
                 body,
                 image=icon_photo if icon_photo else "",
-                text="" if icon_photo else ("◌" if tab.get("loading") else "◇"),
+                text="" if icon_photo else ("☾" if tab.get("sleeping") else ("◌" if tab.get("loading") else "◇")),
                 compound="left", bg=normal_bg, fg=self.ui["accent_hover"] if tab.get("loading") else self.ui["muted_dim"],
-                font=(self._ui_font_family, 9), padx=7, pady=4, cursor="hand2",
+                font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))), padx=self._ui_padding(8), pady=self._ui_padding(5), cursor="hand2",
             )
             icon.pack(side="left")
             title = str(tab.get("title") or "New Tab")
+            title_chars = max(6, int(self._custom("tab_title_chars", 28)))
             label = tk.Label(
                 body,
-                text=title[:28],
+                text=(title[:1] if tab.get("pinned") else title[:title_chars]),
                 bg=normal_bg,
                 fg=normal_fg,
-                font=(self._ui_font_family, 9),
-                padx=(2 if icon_photo else 0),
-                pady=4,
+                font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))),
+                padx=(self._ui_padding(2) if icon_photo else 0),
+                pady=self._ui_padding(5),
                 cursor="hand2",
             )
             label.pack(side="left")
@@ -1042,21 +1682,25 @@ class BrowserApp:
                 relief="flat",
                 bd=0,
                 highlightthickness=0,
-                font=(self._ui_font_family, 9),
+                font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))),
                 cursor="hand2",
-                padx=5,
+                padx=self._ui_padding(5),
                 pady=0,
             )
-            close.pack(side="right", fill="y")
+            if not tab.get("pinned") and self._custom("show_tab_close_buttons", True):
+                close.pack(side="right", fill="y")
 
-            indicator = tk.Frame(frame, bg=self.ui["accent"] if active else normal_bg, height=2)
-            indicator.pack(side="bottom", fill="x")
+            indicator = tk.Frame(frame, bg=self.ui["accent"] if active else normal_bg, height=max(1, self._ui_padding(2)))
+            if self._custom("show_tab_active_indicator", True):
+                indicator.pack(side="bottom", fill="x")
 
             def set_hover(_event=None, *, inside=True, fr=frame, bd=body, ic=icon, lb=label, cl=close, ind=indicator,
-                          is_active=active, base=normal_bg, base_fg=normal_fg):
+                          is_active=active, base=normal_bg, base_fg=normal_fg, base_border=normal_border):
                 bg = hover_bg if inside and not is_active else base
+                border = self.ui["border_focus"] if (inside and is_active) else (self.ui["border"] if inside else base_border)
                 for w in (fr, bd, ic, lb, cl):
                     self._animate_widget_color(w, "bg", bg, 105 if inside else 145)
+                self._animate_widget_color(fr, "highlightbackground", border, 105 if inside else 145)
                 self._animate_widget_color(lb, "fg", self.ui["text"] if inside else base_fg, 105 if inside else 145)
                 self._animate_widget_color(cl, "fg", self.ui["muted"] if inside else self.ui["muted_dim"], 105 if inside else 145)
                 if not is_active:
@@ -1135,6 +1779,10 @@ class BrowserApp:
                 tab["ready_state"] = ready
                 tab["loading"] = loading
                 changed = True
+            audible = bool(info.get("audible", False))
+            if audible != bool(tab.get("audible", False)):
+                tab["audible"] = audible
+                changed = True
             fav_url = str(info.get("favicon") or "")
             if fav_url and fav_url != tab.get("favicon_url"):
                 tab["favicon_url"] = fav_url
@@ -1145,6 +1793,9 @@ class BrowserApp:
                 if photo is not None:
                     tab["favicon_photo"] = photo
                     changed = True
+            self._record_page_visit(tab)
+            if tab.get("id") == self.active_tab_id:
+                self._refresh_standard_toolbar_state()
             if changed:
                 self._refresh_tab_strip()
 
@@ -1179,6 +1830,9 @@ class BrowserApp:
         tab = self._new_tab(url=url or None, switch=True, navigate=bool(url))
         if tab is not None:
             tab["title"] = str(snap.get("title") or tab.get("title") or "New Tab")
+            tab["pinned"] = bool(snap.get("pinned"))
+            tab["group"] = str(snap.get("group") or "")
+            self.tabs.sort(key=lambda t: not t.get("pinned", False))
             if isinstance(snap.get("history"), list):
                 tab["history"] = list(snap["history"])
                 tab["history_index"] = int(snap.get("history_index", len(tab["history"]) - 1))
@@ -1206,9 +1860,9 @@ class BrowserApp:
     def _show_find_bar(self):
         if not self._find_bar_visible:
             self.find_bar.configure(height=0)
-            self.find_bar.pack(fill="x", before=self.content_frame)
             self._find_bar_visible = True
-            self._animate_widget_height(self.find_bar, 0, 40, duration=155)
+            self._repack_browser_chrome()
+            self._animate_widget_height(self.find_bar, 0, self._ui_metric("find_bar_height", 40), duration=155)
         self.find_entry.focus_set()
         self.find_entry.selection_range(0, "end")
         return "break"
@@ -1226,7 +1880,7 @@ class BrowserApp:
             try:
                 current = max(1, int(self.find_bar.winfo_height()))
             except Exception:
-                current = 40
+                current = self._ui_metric("find_bar_height", 40)
             self._animate_widget_height(self.find_bar, current, 0, duration=130, on_done=finish)
         try:
             self.root.focus_set()
@@ -1297,6 +1951,10 @@ class BrowserApp:
             "ready_state": "",
             "favicon_url": "",
             "favicon_photo": None,
+            "group": "",
+            "sleeping": False,
+            "last_active": time.monotonic(),
+            "audible": False,
         }
         self._next_tab_id += 1
         self.tabs.append(tab)
@@ -1314,6 +1972,8 @@ class BrowserApp:
                 pass
             self.url_var.set(url or "")
         self._refresh_tab_strip()
+        if switch:
+            self.update_history_buttons()
         if switch and navigate and url:
             self.navigate_to(url)
         elif switch and navigate and not url:
@@ -1327,7 +1987,7 @@ class BrowserApp:
         tab = self._active_tab()
         if tab is None:
             return
-        tab["url"] = self.url_var.get().strip()
+        # Do not replace the committed URL with unfinished address-bar edits.
         tab["history"] = list(self.history)
         tab["history_index"] = int(self.history_index)
         tab["engine"] = "chromium"
@@ -1345,7 +2005,7 @@ class BrowserApp:
         for tab in self.tabs:
             if exclude_id is not None and tab.get("id") == exclude_id:
                 continue
-            if tab.get("loaded") and self._canonical_tab_url(tab.get("url")) == key:
+            if (tab.get("loaded") or tab.get("sleeping")) and self._canonical_tab_url(tab.get("url")) == key:
                 return tab
         return None
 
@@ -1359,6 +2019,8 @@ class BrowserApp:
         self._capture_active_tab_state()
         self._navigation_generation += 1
         self.active_tab_id = target["id"]
+        target["last_active"] = time.monotonic()
+        target["sleeping"] = False
         self.history = list(target.get("history") or [])
         target["history"] = self.history
         self.history_index = int(target.get("history_index", -1))
@@ -1397,6 +2059,32 @@ class BrowserApp:
         self.status_var.set(f"Switched to existing tab | {target.get('url','')}")
         return True
 
+    def _recover_failed_tab_activation(self, target):
+        """Reload a tab whose Chromium target vanished after helper failure."""
+        self._capture_active_tab_state()
+        self._navigation_generation += 1
+        self.active_tab_id = target["id"]
+        target["last_active"] = time.monotonic()
+        target["sleeping"] = False
+        self.history = list(target.get("history") or [])
+        target["history"] = self.history
+        self.history_index = int(target.get("history_index", -1))
+        target["chromium_target_id"] = None
+        target["loaded"] = False
+        target["loading"] = False
+        target["ready_state"] = ""
+        self.url_var.set(target.get("url") or "")
+        self.update_history_buttons()
+        self._refresh_tab_strip()
+        url = str(target.get("url") or "")
+        if url:
+            self.status_var.set("Chromium tab recovered; reloading page…")
+            self.navigate_to(url, add_history=False, reuse_existing=False)
+        else:
+            self._show_native_canvas()
+            self._focus_address()
+        return True
+
     def _switch_tab(self, tab_id):
         target = next((t for t in self.tabs if t.get("id") == tab_id), None)
         if target is None:
@@ -1407,6 +2095,7 @@ class BrowserApp:
         if tab_id == self.active_tab_id and self._tab_switch_pending_id is None:
             return True
 
+        self._wake_tab_if_needed(target)
         if target.get("engine") == "chromium" and target.get("chromium_target_id"):
             self._tab_switch_serial += 1
             serial = self._tab_switch_serial
@@ -1429,7 +2118,11 @@ class BrowserApp:
                 except Exception:
                     activated = False
                 if not activated:
-                    self.status_var.set("Tab switch failed")
+                    current_target = next((t for t in self.tabs if t.get("id") == tab_id), None)
+                    if current_target is not None:
+                        self._recover_failed_tab_activation(current_target)
+                    else:
+                        self.status_var.set("Tab switch failed")
                     return
                 current_target = next((t for t in self.tabs if t.get("id") == tab_id), None)
                 if current_target is None or current_target.get("chromium_target_id") != target_id:
@@ -1461,7 +2154,164 @@ class BrowserApp:
         except Exception:
             pass
         self.status_var.set("Ready")
+        if target.pop("restore_pending", False):
+            self.navigate_to(target["url"], reuse_existing=False)
         return True
+
+    def _schedule_sleeping_tabs(self, delay_ms=30000):
+        if getattr(self, "_closing", False):
+            return
+        try:
+            if self._sleeping_tabs_after_id is not None:
+                self.root.after_cancel(self._sleeping_tabs_after_id)
+        except Exception:
+            pass
+        try:
+            self._sleeping_tabs_after_id = self.root.after(max(1000, int(delay_ms)), self._sleeping_tabs_tick)
+        except Exception:
+            self._sleeping_tabs_after_id = None
+
+    def _sleeping_tabs_tick(self):
+        self._sleeping_tabs_after_id = None
+        if getattr(self, "_closing", False):
+            return
+        if self.preferences.get("sleeping_tabs_enabled", True):
+            timeout = max(5, min(240, int(self.preferences.get("sleeping_tabs_minutes", 30)))) * 60.0
+            now = time.monotonic()
+            for tab in list(self.tabs):
+                if tab.get("id") == self.active_tab_id or tab.get("pinned") or tab.get("sleeping") or tab.get("audible"):
+                    continue
+                if not tab.get("chromium_target_id") or not tab.get("url"):
+                    continue
+                last_active = float(tab.get("last_active") or now)
+                if now - last_active >= timeout:
+                    self._sleep_tab(tab)
+        self._schedule_sleeping_tabs(30000)
+
+    def _sleep_tab(self, tab):
+        if not isinstance(tab, dict) or tab.get("id") == self.active_tab_id or tab.get("pinned"):
+            return False
+        target_id = tab.get("chromium_target_id")
+        if not target_id or not tab.get("url"):
+            return False
+        try:
+            close_embedded_chromium_target(target_id)
+        except Exception:
+            return False
+        tab["chromium_target_id"] = None
+        tab["loaded"] = False
+        tab["loading"] = False
+        tab["ready_state"] = ""
+        tab["sleeping"] = True
+        tab["restore_pending"] = True
+        self._refresh_tab_strip()
+        return True
+
+    def _wake_tab_if_needed(self, tab):
+        if not tab or not tab.get("sleeping"):
+            return False
+        tab["sleeping"] = False
+        tab["restore_pending"] = bool(tab.get("url"))
+        tab["last_active"] = time.monotonic()
+        return True
+
+    def _normalized_tab_groups(self):
+        groups = self.preferences.get("tab_groups", {})
+        if not isinstance(groups, dict):
+            groups = {}
+        cleaned = {}
+        for name, meta in groups.items():
+            name = str(name or "").strip()[:32]
+            if not name:
+                continue
+            meta = meta if isinstance(meta, dict) else {}
+            color = str(meta.get("color") or "#7965ff")
+            if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                color = "#7965ff"
+            cleaned[name] = {"color": color, "collapsed": bool(meta.get("collapsed", False))}
+        return cleaned
+
+    def _persist_tab_groups(self):
+        self.preferences["tab_groups"] = self._normalized_tab_groups()
+        try:
+            self._persist_preferences()
+        except Exception as exc:
+            self.status_var.set(f"Tab groups changed for this session; save failed: {exc}")
+
+    def _create_tab_group(self, tab_id=None):
+        name = simpledialog.askstring("New Tab Group", "Group name:", parent=self.root)
+        if not name:
+            return
+        name = str(name).strip()[:32]
+        if not name:
+            return
+        groups = self._normalized_tab_groups()
+        if name not in groups:
+            palette = ("#7965ff", "#31b7a3", "#df8b3a", "#db5f80", "#5b9cf5", "#a576d6")
+            groups[name] = {"color": palette[len(groups) % len(palette)], "collapsed": False}
+        self.preferences["tab_groups"] = groups
+        if tab_id is not None:
+            tab = next((t for t in self.tabs if t.get("id") == tab_id), None)
+            if tab is not None:
+                tab["group"] = name
+        self._persist_tab_groups()
+        self._refresh_tab_strip()
+
+    def _assign_tab_group(self, tab_id, group):
+        tab = next((t for t in self.tabs if t.get("id") == tab_id), None)
+        if tab is None:
+            return
+        group = str(group or "")
+        if group and group not in self._normalized_tab_groups():
+            return
+        tab["group"] = group
+        self._refresh_tab_strip()
+
+    def _toggle_tab_group(self, group):
+        groups = self._normalized_tab_groups()
+        if group not in groups:
+            return
+        groups[group]["collapsed"] = not groups[group].get("collapsed", False)
+        self.preferences["tab_groups"] = groups
+        self._persist_tab_groups()
+        self._refresh_tab_strip()
+
+    def _show_tab_groups(self):
+        win = tk.Toplevel(self.root)
+        win.title("Tekzite Tab Groups")
+        win.geometry("520x390")
+        win.transient(self.root)
+        win.configure(bg=self.ui["bg"])
+        tree = ttk.Treeview(win, columns=("Group", "Tabs", "State"), show="headings", selectmode="browse")
+        for col, width in (("Group", 230), ("Tabs", 80), ("State", 120)):
+            tree.heading(col, text=col); tree.column(col, width=width)
+        tree.pack(fill="both", expand=True, padx=12, pady=12)
+        buttons = tk.Frame(win, bg=self.ui["bg"]); buttons.pack(fill="x", padx=12, pady=(0, 12))
+        def refresh():
+            tree.delete(*tree.get_children())
+            groups = self._normalized_tab_groups()
+            for index, (name, meta) in enumerate(groups.items()):
+                count = sum(1 for tab in self.tabs if tab.get("group") == name)
+                tree.insert("", "end", iid=str(index), values=(name, count, "collapsed" if meta.get("collapsed") else "expanded"), tags=(name,))
+        def selected_name():
+            selected = tree.selection()
+            if not selected: return None
+            return str(tree.item(selected[0], "values")[0])
+        def toggle():
+            name = selected_name()
+            if name: self._toggle_tab_group(name); refresh()
+        def delete():
+            name = selected_name()
+            if not name: return
+            groups = self._normalized_tab_groups(); groups.pop(name, None); self.preferences["tab_groups"] = groups
+            for tab in self.tabs:
+                if tab.get("group") == name: tab["group"] = ""
+            self._persist_tab_groups(); self._refresh_tab_strip(); refresh()
+        tk.Button(buttons, text="New Group", command=lambda: (self._create_tab_group(), refresh()), bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat").pack(side="left", padx=4)
+        tk.Button(buttons, text="Expand / Collapse", command=toggle, bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat").pack(side="left", padx=4)
+        tk.Button(buttons, text="Delete", command=delete, bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat").pack(side="left", padx=4)
+        refresh()
+        return "break"
 
     def _duplicate_tab(self, tab_id):
         tab = next((t for t in self.tabs if t.get("id") == tab_id), None)
@@ -1472,7 +2322,7 @@ class BrowserApp:
 
     def _close_other_tabs(self, tab_id):
         for other in list(self.tabs):
-            if other.get("id") != tab_id:
+            if other.get("id") != tab_id and not other.get("pinned"):
                 self._close_tab(other.get("id"))
         self._switch_tab(tab_id)
 
@@ -1483,7 +2333,8 @@ class BrowserApp:
         except ValueError:
             return
         for other_id in ids[index + 1:]:
-            self._close_tab(other_id)
+            if not next(t for t in self.tabs if t["id"] == other_id).get("pinned"):
+                self._close_tab(other_id)
 
     def _show_tab_context_menu(self, event, tab_id):
         tab = next((t for t in self.tabs if t.get("id") == tab_id), None)
@@ -1492,10 +2343,22 @@ class BrowserApp:
         menu = tk.Menu(
             self.root, tearoff=False, bg=self.ui["chrome_2"], fg=self.ui["text"],
             activebackground=self.ui["field_focus"], activeforeground="#ffffff",
-            bd=0, relief="flat", font=(self._ui_font_family, 9),
+            bd=0, relief="flat", font=(self._ui_font_family, self._font_size(9)),
         )
         menu.add_command(label="New Tab", command=self._new_tab, accelerator="Ctrl+T")
+        menu.add_command(label="Unpin Tab" if tab.get("pinned") else "Pin Tab", command=lambda: self._toggle_pin(tab_id))
         menu.add_command(label="Duplicate Tab", command=lambda: self._duplicate_tab(tab_id))
+        group_menu = tk.Menu(menu, tearoff=False, bg=self.ui["chrome_2"], fg=self.ui["text"], activebackground=self.ui["field_focus"], activeforeground="#ffffff")
+        group_menu.add_command(label="New Group…", command=lambda: self._create_tab_group(tab_id))
+        groups = self._normalized_tab_groups()
+        if groups:
+            group_menu.add_separator()
+            for group_name in groups:
+                group_menu.add_command(label=group_name, command=lambda g=group_name: self._assign_tab_group(tab_id, g))
+        if tab.get("group"):
+            group_menu.add_separator()
+            group_menu.add_command(label="Remove from Group", command=lambda: self._assign_tab_group(tab_id, ""))
+        menu.add_cascade(label="Move to Group", menu=group_menu)
         menu.add_command(label="Reopen Closed Tab", command=self._restore_closed_tab, accelerator="Ctrl+Shift+T")
         menu.add_separator()
         url = str(tab.get("url") or "")
@@ -1515,7 +2378,7 @@ class BrowserApp:
         # v8.0: keep a cheap restore snapshot before destroying the Chromium
         # target. Ctrl+Shift+T recreates the page with normal Chromium state.
         if tab.get("url") or tab.get("loaded"):
-            snap = {k: tab.get(k) for k in ("url", "title", "history", "history_index")}
+            snap = {k: tab.get(k) for k in ("url", "title", "history", "history_index", "pinned", "group")}
             self._closed_tabs.append(snap)
             if len(self._closed_tabs) > 20:
                 self._closed_tabs = self._closed_tabs[-20:]
@@ -1611,7 +2474,8 @@ class BrowserApp:
             import ctypes
             from ctypes import wintypes
 
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
+            self._dwm_user32 = user32
             if self._dwm_host:
                 try:
                     if user32.IsWindow(wintypes.HWND(int(self._dwm_host))):
@@ -1699,7 +2563,8 @@ class BrowserApp:
         try:
             import ctypes
             from ctypes import wintypes
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
+            self._dwm_user32 = user32
             hwnd = int(self._ensure_dwm_host())
             # Do not call update_idletasks() here. During an interactive window
             # drag that can recursively generate more Configure traffic and make
@@ -1711,13 +2576,22 @@ class BrowserApp:
             h = max(1, int(self.content_frame.winfo_height()))
             rect = (x, y, w, h)
             if rect != self._dwm_host_rect:
+                SWP_NOSIZE = 0x0001
                 SWP_NOACTIVATE = 0x0010
                 SWP_NOOWNERZORDER = 0x0200
                 SWP_NOZORDER = 0x0004
-                user32.SetWindowPos(
-                    wintypes.HWND(hwnd), wintypes.HWND(0), x, y, w, h,
-                    SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER,
-                )
+                flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER
+                old_rect = self._dwm_host_rect
+                same_size = bool(old_rect and tuple(old_rect[2:]) == (w, h))
+                if same_size:
+                    flags |= SWP_NOSIZE
+                    user32.SetWindowPos(
+                        wintypes.HWND(hwnd), wintypes.HWND(0), x, y, 0, 0, flags,
+                    )
+                else:
+                    user32.SetWindowPos(
+                        wintypes.HWND(hwnd), wintypes.HWND(0), x, y, w, h, flags,
+                    )
                 self._dwm_host_rect = rect
             self._dwm_host_size = (w, h)
 
@@ -1786,7 +2660,8 @@ class BrowserApp:
         try:
             import ctypes
             from ctypes import wintypes
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
+            self._dwm_user32 = user32
             SW_HIDE = 0
             user32.ShowWindow(wintypes.HWND(int(self._dwm_host)), SW_HIDE)
         except Exception:
@@ -2499,6 +3374,15 @@ class BrowserApp:
         keysym = getattr(event, "keysym", "") or ""
         state = int(getattr(event, "state", 0) or 0)
 
+        if state & 0x0004 and keysym.lower() == "j":
+            return self._show_downloads()
+        if state & 0x0004 and keysym.lower() == "h":
+            return self._show_history()
+        if state & 0x0004 and keysym.lower() == "d":
+            return self._bookmark_current_page()
+        if state & 0x0004 and state & 0x0001 and keysym.lower() == "o":
+            return self._show_bookmarks()
+
         # Tk modifier masks -> CDP Input modifier bits.
         shift = bool(state & 0x0001)
         control = bool(state & 0x0004)
@@ -2557,7 +3441,7 @@ class BrowserApp:
         menu = tk.Menu(
             self.root, tearoff=False, bg=self.ui["chrome_2"], fg=self.ui["text"],
             activebackground=self.ui["field_focus"], activeforeground="#ffffff",
-            bd=0, relief="flat", font=(self._ui_font_family, 9),
+            bd=0, relief="flat", font=(self._ui_font_family, self._font_size(9)),
         )
         menu.add_command(label="Back", command=self.go_back)
         menu.add_command(label="Forward", command=self.go_forward)
@@ -3259,6 +4143,7 @@ class BrowserApp:
                 self.root.after(220, self._probe_visible_embedded_surface,
                                 generation, session.get("target_id"),
                                 visible_probe_expected)
+            self.root.after(1000, lambda current=session: self._start_optional_services(current))
         except Exception as exc:
             self._show_native_canvas()
             self._finish_navigation_error(generation, exc, allow_chromium_fallback=False)
@@ -3332,6 +4217,7 @@ class BrowserApp:
         if not self._embedded_mode or not self._chromium_dwm_mode:
             return
         try:
+            request_embedded_chromium_dwm_recrop()
             self._schedule_dwm_geometry_sync(resize=True, delay=1)
         except Exception:
             pass
@@ -3472,7 +4358,7 @@ class BrowserApp:
 
         # Anything containing whitespace is clearly a search query.
         if any(ch.isspace() for ch in value):
-            return "https://www.google.com/search?q=" + quote_plus(value)
+            return self._search_url(value)
 
         # Common host-like input should navigate directly rather than search.
         # This covers domains, localhost and IPv4/IPv6-ish addresses.
@@ -3486,7 +4372,7 @@ class BrowserApp:
 
         # Bare words become Google searches, turning the address bar into an
         # omnibox instead of trying to open e.g. https://tekzite.
-        return "https://www.google.com/search?q=" + quote_plus(value)
+        return self._search_url(value)
 
 
     def apply_site_compatibility(self, url):
@@ -3511,6 +4397,7 @@ class BrowserApp:
                 else "disabled"
             )
         )
+        self._refresh_standard_toolbar_state()
 
     def _apply_frameless_app_style(self):
         """Keep an override-redirect Tk window visible in the Windows taskbar."""
@@ -3537,27 +4424,140 @@ class BrowserApp:
         except Exception:
             pass
 
-    def _make_window_control(self, parent, text, command, close=False):
-        normal_bg = self.ui["bg"]
-        hover_bg = "#c42b3a" if close else self.ui["field_focus"]
-        button = tk.Button(
+    def _make_window_control(self, parent, role, command, close=False):
+        size = max(26, self._ui_metric("app_bar_height", 34) - self._ui_padding(10))
+        button = tk.Canvas(
             parent,
-            text=text,
-            command=command,
-            bg=normal_bg,
-            fg=self.ui["text"],
-            activebackground=hover_bg,
-            activeforeground="#ffffff",
-            relief="flat",
-            bd=0,
+            width=size,
+            height=size,
+            bg=self.ui["bg"],
             highlightthickness=0,
-            font=("Segoe UI Symbol", 11),
-            width=5,
+            bd=0,
+            relief="flat",
             cursor="hand2",
         )
-        button.bind("<Enter>", lambda event, b=button, c=hover_bg: self._animate_widget_color(b, "bg", c, 95))
-        button.bind("<Leave>", lambda event, b=button, c=normal_bg: self._animate_widget_color(b, "bg", c, 135))
+        button._tekzite_close_control = bool(close)
+        button._tekzite_role = str(role)
+        button._tekzite_command = command
+        button._tekzite_hovered = False
+        button._tekzite_pressed = False
+        button.bind("<Enter>", lambda event, b=button: self._set_window_control_state(b, hovered=True))
+        button.bind("<Leave>", lambda event, b=button: self._set_window_control_state(b, hovered=False, pressed=False))
+        button.bind("<ButtonPress-1>", lambda event, b=button: self._set_window_control_state(b, hovered=True, pressed=True))
+        button.bind("<ButtonRelease-1>", lambda event, b=button: self._invoke_window_control(b, event))
+        self._redraw_window_control(button)
         return button
+
+    def _set_window_control_state(self, button, hovered=None, pressed=None):
+        if hovered is not None:
+            button._tekzite_hovered = bool(hovered)
+        if pressed is not None:
+            button._tekzite_pressed = bool(pressed)
+        self._redraw_window_control(button)
+
+    def _invoke_window_control(self, button, event=None):
+        button._tekzite_pressed = False
+        inside = True
+        try:
+            inside = 0 <= int(event.x) <= int(button.winfo_width()) and 0 <= int(event.y) <= int(button.winfo_height())
+        except Exception:
+            inside = True
+        self._redraw_window_control(button)
+        if inside:
+            try:
+                button._tekzite_command()
+            except Exception:
+                pass
+
+    def _draw_window_control_icon(self, button, role, color, size):
+        pad = max(8, int(size * 0.28))
+        mid_x = size / 2
+        mid_y = size / 2
+        if role == "minimize":
+            button.create_line(pad, size - pad, size - pad, size - pad, fill=color, width=2.2, capstyle=tk.ROUND)
+        elif role == "maximize":
+            if self._window_maximized:
+                shift = max(3, int(size * 0.12))
+                button.create_rectangle(pad + shift, pad, size - pad, size - pad - shift, outline=color, width=1.8)
+                button.create_rectangle(pad, pad + shift, size - pad - shift, size - pad, outline=color, width=1.8)
+            else:
+                button.create_rectangle(pad, pad, size - pad, size - pad, outline=color, width=1.8)
+        elif role == "close":
+            button.create_line(pad, pad, size - pad, size - pad, fill=color, width=2.2, capstyle=tk.ROUND)
+            button.create_line(size - pad, pad, pad, size - pad, fill=color, width=2.2, capstyle=tk.ROUND)
+
+    def _redraw_window_control(self, button):
+        try:
+            size = max(26, self._ui_metric("app_bar_height", 34) - self._ui_padding(10))
+            button.configure(width=size, height=size, bg=self.ui["bg"])
+            button.delete("all")
+            role = getattr(button, "_tekzite_role", "")
+            hovered = bool(getattr(button, "_tekzite_hovered", False))
+            pressed = bool(getattr(button, "_tekzite_pressed", False))
+            close = bool(getattr(button, "_tekzite_close_control", False))
+            if self._custom("window_control_style", "traffic_lights") == "traffic_lights":
+                colors = {"close": "#ff5f57", "minimize": "#febc2e", "maximize": "#28c840"}
+                base = colors.get(role, self.ui["accent"])
+                radius = max(5, int(size * 0.23))
+                cx = cy = size / 2
+                if hovered:
+                    button.create_oval(cx - radius - 2, cy - radius - 2, cx + radius + 2, cy + radius + 2, fill=self.ui["chrome_hover"], outline="")
+                button.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, fill=base, outline=base)
+                if hovered or pressed:
+                    glyph = "#3a2c2c" if role == "close" else "#263025"
+                    mini = max(3, int(radius * 0.48))
+                    if role == "close":
+                        button.create_line(cx-mini, cy-mini, cx+mini, cy+mini, fill=glyph, width=1.4, capstyle=tk.ROUND)
+                        button.create_line(cx+mini, cy-mini, cx-mini, cy+mini, fill=glyph, width=1.4, capstyle=tk.ROUND)
+                    elif role == "minimize":
+                        button.create_line(cx-mini, cy, cx+mini, cy, fill=glyph, width=1.5, capstyle=tk.ROUND)
+                    elif role == "maximize":
+                        button.create_line(cx-mini, cy+mini, cx+mini, cy-mini, fill=glyph, width=1.4, capstyle=tk.ROUND)
+                        button.create_line(cx+mini, cy-mini, cx+mini-2, cy-mini, fill=glyph, width=1.4)
+                return
+            if close:
+                fill = self.ui["danger"] if hovered else self.ui["field"]
+                outline = self.ui["danger"] if hovered else self.ui["border_soft"]
+                icon = "#ffffff" if hovered or pressed else self.ui["danger"]
+            else:
+                fill = self.ui["chrome_hover"] if hovered else self.ui["field"]
+                outline = self.ui["accent"] if hovered else self.ui["border_soft"]
+                icon = self.ui["text"] if hovered or pressed else self.ui["muted"]
+            if pressed:
+                fill = self.ui["accent"] if not close else self.ui["danger"]
+                outline = fill
+                icon = "#ffffff"
+            inset = 1
+            button.create_rectangle(inset, inset, size - inset, size - inset, fill=fill, outline=outline, width=1)
+            self._draw_window_control_icon(button, role, icon, size)
+        except Exception:
+            pass
+
+    def _refresh_window_controls(self):
+        buttons = list(getattr(self, "window_control_buttons", []) or [])
+        if not buttons:
+            return
+        by_role = {getattr(button, "_tekzite_role", ""): button for button in buttons}
+        order = ("close", "minimize", "maximize") if self._custom("window_control_style", "traffic_lights") == "traffic_lights" else ("minimize", "maximize", "close")
+        for button in buttons:
+            try:
+                button.pack_forget()
+            except Exception:
+                pass
+        arranged = []
+        for role in order:
+            button = by_role.get(role)
+            if button is None:
+                continue
+            arranged.append(button)
+            button.pack(side="left", padx=(0, self._ui_padding(6)))
+            self._redraw_window_control(button)
+        if arranged:
+            try:
+                arranged[-1].pack_configure(padx=(0, 0))
+            except Exception:
+                pass
+        self.window_control_buttons = arranged
 
     def _build_browser_menus(self, parent):
         menu_specs = [
@@ -3566,6 +4566,7 @@ class BrowserApp:
                 ("Close Tab", self._close_active_tab, "Ctrl+W"),
                 ("Reopen Closed Tab", self._restore_closed_tab, "Ctrl+Shift+T"),
                 ("New Window", self._new_window, "Ctrl+N"),
+                ("New Private Window", self._new_private_window, "Ctrl+Shift+N"),
                 ("Open Location", self._focus_address, "Ctrl+L"),
                 None,
                 ("Exit", self.on_close, "Alt+F4"),
@@ -3582,15 +4583,37 @@ class BrowserApp:
                 ("Reload", self._reload_current, "Ctrl+R"),
                 ("Focus Address Bar", self._focus_address, "Ctrl+L"),
                 None,
+                ("Customize Tekzite…", self._show_customize_browser, "Ctrl+Shift+,"),
+                ("Reset Interface", lambda: self._reset_interface_customization(confirm=True), "Ctrl+Shift+Alt+R"),
+                None,
                 ("Fullscreen", self._toggle_fullscreen, "F11"),
+                ("Toggle Quiet Mode", self._toggle_quiet_mode, ""),
             ]),
             ("History", [
+                ("Search History", self._show_history, "Ctrl+H"),
                 ("Back", self.go_back, "Alt+Left"),
                 ("Forward", self.go_forward, "Alt+Right"),
                 ("Home", self._go_home, ""),
             ]),
+            ("Bookmarks", [
+                ("Bookmark This Page", self._bookmark_current_page, "Ctrl+D"),
+                ("Manage Bookmarks", self._show_bookmarks, "Ctrl+Shift+O"),
+            ]),
             ("Tools", [
-                ("Preferences", self.show_preferences, "Ctrl+,"),
+                ("Downloads", self._show_downloads, "Ctrl+J"),
+                ("Toggle Ad Blocking for This Site", self._toggle_site_adblock, ""),
+                ("Site Info & Privacy", self._show_site_info, ""),
+                ("Privacy Shield", self._show_privacy_shield, ""),
+                ("Permissions Manager", self._show_permissions_manager, ""),
+                ("Extension Manager", self._show_extension_manager, ""),
+                ("Tab Groups", self._show_tab_groups, ""),
+                ("Profiles", self._show_profile_manager, ""),
+                None,
+                ("Task Manager", self._show_task_manager, ""),
+                ("Diagnostics", self._show_diagnostics, ""),
+                ("Local Ports & Loopback", self._show_local_ports, ""),
+                ("Check for Updates", self._check_for_updates, ""),
+                ("Settings", self.show_preferences, "Ctrl+,"),
                 None,
                 ("Copy All Debug", self.copy_all_debug, ""),
                 ("Copy Full Debug", self.copy_full_debug, ""),
@@ -3612,7 +4635,7 @@ class BrowserApp:
                 relief="flat",
                 bd=0,
                 highlightthickness=0,
-                font=(self._ui_font_family, 9),
+                font=(self._ui_font_family, self._font_size(9)),
                 cursor="hand2",
                 padx=7,
             )
@@ -3626,7 +4649,7 @@ class BrowserApp:
                 disabledforeground=self.ui["muted"],
                 relief="flat",
                 bd=1,
-                font=(self._ui_font_family, 9),
+                font=(self._ui_font_family, self._font_size(9)),
             )
             for item in items:
                 if item is None:
@@ -3634,7 +4657,11 @@ class BrowserApp:
                     continue
                 item_label, command, accelerator = item
                 menu.add_command(label=item_label, command=command, accelerator=accelerator)
+            if label == "Tools":
+                menu.configure(postcommand=lambda m=menu: self._update_site_menu(m))
             button.configure(menu=menu)
+            self._browser_menu_buttons.append(button)
+            self._browser_menus.append(menu)
             button.bind("<Enter>", lambda event, b=button: (
                 self._animate_widget_color(b, "bg", self.ui["field_focus"], 100),
                 self._animate_widget_color(b, "fg", self.ui["text"], 100),
@@ -3665,6 +4692,15 @@ class BrowserApp:
                 ctypes.c_int, ctypes.c_int, wintypes.UINT,
             ]
             user32.SetWindowPos.restype = wintypes.BOOL
+            user32.BeginDeferWindowPos.argtypes = [ctypes.c_int]
+            user32.BeginDeferWindowPos.restype = wintypes.HANDLE
+            user32.DeferWindowPos.argtypes = [
+                wintypes.HANDLE, wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                ctypes.c_int, ctypes.c_int, wintypes.UINT,
+            ]
+            user32.DeferWindowPos.restype = wintypes.HANDLE
+            user32.EndDeferWindowPos.argtypes = [wintypes.HANDLE]
+            user32.EndDeferWindowPos.restype = wintypes.BOOL
             self._native_drag_user32 = user32
             self._native_drag_hwnd = hwnd
             return bool(hwnd)
@@ -3688,23 +4724,51 @@ class BrowserApp:
             SWP_NOACTIVATE = 0x0010
             SWP_NOOWNERZORDER = 0x0200
             flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER
-            user32.SetWindowPos(
-                wintypes.HWND(int(self._native_drag_hwnd)), wintypes.HWND(0),
-                int(x), int(y), 0, 0, flags,
-            )
+            x, y = int(x), int(y)
+            if self._native_drag_last_xy == (x, y):
+                return True
             offset = self._native_drag_dwm_offset
-            if (
+            has_dwm = bool(
                 offset is not None and self._embedded_mode and self._chromium_dwm_mode
                 and self._dwm_host and self._dwm_host_size
-            ):
+            )
+            # Move Tekzite and the separate DWM destination in one deferred
+            # Win32 batch. This gives Desktop Window Manager one coherent layout
+            # commit per drag tick instead of two back-to-back top-level moves.
+            if has_dwm:
                 dx, dy = offset
                 w, h = self._dwm_host_size
-                user32.SetWindowPos(
-                    wintypes.HWND(int(self._dwm_host)), wintypes.HWND(0),
-                    int(x + dx), int(y + dy), max(1, int(w)), max(1, int(h)),
-                    SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER,
-                )
-                self._dwm_host_rect = (int(x + dx), int(y + dy), max(1, int(w)), max(1, int(h)))
+                dwm_x, dwm_y = x + int(dx), y + int(dy)
+                dwm_w, dwm_h = max(1, int(w)), max(1, int(h))
+                hdwp = user32.BeginDeferWindowPos(2)
+                if hdwp:
+                    hdwp = user32.DeferWindowPos(
+                        hdwp, wintypes.HWND(int(self._native_drag_hwnd)), wintypes.HWND(0),
+                        x, y, 0, 0, flags,
+                    )
+                if hdwp:
+                    hdwp = user32.DeferWindowPos(
+                        hdwp, wintypes.HWND(int(self._dwm_host)), wintypes.HWND(0),
+                        dwm_x, dwm_y, dwm_w, dwm_h,
+                        flags,
+                    )
+                if hdwp and user32.EndDeferWindowPos(hdwp):
+                    self._dwm_host_rect = (dwm_x, dwm_y, dwm_w, dwm_h)
+                    self._native_drag_last_xy = (x, y)
+                    return True
+            user32.SetWindowPos(
+                wintypes.HWND(int(self._native_drag_hwnd)), wintypes.HWND(0),
+                x, y, 0, 0, flags,
+            )
+            if has_dwm:
+                if self._dwm_host_rect != (dwm_x, dwm_y, dwm_w, dwm_h):
+                    user32.SetWindowPos(
+                        wintypes.HWND(int(self._dwm_host)), wintypes.HWND(0),
+                        dwm_x, dwm_y, dwm_w, dwm_h,
+                        flags,
+                    )
+                    self._dwm_host_rect = (dwm_x, dwm_y, dwm_w, dwm_h)
+            self._native_drag_last_xy = (x, y)
             return True
         except Exception:
             return False
@@ -3717,6 +4781,7 @@ class BrowserApp:
         self._window_drag_offset = (event.x_root - root_x, event.y_root - root_y)
         self._window_drag_active = True
         self._window_drag_pending_xy = None
+        self._native_drag_last_xy = None
         # v9.8: all native setup is normally pre-warmed on startup. Capture the
         # already-known DWM offset once so live drag frames can move both HWNDs
         # together without waiting for a Tk Configure -> DWM follow-up pass.
@@ -3786,6 +4851,7 @@ class BrowserApp:
                 except tk.TclError:
                     pass
         self._native_drag_dwm_offset = None
+        self._native_drag_last_xy = None
         if self._embedded_mode and self._chromium_dwm_mode:
             self._schedule_dwm_geometry_sync(resize=False, delay=1)
 
@@ -3814,6 +4880,7 @@ class BrowserApp:
             x, y, width, height = self._get_work_area()
             self.root.geometry(f"{width}x{height}+{x}+{y}")
             self._window_maximized = True
+        self._refresh_window_controls()
 
     def _minimize_window(self):
         # Tk cannot iconify an override-redirect window directly on Windows.
@@ -3838,13 +4905,49 @@ class BrowserApp:
         except Exception:
             pass
 
+    def _spawn_browser_process(self, *, private=False, profile=None):
+        if getattr(sys, "frozen", False):
+            command = [sys.executable]
+        else:
+            command = [sys.executable, os.path.abspath(__file__)]
+        selected_profile = _profile_slug(profile or getattr(self, "_profile_name", "Default"))
+        if selected_profile != "Default":
+            command.extend(["--profile", selected_profile])
+        if private:
+            command.append("--private")
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        subprocess.Popen(command, creationflags=creationflags)
+
     def _new_window(self):
         try:
-            subprocess.Popen([sys.executable, os.path.abspath(__file__)])
+            self._spawn_browser_process(private=False)
         except Exception as exc:
             self.status_var.set(f"Could not open new window: {exc}")
 
+    def _new_private_window(self):
+        try:
+            self._spawn_browser_process(private=True)
+        except Exception as exc:
+            self.status_var.set(f"Could not open private window: {exc}")
+        return "break"
+
+    def _restart_browser(self):
+        # Spawn only after the current Chromium helper has released its profile.
+        # Starting the replacement first can make Chromium treat the existing
+        # user-data-dir as a handoff/lock conflict.
+        self._restart_after_close = True
+        return bool(self.on_close())
+
     def _focus_address(self):
+        # Ctrl+L remains an escape hatch even when the user hides the toolbar
+        # or address item through customization. Reveal it for the session.
+        try:
+            if not self.toolbar.winfo_ismapped():
+                self.toolbar.pack(fill="x", before=self.chrome_separator)
+            if not self.address_shell.winfo_ismapped():
+                self.address_shell.pack(side="left", fill="x", expand=True, padx=(self._ui_padding(10), self._ui_padding(9)), pady=self._ui_padding(9))
+        except Exception:
+            pass
         # v4.80: explicitly take native keyboard ownership back from the
         # cross-process Chromium child before focusing the Tk Entry.
         self._address_focus_active = True
@@ -3866,8 +4969,84 @@ class BrowserApp:
         if url:
             self.navigate_to(url, add_history=False, reuse_existing=False)
 
+    def _stop_loading_current(self):
+        tab = self._active_tab() or {}
+        target_id = tab.get("chromium_target_id")
+        if not target_id:
+            return "break"
+        try:
+            stop_embedded_chromium_loading(target_id=target_id, timeout=2)
+            tab["loading"] = False
+            tab["ready_state"] = "stopped"
+            self.status_var.set("Loading stopped")
+        except Exception as exc:
+            self.status_var.set(f"Could not stop loading: {exc}")
+        self._refresh_standard_toolbar_state()
+        self._refresh_tab_strip()
+        return "break"
+
+    def _reload_or_stop_current(self):
+        tab = self._active_tab() or {}
+        if tab.get("loading"):
+            return self._stop_loading_current()
+        return self._reload_current()
+
     def _go_home(self):
         self.navigate_to(self._homepage_url())
+
+    def _refresh_standard_toolbar_state(self):
+        tab = self._active_tab() or {}
+        loading = bool(tab.get("loading"))
+        url = str(tab.get("url") or "")
+        try:
+            self.reload_button.configure(text=self._toolbar_text("reload", loading=loading))
+        except Exception:
+            pass
+        try:
+            bookmarked = bool(url and any(item.get("url") == url for item in self.bookmarks))
+            self.bookmark_button.configure(
+                text="★" if bookmarked else "☆",
+                fg=self.ui["accent_hover"] if bookmarked else self.ui["muted"],
+            )
+        except Exception:
+            pass
+
+    def _show_main_menu(self):
+        menu = tk.Menu(
+            self.root, tearoff=0, bg=self.ui["chrome_2"], fg=self.ui["text"],
+            activebackground=self.ui["accent"], activeforeground="#ffffff",
+            disabledforeground=self.ui["muted"], relief="flat", bd=1,
+            font=(self._ui_font_family, self._font_size(9)),
+        )
+        menu.add_command(label="New Tab", command=self._new_tab, accelerator="Ctrl+T")
+        menu.add_command(label="New Window", command=self._new_window, accelerator="Ctrl+N")
+        menu.add_command(label="New Private Window", command=self._new_private_window, accelerator="Ctrl+Shift+N")
+        menu.add_separator()
+        menu.add_command(label="History", command=self._show_history, accelerator="Ctrl+H")
+        menu.add_command(label="Downloads", command=self._show_downloads, accelerator="Ctrl+J")
+        menu.add_command(label="Bookmarks", command=self._show_bookmarks, accelerator="Ctrl+Shift+O")
+        menu.add_separator()
+        menu.add_command(label="Find in Page", command=self._show_find_bar, accelerator="Ctrl+F")
+        menu.add_command(label="Reload", command=self._reload_current, accelerator="Ctrl+R")
+        menu.add_command(label="Home", command=self._go_home)
+        menu.add_separator()
+        menu.add_command(label="Extensions", command=self._show_extension_manager)
+        menu.add_command(label="Customize Tekzite…", command=self._show_customize_browser, accelerator="Ctrl+Shift+,")
+        menu.add_command(label="Settings", command=self.show_preferences, accelerator="Ctrl+,")
+        menu.add_command(label="About Tekzite", command=self._show_about)
+        menu.add_separator()
+        menu.add_command(label="Exit", command=self.on_close, accelerator="Alt+F4")
+        try:
+            self.root.update_idletasks()
+            x = self.main_menu_button.winfo_rootx() + self.main_menu_button.winfo_width()
+            y = self.main_menu_button.winfo_rooty() + self.main_menu_button.winfo_height()
+            menu.tk_popup(max(0, x - 230), y)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+        return "break"
 
     def _edit_shortcut(self, key):
         # DWM presentation keeps Chromium off-screen, so native keybd_event
@@ -4093,17 +5272,852 @@ class BrowserApp:
         except Exception:
             return START_URL
 
+    def _custom(self, key, default=None):
+        custom = getattr(self, "customization", None)
+        if not isinstance(custom, dict):
+            custom = _normalized_customization(getattr(self, "preferences", DEFAULT_PREFERENCES).get("customization"))
+            self.customization = custom
+        return custom.get(key, default)
+
+    def _density_factor(self):
+        return {"compact": 0.84, "comfortable": 1.0, "spacious": 1.18}.get(str(self._custom("density", "comfortable")), 1.0)
+
+    def _ui_metric(self, key, default):
+        try:
+            value = float(self._custom(key, default))
+            scale = float(self._custom("ui_scale", 1.0))
+        except Exception:
+            value, scale = float(default), 1.0
+        return max(1, int(round(value * scale)))
+
+    def _ui_padding(self, value):
+        try:
+            return max(0, int(round(float(value) * float(self._custom("ui_scale", 1.0)) * self._density_factor())))
+        except Exception:
+            return int(value)
+
+    def _font_size(self, base=10):
+        try:
+            ratio = float(self._custom("font_size", 10)) / 10.0
+            scale = float(self._custom("ui_scale", 1.0))
+            return max(6, int(round(float(base) * ratio * scale)))
+        except Exception:
+            return max(6, int(base))
+
+    def _toolbar_text(self, item, *, loading=False):
+        icons = {"back": "‹", "forward": "›", "reload": "×" if loading else "↻", "home": "⌂", "downloads": "⇩", "menu": "⋮"}
+        words = {"back": "Back", "forward": "Forward", "reload": "Stop" if loading else "Reload", "home": "Home", "downloads": "Downloads", "menu": "Menu"}
+        mode = str(self._custom("toolbar_label_style", "icons"))
+        if mode == "text":
+            return words.get(item, item.title())
+        if mode == "both":
+            return f"{icons.get(item, '')} {words.get(item, item.title())}".strip()
+        return icons.get(item, words.get(item, item.title()))
+
+    def _search_url(self, query):
+        template = str(getattr(self, "preferences", DEFAULT_PREFERENCES).get("search_url_template") or "https://www.startpage.com/sp/search?query={query}")
+        if "{query}" not in template:
+            template = "https://www.startpage.com/sp/search?query={query}"
+        return template.replace("{query}", quote_plus(str(query or "")))
+
+    def _apply_toolbar_layout(self):
+        widgets = getattr(self, "_toolbar_widgets", {})
+        if not widgets:
+            return
+        for widget in widgets.values():
+            try:
+                widget.pack_forget()
+            except Exception:
+                pass
+        visible = self._custom("toolbar_visible", {})
+        order = self._custom("toolbar_order", TOOLBAR_ITEM_IDS)
+        gap = self._ui_padding(5)
+        outer = self._ui_padding(9)
+        for item in order:
+            widget = widgets.get(item)
+            if widget is None or not bool(visible.get(item, True)):
+                continue
+            if item == "address":
+                widget.pack(side="left", fill="x", expand=True, padx=(self._ui_padding(10), outer), pady=outer)
+            else:
+                widget.pack(side="left", padx=(0, gap), pady=self._ui_padding(8))
+        try:
+            self.site_info_button.pack_forget()
+            if self._custom("show_site_info_button", True):
+                self.site_info_button.pack(side="left", padx=(self._ui_padding(8), self._ui_padding(2)))
+        except Exception:
+            pass
+        try:
+            self.bookmark_button.pack_forget()
+            if self._custom("show_bookmark_button", True):
+                self.bookmark_button.pack(side="right", padx=(0, self._ui_padding(4)))
+        except Exception:
+            pass
+
+    def _repack_browser_chrome(self):
+        # Rebuild only Tk packing order. Chromium's target/process is untouched.
+        ordered = [
+            getattr(self, "app_bar", None), getattr(self, "tab_bar", None), getattr(self, "toolbar", None),
+            getattr(self, "find_bar", None), getattr(self, "chrome_separator", None),
+            getattr(self, "content_frame", None), getattr(self, "status_bar", None),
+        ]
+        for widget in ordered:
+            if widget is not None:
+                try:
+                    widget.pack_forget()
+                except Exception:
+                    pass
+
+        app_bar = getattr(self, "app_bar", None)
+        tab_bar = getattr(self, "tab_bar", None)
+        toolbar = getattr(self, "toolbar", None)
+        find_bar = getattr(self, "find_bar", None)
+        separator = getattr(self, "chrome_separator", None)
+        content = getattr(self, "content_frame", None)
+        status = getattr(self, "status_bar", None)
+        if self._custom("show_app_bar", True) and app_bar is not None:
+            app_bar.pack(fill="x")
+        tab_first = self._custom("tab_position", "above_toolbar") == "above_toolbar"
+        if tab_first:
+            if self._custom("show_tab_bar", True) and tab_bar is not None:
+                tab_bar.pack(fill="x")
+            if self._custom("show_toolbar", True) and toolbar is not None:
+                toolbar.pack(fill="x")
+        else:
+            if self._custom("show_toolbar", True) and toolbar is not None:
+                toolbar.pack(fill="x")
+            if self._custom("show_tab_bar", True) and tab_bar is not None:
+                tab_bar.pack(fill="x")
+        if getattr(self, "_find_bar_visible", False) and find_bar is not None:
+            find_bar.pack(fill="x")
+        if separator is not None and self._custom("show_chrome_separator", True):
+            separator.pack(fill="x")
+        if content is not None:
+            content.pack(fill="both", expand=True)
+        status_visible = bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("show_status_bar", True)) and not getattr(self, "preferences", DEFAULT_PREFERENCES).get("quiet_mode", False)
+        if status_visible and status is not None:
+            status.pack(fill="x")
+        try:
+            self.tab_items.pack_forget()
+            self.new_tab_button.pack_forget()
+            new_tab_left = self._custom("new_tab_button_position", "right") == "left"
+            if new_tab_left and self._custom("show_new_tab_button", True):
+                self.new_tab_button.pack(side="left", padx=(self._ui_padding(12), self._ui_padding(4)), pady=(self._ui_padding(6), self._ui_padding(5)))
+            self.tab_items.pack(side="left", fill="both", expand=True, padx=(self._ui_padding(12), self._ui_padding(6)), pady=(self._ui_padding(6), self._ui_padding(5)))
+            if not new_tab_left and self._custom("show_new_tab_button", True):
+                self.new_tab_button.pack(side="right", padx=(self._ui_padding(4), self._ui_padding(12)), pady=(self._ui_padding(6), self._ui_padding(5)))
+        except Exception:
+            pass
+        try:
+            self.app_brand.pack_forget()
+            if self._custom("show_brand_badge", True) or self._custom("show_title_text", True):
+                self.app_brand.pack(side="left", padx=(self._ui_padding(14), self._ui_padding(12)), fill="y")
+            self.brand_badge.pack_forget()
+            if self._custom("show_brand_badge", True):
+                self.brand_badge.pack(side="left", pady=self._ui_padding(5))
+            self.title_label.pack_forget()
+            if self._custom("show_title_text", True):
+                self.title_label.pack(side="left", padx=(self._ui_padding(7), 0))
+        except Exception:
+            pass
+        try:
+            self.menu_strip.pack_forget()
+            if self._custom("show_menu_bar", True):
+                self.menu_strip.pack(side="left", fill="y", padx=(0, self._ui_padding(6)))
+        except Exception:
+            pass
+        try:
+            self.window_controls.pack_forget()
+            if self._custom("show_window_controls", True):
+                if self._custom("window_control_style", "traffic_lights") == "traffic_lights":
+                    self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(10), self._ui_padding(4)), pady=self._ui_padding(5), before=self.app_brand)
+                else:
+                    self.window_controls.pack(side="right", fill="y", padx=(self._ui_padding(6), self._ui_padding(10)), pady=self._ui_padding(5))
+        except Exception:
+            pass
+        try:
+            self.scrollbar.pack_forget()
+            if self._custom("show_scrollbar", True):
+                self.scrollbar.pack(side="right", fill="y")
+        except Exception:
+            pass
+        try:
+            self.status_activity_dot.pack_forget()
+            self.status_text_label.pack_forget()
+            self.status_version_label.pack_forget()
+            if self._custom("show_status_activity_dot", True):
+                self.status_activity_dot.pack(side="left", padx=(self._ui_padding(12), self._ui_padding(6)))
+            self.status_text_label.pack(side="left", fill="x", expand=True)
+            if self._custom("show_status_version", True):
+                self.status_version_label.pack(side="right", padx=(self._ui_padding(8), self._ui_padding(12)))
+        except Exception:
+            pass
+
+    def _replace_palette_in_widget_tree(self, widget, old_ui, new_ui):
+        reverse = {str(value).lower(): new_ui.get(key, value) for key, value in old_ui.items()}
+        color_options = ("bg", "background", "fg", "foreground", "activebackground", "activeforeground",
+                         "highlightbackground", "highlightcolor", "insertbackground", "selectbackground", "selectforeground")
+        for option in color_options:
+            try:
+                current = str(widget.cget(option))
+            except Exception:
+                continue
+            replacement = reverse.get(current.lower())
+            if replacement and replacement != current:
+                try:
+                    widget.configure(**{option: replacement})
+                except Exception:
+                    pass
+        try:
+            children = widget.winfo_children()
+        except Exception:
+            children = ()
+        for child in children:
+            self._replace_palette_in_widget_tree(child, old_ui, new_ui)
+
+    def _apply_customization_runtime(self, *, repack=True, refresh_tabs=True):
+        old_ui = dict(getattr(self, "ui", UI_COLOR_DEFAULTS))
+        self.customization = _normalized_customization(self.preferences.get("customization"))
+        self.preferences["customization"] = self.customization
+        self.ui = dict(self.customization["colors"])
+        try:
+            self.root.configure(bg=self.ui["bg"])
+            self._replace_palette_in_widget_tree(self.root, old_ui, self.ui)
+        except Exception:
+            pass
+        try:
+            self.app_bar.configure(height=self._ui_metric("app_bar_height", 38), bg=self.ui["bg"])
+            self.tab_bar.configure(height=self._ui_metric("tab_bar_height", 44), bg=self.ui["chrome"])
+            self.toolbar.configure(height=self._ui_metric("toolbar_height", 62), bg=self.ui["chrome"])
+            self.status_bar.configure(height=self._ui_metric("status_bar_height", 26), bg=self.ui["chrome"], highlightbackground=self.ui["border"])
+            self.chrome_separator.configure(bg=self.ui["border_soft"])
+            self.brand_badge.configure(bg=self.ui["accent"])
+            self.status_activity_dot.configure(fg=self.ui.get("success", "#45d483"), bg=self.ui["chrome"])
+            self.address_shell.configure(bg=self.ui["field"], highlightbackground=self.ui["border"], highlightcolor=self.ui["border_focus"])
+            self._refresh_window_controls()
+        except Exception:
+            pass
+        try:
+            import tkinter.font as tkfont
+            families = {str(name).casefold(): str(name) for name in tkfont.families(self.root)}
+            automatic_ui = families.get("segoe ui variable text", families.get("segoe ui", "Segoe UI"))
+            automatic_display = families.get("segoe ui variable display", automatic_ui)
+            automatic_mono = families.get("cascadia mono", families.get("consolas", "Consolas"))
+            requested_ui = str(self._custom("font_family", "")).casefold()
+            requested_display = str(self._custom("display_font_family", "")).casefold()
+            requested_mono = str(self._custom("monospace_font_family", "")).casefold()
+            self._ui_font_family = families.get(requested_ui, automatic_ui) if requested_ui else automatic_ui
+            self._ui_display_font_family = families.get(requested_display, automatic_display) if requested_display else automatic_display
+            self._ui_monospace_font_family = families.get(requested_mono, automatic_mono) if requested_mono else automatic_mono
+            for named in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkCaptionFont", "TkSmallCaptionFont"):
+                try:
+                    tkfont.nametofont(named).configure(family=self._ui_font_family, size=max(7, int(self._custom("font_size", 10))))
+                except Exception:
+                    pass
+            try:
+                tkfont.nametofont("TkHeadingFont").configure(family=self._ui_display_font_family, weight="bold")
+            except Exception:
+                pass
+            base = max(7, int(self._custom("font_size", 10)))
+            menu = max(7, int(self._custom("menu_font_size", 9)))
+            toolbar_size = max(7, int(self._custom("toolbar_font_size", 10)))
+            self.address.configure(font=(self._ui_font_family, base))
+            self.title_label.configure(font=(self._ui_font_family, menu, "bold"))
+            self.brand_badge.configure(font=(self._ui_font_family, menu, "bold"))
+            self.status_text_label.configure(font=(self._ui_font_family, menu))
+            self.status_version_label.configure(font=(self._ui_font_family, max(7, menu - 1)))
+            for item, button in self._toolbar_widgets.items():
+                if item != "address":
+                    button.configure(font=(self._ui_font_family, toolbar_size))
+            for button in getattr(self, "_browser_menu_buttons", []):
+                button.configure(font=(self._ui_font_family, menu), bg=self.ui["bg"], fg=self.ui["muted"],
+                                 activebackground=self.ui["field_focus"], activeforeground=self.ui["text"])
+            for browser_menu in getattr(self, "_browser_menus", []):
+                browser_menu.configure(bg=self.ui["chrome_2"], fg=self.ui["text"], activebackground=self.ui["accent"],
+                                       activeforeground="#ffffff", disabledforeground=self.ui["muted"], font=(self._ui_font_family, menu))
+        except Exception:
+            pass
+        try:
+            loading = bool((self._active_tab() or {}).get("loading"))
+            self.back_button.configure(text=self._toolbar_text("back"))
+            self.forward_button.configure(text=self._toolbar_text("forward"))
+            self.reload_button.configure(text=self._toolbar_text("reload", loading=loading))
+            self.home_button.configure(text=self._toolbar_text("home"))
+            self.downloads_button.configure(text=self._toolbar_text("downloads"))
+            self.main_menu_button.configure(text=self._toolbar_text("menu"))
+        except Exception:
+            pass
+        try:
+            title_version = f" v{BROWSER_VERSION}" if self._custom("show_version_in_title", True) else ""
+            self.root.title(f"Tekzite Browser{' — Private' if self._private_mode else ''}{' — ' + self._profile_name if self._profile_name != 'Default' else ''}{title_version}")
+            badge_version = f"  v{BROWSER_VERSION}" if self._custom("show_version_in_title", True) else ""
+            self.title_label.configure(text=f"Tekzite{' • Private' if self._private_mode else ''}{badge_version}")
+            self.root.minsize(self._custom("window_min_width", 900), self._custom("window_min_height", 600))
+        except Exception:
+            pass
+        try:
+            style = ttk.Style(self.root)
+            style.configure("Tekzite.Vertical.TScrollbar", background=self.ui["chrome_2"], troughcolor=self.ui["bg"],
+                            bordercolor=self.ui["bg"], arrowcolor=self.ui["muted"], lightcolor=self.ui["chrome_2"],
+                            darkcolor=self.ui["chrome_2"], width=max(8, int(12 * float(self._custom("ui_scale", 1.0)))))
+            style.configure("Tekzite.TNotebook", background=self.ui["bg"], borderwidth=0)
+            style.configure("Tekzite.TNotebook.Tab", background=self.ui["chrome_2"], foreground=self.ui["text"], padding=(10, 6))
+            style.map("Tekzite.TNotebook.Tab", background=[("selected", self.ui["accent"]), ("active", self.ui["chrome_hover"])], foreground=[("selected", "#ffffff")])
+            style.configure("Treeview", background=self.ui["field"], fieldbackground=self.ui["field"], foreground=self.ui["text"],
+                            rowheight=max(20, self._font_size(22)), bordercolor=self.ui["border"], font=(self._ui_font_family, self._font_size(9)))
+            style.map("Treeview", background=[("selected", self.ui["accent"])], foreground=[("selected", "#ffffff")])
+            style.configure("Treeview.Heading", background=self.ui["chrome_2"], foreground=self.ui["text"],
+                            bordercolor=self.ui["border"], font=(self._ui_font_family, self._font_size(9)))
+            style.configure("TCombobox", fieldbackground=self.ui["field"], background=self.ui["chrome_2"], foreground=self.ui["text"],
+                            arrowcolor=self.ui["muted"], bordercolor=self.ui["border"], font=(self._ui_font_family, self._font_size(9)))
+            style.map("TCombobox", fieldbackground=[("readonly", self.ui["field"])], foreground=[("readonly", self.ui["text"])])
+        except Exception:
+            pass
+        self._apply_toolbar_layout()
+        if repack:
+            self._repack_browser_chrome()
+        if refresh_tabs and getattr(self, "tab_items", None) is not None:
+            self._refresh_tab_strip()
+        try:
+            self.root.update_idletasks()
+            self._schedule_live_reflow()
+        except Exception:
+            pass
+
+    def _reset_interface_customization(self, confirm=False):
+        if confirm and not messagebox.askyesno("Reset Tekzite interface", "Reset all interface customization to Tekzite defaults?", parent=self.root):
+            return "break"
+        self.preferences["customization"] = _normalized_customization(DEFAULT_CUSTOMIZATION)
+        self.customization = self.preferences["customization"]
+        try:
+            save_preferences(self.preferences)
+        except Exception as exc:
+            self.status_var.set(f"Could not save reset interface: {exc}")
+            return "break"
+        self._apply_customization_runtime()
+        self.status_var.set("Tekzite interface reset to defaults")
+        return "break"
+
+    def _persist_preferences(self):
+        save_preferences(self.preferences)
+
     def _apply_preferences_runtime(self):
+        strict_loopback = bool(self.preferences.get("strict_python_loopback", True))
+        os.environ["TEKZITE_STRICT_PYTHON_LOOPBACK"] = "1" if strict_loopback else "0"
+        os.environ["TEKZITE_PRIVACY_LOCKDOWN"] = "1" if self.preferences.get("privacy_lockdown", True) else "0"
+        os.environ["TEKZITE_TRACKER_BLOCKING"] = "1" if self.preferences.get("tracker_blocking_enabled", True) else "0"
+        os.environ["TEKZITE_STRIP_REFERRER"] = "1" if self.preferences.get("strip_referrer", True) else "0"
+        os.environ["TEKZITE_HTTPS_FIRST"] = "1" if self.preferences.get("https_first", True) else "0"
+        loopback_policy.set_enabled(strict_loopback)
+        if self.preferences.get("privacy_lockdown", False):
+            try:
+                (self._state_directory / "session.json").unlink(missing_ok=True)
+                write_json(self._state_directory / "history.json", [])
+                self.visits = []
+                self._history_dirty = False
+            except Exception:
+                pass
+        self._configure_feature_preferences()
+        self.customization = _normalized_customization(self.preferences.get("customization"))
+        self._apply_customization_runtime()
+        self._apply_quiet_mode()
+        from engine import features
+        if features.net._EDGE_SESSION:
+            self._feature_async(features.configure, lambda _: None)
+
         if hasattr(self, "status_bar"):
-            visible = bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("show_status_bar", True))
+            visible = bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("show_status_bar", True)) and not self.preferences.get("quiet_mode", False)
             if visible and not self.status_bar.winfo_ismapped():
                 self.status_bar.pack(fill="x")
             elif not visible and self.status_bar.winfo_ismapped():
                 self.status_bar.pack_forget()
 
+    def _show_customize_browser(self):
+        import tkinter.font as tkfont
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Customize Tekzite — v{BROWSER_VERSION}")
+        win.geometry("900x720")
+        win.minsize(780, 620)
+        win.transient(self.root)
+        win.configure(bg=self.ui["bg"])
+
+        original_custom = json.loads(json.dumps(_normalized_customization(self.preferences.get("customization"))))
+        draft = json.loads(json.dumps(original_custom))
+
+        header = tk.Frame(win, bg=self.ui["bg"], padx=18, pady=14)
+        header.pack(fill="x")
+        tk.Label(header, text="Customize Tekzite", bg=self.ui["bg"], fg=self.ui["text"],
+                 font=(self._ui_display_font_family, self._font_size(18), "bold")).pack(anchor="w")
+        tk.Label(header, text="Colors, typography, chrome layout, toolbar order, tabs, window sizing and browser behavior are all profile-specific.",
+                 bg=self.ui["bg"], fg=self.ui["muted"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(3, 0))
+
+        notebook = ttk.Notebook(win, style="Tekzite.TNotebook")
+        notebook.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        def page(title):
+            frame = tk.Frame(notebook, bg=self.ui["bg"], padx=18, pady=16)
+            notebook.add(frame, text=title)
+            return frame
+
+        appearance = page("Appearance")
+        toolbar_page = page("Toolbar")
+        tabs_page = page("Tabs & Layout")
+        behavior_page = page("Behavior")
+        advanced_page = page("Advanced")
+
+        def label(parent, text, *, muted=False, bold=False, width=None):
+            return tk.Label(parent, text=text, bg=self.ui["bg"], fg=self.ui["muted"] if muted else self.ui["text"],
+                            font=(self._ui_font_family, self._font_size(9), "bold" if bold else "normal"), anchor="w", width=width)
+
+        def check(parent, text, variable):
+            widget = tk.Checkbutton(parent, text=text, variable=variable, bg=self.ui["bg"], fg=self.ui["text"],
+                                    selectcolor=self.ui["field"], activebackground=self.ui["bg"], activeforeground=self.ui["text"],
+                                    highlightthickness=0, bd=0, font=(self._ui_font_family, self._font_size(9)))
+            return widget
+
+        def entry(parent, variable, width=None):
+            widget = tk.Entry(parent, textvariable=variable, bg=self.ui["field"], fg=self.ui["text"], insertbackground=self.ui["text"],
+                              selectbackground=self.ui["accent"], selectforeground="#ffffff", relief="flat", bd=0,
+                              highlightthickness=1, highlightbackground=self.ui["border"], font=(self._ui_font_family, self._font_size(9)), width=width)
+            return widget
+
+        # Appearance ---------------------------------------------------------
+        preset_var = tk.StringVar(value=draft.get("preset", "Aurora Glass"))
+        row = tk.Frame(appearance, bg=self.ui["bg"]); row.pack(fill="x", pady=(0, 12))
+        label(row, "Preset", bold=True, width=16).pack(side="left")
+        preset_box = ttk.Combobox(row, textvariable=preset_var, values=list(CUSTOMIZATION_PRESETS) + ["Custom"], state="readonly", width=22)
+        preset_box.pack(side="left")
+
+        color_vars = {key: tk.StringVar(value=draft["colors"][key]) for key in UI_COLOR_DEFAULTS}
+        colors_frame = tk.Frame(appearance, bg=self.ui["bg"])
+        colors_frame.pack(fill="x")
+        pretty = {
+            "bg": "Window background", "chrome": "Toolbar background", "chrome_2": "Button surface", "chrome_hover": "Hover surface",
+            "field": "Address / field", "field_focus": "Focused field", "border": "Borders", "border_soft": "Soft borders",
+            "border_focus": "Focus border", "text": "Primary text", "muted": "Secondary text", "muted_dim": "Dim text",
+            "accent": "Accent", "accent_hover": "Accent hover", "danger": "Danger / close", "success": "Status success",
+        }
+
+        def choose_color(key):
+            chosen = colorchooser.askcolor(color=color_vars[key].get(), parent=win, title=pretty.get(key, key))[1]
+            if chosen:
+                color_vars[key].set(chosen.lower())
+                preset_var.set("Custom")
+
+        for idx, key in enumerate(UI_COLOR_DEFAULTS):
+            cell = tk.Frame(colors_frame, bg=self.ui["bg"])
+            cell.grid(row=idx // 2, column=idx % 2, sticky="ew", padx=(0, 14), pady=3)
+            colors_frame.grid_columnconfigure(idx % 2, weight=1)
+            label(cell, pretty.get(key, key), width=16).pack(side="left")
+            entry(cell, color_vars[key], width=10).pack(side="left", padx=(0, 5), ipady=3)
+            tk.Button(cell, text="●", command=lambda k=key: choose_color(k), bg=self.ui["chrome_2"], fg=color_vars[key].get(),
+                      activebackground=self.ui["field_focus"], relief="flat", bd=0, padx=8).pack(side="left")
+
+        font_row = tk.Frame(appearance, bg=self.ui["bg"]); font_row.pack(fill="x", pady=(16, 4))
+        families = sorted(set(str(x) for x in tkfont.families(self.root)), key=str.casefold)
+        font_var = tk.StringVar(value=draft.get("font_family", ""))
+        display_font_var = tk.StringVar(value=draft.get("display_font_family", ""))
+        mono_font_var = tk.StringVar(value=draft.get("monospace_font_family", ""))
+        label(font_row, "UI font", bold=True, width=16).pack(side="left")
+        ttk.Combobox(font_row, textvariable=font_var, values=[""] + families, width=24).pack(side="left", padx=(0, 12))
+        label(font_row, "Display font", width=12).pack(side="left")
+        ttk.Combobox(font_row, textvariable=display_font_var, values=[""] + families, width=24).pack(side="left")
+        mono_row = tk.Frame(appearance, bg=self.ui["bg"]); mono_row.pack(fill="x", pady=(2, 4))
+        label(mono_row, "Monospace font", width=16).pack(side="left")
+        ttk.Combobox(mono_row, textvariable=mono_font_var, values=[""] + families, width=24).pack(side="left")
+
+        size_row = tk.Frame(appearance, bg=self.ui["bg"]); size_row.pack(fill="x", pady=5)
+        font_size_var = tk.StringVar(value=str(draft.get("font_size", 10)))
+        menu_font_size_var = tk.StringVar(value=str(draft.get("menu_font_size", 9)))
+        tab_font_size_var = tk.StringVar(value=str(draft.get("tab_font_size", 9)))
+        toolbar_font_size_var = tk.StringVar(value=str(draft.get("toolbar_font_size", 10)))
+        for text, var in (("UI size", font_size_var), ("Menu", menu_font_size_var), ("Tabs", tab_font_size_var), ("Toolbar", toolbar_font_size_var)):
+            label(size_row, text).pack(side="left", padx=(0, 4))
+            entry(size_row, var, width=4).pack(side="left", padx=(0, 12), ipady=3)
+
+        density_var = tk.StringVar(value=draft.get("density", "comfortable"))
+        scale_var = tk.StringVar(value=str(draft.get("ui_scale", 1.0)))
+        animations_var = tk.BooleanVar(value=bool(draft.get("animations", True)))
+        window_control_style_var = tk.StringVar(value=draft.get("window_control_style", "traffic_lights"))
+        tab_style_var = tk.StringVar(value=draft.get("tab_style", "soft"))
+        row = tk.Frame(appearance, bg=self.ui["bg"]); row.pack(fill="x", pady=5)
+        label(row, "Density", width=16).pack(side="left")
+        ttk.Combobox(row, textvariable=density_var, values=["compact", "comfortable", "spacious"], state="readonly", width=16).pack(side="left", padx=(0, 14))
+        label(row, "UI scale").pack(side="left")
+        ttk.Combobox(row, textvariable=scale_var, values=["0.75", "0.85", "1.0", "1.1", "1.25", "1.4", "1.6"], width=8).pack(side="left", padx=(6, 14))
+        check(row, "Animations", animations_var).pack(side="left")
+        style_row = tk.Frame(appearance, bg=self.ui["bg"]); style_row.pack(fill="x", pady=(6, 3))
+        label(style_row, "Window controls", width=16).pack(side="left")
+        ttk.Combobox(style_row, textvariable=window_control_style_var, values=["traffic_lights", "tekzite"], state="readonly", width=16).pack(side="left", padx=(0, 14))
+        label(style_row, "Tab style").pack(side="left")
+        ttk.Combobox(style_row, textvariable=tab_style_var, values=["soft", "classic"], state="readonly", width=14).pack(side="left", padx=(6, 0))
+
+        def select_preset(_event=None):
+            name = preset_var.get()
+            colors = CUSTOMIZATION_PRESETS.get(name)
+            if colors:
+                for key in UI_COLOR_DEFAULTS:
+                    color_vars[key].set(colors[key])
+        preset_box.bind("<<ComboboxSelected>>", select_preset)
+
+        # Toolbar ------------------------------------------------------------
+        show_toolbar_var = tk.BooleanVar(value=bool(draft.get("show_toolbar", True)))
+        label_style_var = tk.StringVar(value=draft.get("toolbar_label_style", "icons"))
+        site_info_var = tk.BooleanVar(value=bool(draft.get("show_site_info_button", True)))
+        bookmark_button_var = tk.BooleanVar(value=bool(draft.get("show_bookmark_button", True)))
+        check(toolbar_page, "Show toolbar", show_toolbar_var).pack(anchor="w", pady=(0, 6))
+        row = tk.Frame(toolbar_page, bg=self.ui["bg"]); row.pack(fill="x", pady=(0, 10))
+        label(row, "Button labels", width=16).pack(side="left")
+        ttk.Combobox(row, textvariable=label_style_var, values=["icons", "text", "both"], state="readonly", width=14).pack(side="left")
+        check(row, "Site info inside address bar", site_info_var).pack(side="left", padx=(18, 0))
+        check(row, "Bookmark star", bookmark_button_var).pack(side="left", padx=(18, 0))
+
+        order = list(draft.get("toolbar_order", TOOLBAR_ITEM_IDS))
+        visible_vars = {item: tk.BooleanVar(value=bool(draft.get("toolbar_visible", {}).get(item, True))) for item in TOOLBAR_ITEM_IDS}
+        left = tk.Frame(toolbar_page, bg=self.ui["bg"]); left.pack(side="left", fill="both", expand=True, pady=8)
+        label(left, "Order", bold=True).pack(anchor="w", pady=(0, 5))
+        order_list = tk.Listbox(left, bg=self.ui["field"], fg=self.ui["text"], selectbackground=self.ui["accent"], selectforeground="#ffffff",
+                                relief="flat", bd=0, highlightthickness=1, highlightbackground=self.ui["border"], height=10,
+                                font=(self._ui_font_family, self._font_size(10)))
+        order_list.pack(fill="both", expand=True)
+        order_buttons = tk.Frame(left, bg=self.ui["bg"]); order_buttons.pack(fill="x", pady=6)
+
+        def refresh_order():
+            order_list.delete(0, "end")
+            for item in order:
+                order_list.insert("end", TOOLBAR_ITEM_NAMES[item])
+
+        def move_order(delta):
+            selected = order_list.curselection()
+            if not selected:
+                return
+            idx = selected[0]
+            other = idx + delta
+            if not 0 <= other < len(order):
+                return
+            order[idx], order[other] = order[other], order[idx]
+            refresh_order(); order_list.selection_set(other); order_list.activate(other)
+
+        tk.Button(order_buttons, text="↑ Move up", command=lambda: move_order(-1), bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat", padx=10, pady=5).pack(side="left", padx=(0, 5))
+        tk.Button(order_buttons, text="↓ Move down", command=lambda: move_order(1), bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat", padx=10, pady=5).pack(side="left")
+        refresh_order()
+
+        right = tk.Frame(toolbar_page, bg=self.ui["bg"], padx=24); right.pack(side="left", fill="both", expand=True, pady=8)
+        label(right, "Visible items", bold=True).pack(anchor="w", pady=(0, 5))
+        for item in TOOLBAR_ITEM_IDS:
+            check(right, TOOLBAR_ITEM_NAMES[item], visible_vars[item]).pack(anchor="w", pady=2)
+        label(right, "Tip: hiding the address bar is safe. Ctrl+L reveals it whenever you need it.", muted=True).pack(anchor="w", pady=(12, 0))
+
+        # Tabs & layout ------------------------------------------------------
+        bool_vars = {}
+        bool_labels = (
+            ("show_app_bar", "Show application/title bar"), ("show_brand_badge", "Show Tekzite badge"),
+            ("show_title_text", "Show Tekzite title"), ("show_version_in_title", "Show version in title"),
+            ("show_menu_bar", "Show File/Edit/View menus"), ("show_window_controls", "Show minimize/maximize/close controls"),
+            ("show_tab_bar", "Show tab strip"), ("show_new_tab_button", "Show new-tab + button"),
+            ("show_tab_favicons", "Show favicons"), ("show_tab_close_buttons", "Show tab close buttons"),
+            ("show_tab_group_chips", "Show tab-group chips"), ("show_tab_active_indicator", "Show active-tab indicator"),
+            ("show_scrollbar", "Show Tekzite scrollbar"), ("show_chrome_separator", "Show chrome/content separator"),
+            ("show_status_activity_dot", "Show status activity dot"), ("show_status_version", "Show version in status bar"),
+        )
+        grid = tk.Frame(tabs_page, bg=self.ui["bg"]); grid.pack(fill="x")
+        for index, (key, text) in enumerate(bool_labels):
+            var = tk.BooleanVar(value=bool(draft.get(key, True))); bool_vars[key] = var
+            check(grid, text, var).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 24), pady=3)
+        tab_position_var = tk.StringVar(value=draft.get("tab_position", "above_toolbar"))
+        new_tab_position_var = tk.StringVar(value=draft.get("new_tab_button_position", "right"))
+        tab_chars_var = tk.StringVar(value=str(draft.get("tab_title_chars", 28)))
+        row = tk.Frame(tabs_page, bg=self.ui["bg"]); row.pack(fill="x", pady=(16, 4))
+        label(row, "Tab strip position", width=18).pack(side="left")
+        ttk.Combobox(row, textvariable=tab_position_var, values=["above_toolbar", "below_toolbar"], state="readonly", width=16).pack(side="left", padx=(0, 18))
+        label(row, "+ button position").pack(side="left")
+        ttk.Combobox(row, textvariable=new_tab_position_var, values=["left", "right"], state="readonly", width=10).pack(side="left", padx=(6, 18))
+        label(row, "Tab title chars").pack(side="left")
+        entry(row, tab_chars_var, width=5).pack(side="left", padx=(6, 0), ipady=3)
+
+        heights = {
+            "app_bar_height": tk.StringVar(value=str(draft.get("app_bar_height", 34))),
+            "tab_bar_height": tk.StringVar(value=str(draft.get("tab_bar_height", 40))),
+            "toolbar_height": tk.StringVar(value=str(draft.get("toolbar_height", 58))),
+            "status_bar_height": tk.StringVar(value=str(draft.get("status_bar_height", 25))),
+            "find_bar_height": tk.StringVar(value=str(draft.get("find_bar_height", 40))),
+        }
+        label(tabs_page, "Chrome heights (px before UI scaling)", bold=True).pack(anchor="w", pady=(18, 6))
+        row = tk.Frame(tabs_page, bg=self.ui["bg"]); row.pack(fill="x")
+        for key, text in (("app_bar_height", "App"), ("tab_bar_height", "Tabs"), ("toolbar_height", "Toolbar"), ("status_bar_height", "Status"), ("find_bar_height", "Find")):
+            label(row, text).pack(side="left", padx=(0, 4)); entry(row, heights[key], width=5).pack(side="left", padx=(0, 14), ipady=3)
+
+        # Behavior -----------------------------------------------------------
+        homepage_var = tk.StringVar(value=str(self.preferences.get("homepage", START_URL)))
+        search_var = tk.StringVar(value=str(self.preferences.get("search_url_template", "https://www.startpage.com/sp/search?query={query}")))
+        startup_var = tk.StringVar(value=str(self.preferences.get("startup", "homepage")))
+        newtab_var = tk.StringVar(value=str(self.preferences.get("new_tab", "blank")))
+        zoom_var = tk.StringVar(value=f"{self._page_zoom_percent()}%")
+        statusbar_var = tk.BooleanVar(value=bool(self.preferences.get("show_status_bar", True)))
+        for text, var in (("Homepage", homepage_var), ("Search URL template", search_var)):
+            label(behavior_page, text, bold=True).pack(anchor="w", pady=(5, 2))
+            entry(behavior_page, var).pack(fill="x", ipady=5, pady=(0, 7))
+        label(behavior_page, "Use {query} where the URL-encoded search terms should go.", muted=True).pack(anchor="w", pady=(0, 10))
+        row = tk.Frame(behavior_page, bg=self.ui["bg"]); row.pack(fill="x", pady=5)
+        label(row, "Startup", width=14).pack(side="left")
+        ttk.Combobox(row, textvariable=startup_var, values=["homepage", "blank"], state="readonly", width=14).pack(side="left", padx=(0, 18))
+        label(row, "New tab", width=10).pack(side="left")
+        ttk.Combobox(row, textvariable=newtab_var, values=["blank", "homepage"], state="readonly", width=14).pack(side="left", padx=(0, 18))
+        label(row, "Page zoom").pack(side="left")
+        ttk.Combobox(row, textvariable=zoom_var, values=["75%", "80%", "90%", "100%", "110%", "125%", "150%", "175%", "200%"], width=8).pack(side="left", padx=(6, 0))
+        check(behavior_page, "Show status bar", statusbar_var).pack(anchor="w", pady=(12, 3))
+
+        # Advanced -----------------------------------------------------------
+        window_width_var = tk.StringVar(value=str(draft.get("window_width", 1280)))
+        window_height_var = tk.StringVar(value=str(draft.get("window_height", 840)))
+        min_width_var = tk.StringVar(value=str(draft.get("window_min_width", 900)))
+        min_height_var = tk.StringVar(value=str(draft.get("window_min_height", 600)))
+        start_max_var = tk.BooleanVar(value=bool(draft.get("start_maximized", False)))
+        label(advanced_page, "Initial window", bold=True).pack(anchor="w", pady=(0, 6))
+        row = tk.Frame(advanced_page, bg=self.ui["bg"]); row.pack(fill="x", pady=4)
+        for text, var in (("Width", window_width_var), ("Height", window_height_var), ("Minimum width", min_width_var), ("Minimum height", min_height_var)):
+            label(row, text).pack(side="left", padx=(0, 4)); entry(row, var, width=6).pack(side="left", padx=(0, 12), ipady=3)
+        check(advanced_page, "Start maximized", start_max_var).pack(anchor="w", pady=8)
+        label(advanced_page, "Recovery", bold=True).pack(anchor="w", pady=(18, 5))
+        label(advanced_page, "If a custom layout hides too much UI, press Ctrl+Shift+Alt+R to reset only the interface. Browser data is untouched.", muted=True).pack(anchor="w")
+
+        def int_value(var, default):
+            try:
+                return int(str(var.get()).strip())
+            except Exception:
+                return default
+
+        def float_value(var, default):
+            try:
+                return float(str(var.get()).strip())
+            except Exception:
+                return default
+
+        def collect_custom():
+            custom = json.loads(json.dumps(draft))
+            custom["preset"] = preset_var.get() or "Custom"
+            custom["colors"] = {key: _valid_hex_color(color_vars[key].get(), UI_COLOR_DEFAULTS[key]) for key in UI_COLOR_DEFAULTS}
+            custom["font_family"] = font_var.get().strip()
+            custom["display_font_family"] = display_font_var.get().strip()
+            custom["monospace_font_family"] = mono_font_var.get().strip()
+            custom["font_size"] = int_value(font_size_var, 10)
+            custom["menu_font_size"] = int_value(menu_font_size_var, 9)
+            custom["tab_font_size"] = int_value(tab_font_size_var, 9)
+            custom["toolbar_font_size"] = int_value(toolbar_font_size_var, 10)
+            custom["density"] = density_var.get()
+            custom["ui_scale"] = float_value(scale_var, 1.0)
+            custom["animations"] = bool(animations_var.get())
+            custom["window_control_style"] = window_control_style_var.get()
+            custom["tab_style"] = tab_style_var.get()
+            custom["show_toolbar"] = bool(show_toolbar_var.get())
+            custom["toolbar_label_style"] = label_style_var.get()
+            custom["show_site_info_button"] = bool(site_info_var.get())
+            custom["show_bookmark_button"] = bool(bookmark_button_var.get())
+            custom["toolbar_order"] = list(order)
+            custom["toolbar_visible"] = {item: bool(visible_vars[item].get()) for item in TOOLBAR_ITEM_IDS}
+            for key, var in bool_vars.items():
+                custom[key] = bool(var.get())
+            custom["tab_position"] = tab_position_var.get()
+            custom["new_tab_button_position"] = new_tab_position_var.get()
+            custom["tab_title_chars"] = int_value(tab_chars_var, 28)
+            for key, var in heights.items():
+                custom[key] = int_value(var, DEFAULT_CUSTOMIZATION[key])
+            custom["window_width"] = int_value(window_width_var, 1280)
+            custom["window_height"] = int_value(window_height_var, 840)
+            custom["window_min_width"] = int_value(min_width_var, 900)
+            custom["window_min_height"] = int_value(min_height_var, 600)
+            custom["start_maximized"] = bool(start_max_var.get())
+            return _normalized_customization(custom)
+
+        def load_custom_into_controls(custom):
+            nonlocal draft, order
+            draft = json.loads(json.dumps(_normalized_customization(custom)))
+            preset_var.set(draft.get("preset", "Custom"))
+            for key in UI_COLOR_DEFAULTS:
+                color_vars[key].set(draft["colors"][key])
+            font_var.set(draft.get("font_family", "")); display_font_var.set(draft.get("display_font_family", "")); mono_font_var.set(draft.get("monospace_font_family", ""))
+            font_size_var.set(str(draft["font_size"])); menu_font_size_var.set(str(draft["menu_font_size"]))
+            tab_font_size_var.set(str(draft["tab_font_size"])); toolbar_font_size_var.set(str(draft["toolbar_font_size"]))
+            density_var.set(draft["density"]); scale_var.set(str(draft["ui_scale"])); animations_var.set(bool(draft["animations"]))
+            window_control_style_var.set(draft.get("window_control_style", "traffic_lights")); tab_style_var.set(draft.get("tab_style", "soft"))
+            show_toolbar_var.set(bool(draft["show_toolbar"])); label_style_var.set(draft["toolbar_label_style"])
+            site_info_var.set(bool(draft["show_site_info_button"])); bookmark_button_var.set(bool(draft["show_bookmark_button"]))
+            order = list(draft["toolbar_order"]); refresh_order()
+            for item in TOOLBAR_ITEM_IDS:
+                visible_vars[item].set(bool(draft["toolbar_visible"].get(item, True)))
+            for key, var in bool_vars.items(): var.set(bool(draft[key]))
+            tab_position_var.set(draft["tab_position"]); new_tab_position_var.set(draft["new_tab_button_position"]); tab_chars_var.set(str(draft["tab_title_chars"]))
+            for key, var in heights.items(): var.set(str(draft[key]))
+            window_width_var.set(str(draft["window_width"])); window_height_var.set(str(draft["window_height"]))
+            min_width_var.set(str(draft["window_min_width"])); min_height_var.set(str(draft["window_min_height"])); start_max_var.set(bool(draft["start_maximized"]))
+
+        def preview():
+            self.preferences["customization"] = collect_custom()
+            self.customization = self.preferences["customization"]
+            self._apply_customization_runtime()
+            self.status_var.set("Customization preview — Save to keep it")
+
+        def export_preset():
+            custom = collect_custom()
+            path = filedialog.asksaveasfilename(parent=win, title="Export Tekzite customization", defaultextension=".json",
+                                                filetypes=[("Tekzite customization", "*.json"), ("JSON", "*.json")],
+                                                initialfile="tekzite-customization.json")
+            if not path:
+                return
+            payload = {"format": "tekzite-customization", "version": 1, "browser_version": BROWSER_VERSION, "customization": custom}
+            Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        def import_preset():
+            path = filedialog.askopenfilename(parent=win, title="Import Tekzite customization", filetypes=[("JSON", "*.json"), ("All files", "*.*")])
+            if not path:
+                return
+            try:
+                payload = json.loads(Path(path).read_text(encoding="utf-8"))
+                custom = payload.get("customization", payload) if isinstance(payload, dict) else {}
+                load_custom_into_controls(custom)
+                preview()
+            except Exception as exc:
+                messagebox.showerror("Customize Tekzite", f"Could not import customization:\n{exc}", parent=win)
+
+        def reset_controls():
+            load_custom_into_controls(DEFAULT_CUSTOMIZATION)
+            preview()
+
+        def save_close():
+            custom = collect_custom()
+            search_template = search_var.get().strip()
+            if "{query}" not in search_template:
+                messagebox.showerror("Customize Tekzite", "Search URL template must contain {query}.", parent=win)
+                return
+            self.preferences["customization"] = custom
+            self.customization = custom
+            self.preferences["homepage"] = homepage_var.get().strip() or START_URL
+            self.preferences["search_url_template"] = search_template
+            self.preferences["startup"] = startup_var.get()
+            self.preferences["new_tab"] = newtab_var.get()
+            self.preferences["page_zoom_percent"] = _normalized_zoom_percent(zoom_var.get(), self._page_zoom_percent())
+            self.preferences["show_status_bar"] = bool(statusbar_var.get())
+            try:
+                save_preferences(self.preferences)
+            except Exception as exc:
+                messagebox.showerror("Customize Tekzite", f"Could not save customization:\n{exc}", parent=win)
+                return
+            self._apply_customization_runtime()
+            self._apply_chromium_zoom_to_all_tabs()
+            self._schedule_chromium_zoom_apply(all_tabs=True)
+            self.status_var.set("Customization saved for this profile")
+            win.destroy()
+
+        def cancel():
+            self.preferences["customization"] = original_custom
+            self.customization = original_custom
+            self._apply_customization_runtime()
+            win.destroy()
+
+        footer = tk.Frame(win, bg=self.ui["bg"], padx=16, pady=12)
+        footer.pack(fill="x")
+        tk.Button(footer, text="Import…", command=import_preset, bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat", padx=12, pady=7).pack(side="left")
+        tk.Button(footer, text="Export…", command=export_preset, bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat", padx=12, pady=7).pack(side="left", padx=6)
+        tk.Button(footer, text="Reset", command=reset_controls, bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat", padx=12, pady=7).pack(side="left", padx=(12, 0))
+        tk.Button(footer, text="Cancel", command=cancel, bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat", padx=14, pady=7).pack(side="right")
+        tk.Button(footer, text="Save", command=save_close, bg=self.ui["accent"], fg="#ffffff", relief="flat", padx=18, pady=7).pack(side="right", padx=6)
+        tk.Button(footer, text="Preview", command=preview, bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat", padx=14, pady=7).pack(side="right")
+
+        win.protocol("WM_DELETE_WINDOW", cancel)
+        win.bind("<Escape>", lambda event: cancel())
+        self._animate_toplevel_in(win, 140)
+        return "break"
+
+    def _show_privacy_shield(self):
+        win = tk.Toplevel(self.root)
+        win.title(f"Tekzite Privacy Shield — v{BROWSER_VERSION}")
+        win.configure(bg=self.ui["bg"])
+        win.transient(self.root)
+        win.geometry("720x650")
+        outer = tk.Frame(win, bg=self.ui["bg"], padx=22, pady=18)
+        outer.pack(fill="both", expand=True)
+        tk.Label(outer, text="Privacy Shield", fg=self.ui["text"], bg=self.ui["bg"],
+                 font=(self._ui_display_font_family, self._font_size(20), "bold")).pack(anchor="w")
+        tk.Label(outer, text="A live audit of Tekzite's privacy boundaries. No browsing destinations are stored here.",
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(2, 14))
+
+        body = tk.Text(outer, bg=self.ui["field"], fg=self.ui["text"], insertbackground=self.ui["text"],
+                       relief="flat", wrap="word", font=(self._ui_monospace_font_family, self._font_size(9)), padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+
+        def yes(value):
+            return "ACTIVE" if value else "OFF"
+
+        def refresh():
+            try:
+                net = network_engine_debug(start=False)
+            except Exception as exc:
+                net = {"alive": False, "proxy": None, "error": str(exc)}
+            try:
+                stats = privacy_stats()
+            except Exception:
+                stats = {}
+            prefs = self.preferences
+            rows = [
+                "TEKZITE PRIVACY CORE",
+                "=" * 62,
+                f"Privacy lockdown .......... {yes(prefs.get('privacy_lockdown', False))}",
+                f"Tracker blocking .......... {yes(prefs.get('tracker_blocking_enabled', True))}",
+                f"Tracking-param stripping .. {yes(prefs.get('strip_tracking_parameters', True))}",
+                f"Cross-site referrer strip . {yes(prefs.get('strip_referrer', True))}",
+                f"HTTPS-first ............... {yes(prefs.get('https_first', True))}",
+                f"Third-party cookies ....... BLOCKED",
+                f"GPC + DNT ................. SENT",
+                f"WebRTC direct UDP ......... BLOCKED",
+                f"QUIC ...................... DISABLED",
+                f"Chromium built-in DoH ..... DISABLED",
+                f"DNS prefetch/prediction ... DISABLED",
+                f"Password/autofill cloud ... DISABLED",
+                f"Permissions default ....... DENY (camera/mic/location/notifications/sensors)",
+                f"Python localhost egress ... {yes(prefs.get('strict_python_loopback', True))}",
+                f"Browsing-data clear exit .. {yes(prefs.get('clear_browsing_data_on_exit', True) or prefs.get('privacy_lockdown', False))}",
+                f"Chromium profile storage .. {'TEMPORARY PROCESS PROFILE' if prefs.get('privacy_lockdown', False) else 'PERSISTENT PROFILE'}",
+                f"History/session on disk ... {'NO' if prefs.get('privacy_lockdown', False) else 'USER SETTING'}",
+                f"User extensions ........... {'DISABLED IN LOCKDOWN' if prefs.get('privacy_lockdown', False) else 'ALLOWED BY USER'}",
+                "",
+                "NETWORK BOUNDARY",
+                "=" * 62,
+                f"Local filtering proxy ..... {'RUNNING' if net.get('alive') else 'NOT STARTED'}",
+                f"Proxy endpoint ............ {net.get('proxy') or 'starts with first webpage'}",
+                "HTTPS inspection .......... NONE (TLS remains end-to-end)",
+                "DNS route ................ Your Windows/router resolver; Tekzite does not force public DoH",
+                "",
+                "THIS SESSION",
+                "=" * 62,
+                f"Telemetry hosts blocked ... {int(stats.get('telemetry_blocked', 0))}",
+                f"Tracker hosts blocked ..... {int(stats.get('trackers_blocked', 0))}",
+                f"Ad hosts blocked .......... {int(stats.get('ads_blocked', 0))}",
+                f"HTTP requests upgraded .... {int(stats.get('https_upgrades', 0))}",
+                f"Tracking params removed ... {int(getattr(self, '_privacy_tracking_params_stripped', 0))}",
+                "",
+                "LIMIT",
+                "=" * 62,
+                "A website you visit still sees the public IP address of your network unless you use an upstream VPN/proxy/Tor layer.",
+                "Tekzite minimizes browser leakage; it does not claim network anonymity by itself.",
+            ]
+            body.configure(state="normal")
+            body.delete("1.0", "end")
+            body.insert("1.0", "\n".join(rows))
+            body.configure(state="disabled")
+
+        footer = tk.Frame(outer, bg=self.ui["bg"]); footer.pack(fill="x", pady=(10, 0))
+        tk.Button(footer, text="Local Ports", command=self._show_local_ports, bg=self.ui["chrome_2"], fg=self.ui["text"],
+                  relief="flat", padx=14, pady=7).pack(side="left")
+        tk.Button(footer, text="Refresh", command=refresh, bg=self.ui["accent"], fg="#ffffff",
+                  relief="flat", padx=16, pady=7).pack(side="right")
+        refresh()
+        self._animate_toplevel_in(win, 130)
+        return "break"
+
     def show_preferences(self):
         win = tk.Toplevel(self.root)
-        win.title(f"Tekzite Browser Preferences — v{BROWSER_VERSION}")
+        win.title(f"Tekzite Browser Settings — v{BROWSER_VERSION}")
         dialog_width = 620
         win.configure(bg=self.ui["bg"])
         win.transient(self.root)
@@ -4117,10 +6131,10 @@ class BrowserApp:
 
         outer = tk.Frame(win, bg=self.ui["bg"], padx=22, pady=18)
         outer.pack(fill="both", expand=True)
-        tk.Label(outer, text="Browser Preferences", fg=self.ui["text"], bg=self.ui["bg"],
-                 font=(self._ui_display_font_family, 18, "bold")).pack(anchor="w")
+        tk.Label(outer, text="Browser Settings", fg=self.ui["text"], bg=self.ui["bg"],
+                 font=(self._ui_display_font_family, self._font_size(18), "bold")).pack(anchor="w")
         tk.Label(outer, text="Customize Tekzite without editing configuration files.", fg=self.ui["muted"],
-                 bg=self.ui["bg"], font=(self._ui_font_family, 9)).pack(anchor="w", pady=(2, 18))
+                 bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(2, 18))
 
         homepage = tk.StringVar(value=getattr(self, "preferences", DEFAULT_PREFERENCES).get("homepage", START_URL))
         startup = tk.StringVar(value=getattr(self, "preferences", DEFAULT_PREFERENCES).get("startup", "homepage"))
@@ -4131,13 +6145,23 @@ class BrowserApp:
         reuse_tabs = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("reuse_open_tabs", True)))
         status_bar = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("show_status_bar", True)))
         network_diagnostics = tk.StringVar(value=str(getattr(self, "preferences", DEFAULT_PREFERENCES).get("network_diagnostics", "off")))
+        strict_python_loopback = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("strict_python_loopback", True)))
+        privacy_lockdown = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("privacy_lockdown", True)))
+        tracker_blocking = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("tracker_blocking_enabled", True)))
+        strip_tracking = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("strip_tracking_parameters", True)))
+        strip_referrer = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("strip_referrer", True)))
+        https_first = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("https_first", True)))
         clear_on_exit = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("clear_browsing_data_on_exit", True)))
         adblock_enabled = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("adblock_enabled", True)))
         page_zoom = tk.StringVar(value=f"{self._page_zoom_percent()}%")
+        sleeping_tabs_enabled = tk.BooleanVar(value=bool(self.preferences.get("sleeping_tabs_enabled", True)))
+        sleeping_tabs_minutes = tk.StringVar(value=str(self.preferences.get("sleeping_tabs_minutes", 30)))
+        download_prompt = tk.BooleanVar(value=bool(self.preferences.get("download_prompt", False)))
+        update_repository = tk.StringVar(value=str(self.preferences.get("update_repository", "")))
 
         def section(title):
             tk.Label(outer, text=title, fg=self.ui["accent_hover"], bg=self.ui["bg"],
-                     font=(self._ui_font_family, 10, "bold")).pack(anchor="w", pady=(12, 6))
+                     font=(self._ui_font_family, self._font_size(10), "bold")).pack(anchor="w", pady=(12, 6))
         def combo(var, values):
             box = ttk.Combobox(outer, textvariable=var, values=values, state="readonly")
             box.pack(fill="x", pady=(0, 6))
@@ -4145,51 +6169,94 @@ class BrowserApp:
 
         section("Homepage")
         entry = tk.Entry(outer, textvariable=homepage, bg=self.ui["field"], fg=self.ui["text"],
-                         insertbackground=self.ui["text"], relief="flat", font=(self._ui_font_family, 10))
+                         insertbackground=self.ui["text"], relief="flat", font=(self._ui_font_family, self._font_size(10)))
         entry.pack(fill="x", ipady=7)
 
+        quiet_mode = tk.BooleanVar(value=self.preferences.get("quiet_mode", False))
+        restore_tabs = tk.BooleanVar(value=self.preferences.get("restore_tabs", True))
         section("Startup and tabs")
+        tk.Checkbutton(outer, text="Restore open tabs on restart (overrides startup choice)",
+                       variable=restore_tabs, bg=self.ui["bg"], fg=self.ui["text"],
+                       selectcolor=self.ui["field"]).pack(anchor="w", pady=3)
+        tk.Checkbutton(outer, text="Quiet mode: hide debug/status controls and reduce animations",
+                       variable=quiet_mode, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"]).pack(anchor="w", pady=3)
         combo(startup, ["homepage", "blank"])
         combo(new_tab, ["blank", "homepage"])
         tk.Checkbutton(outer, text="Switch to an already-open tab instead of loading the same URL again",
                        variable=reuse_tabs, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+        tk.Checkbutton(outer, text="Put inactive background tabs to sleep",
+                       variable=sleeping_tabs_enabled, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
+                       activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+        sleep_row = tk.Frame(outer, bg=self.ui["bg"]); sleep_row.pack(fill="x", pady=(0, 4))
+        tk.Label(sleep_row, text="Sleep after", bg=self.ui["bg"], fg=self.ui["muted"]).pack(side="left")
+        ttk.Combobox(sleep_row, textvariable=sleeping_tabs_minutes, values=("5","10","20","30","60","120"), state="readonly", width=8).pack(side="left", padx=8)
+        tk.Label(sleep_row, text="minutes (pinned tabs never sleep)", bg=self.ui["bg"], fg=self.ui["muted"]).pack(side="left")
 
         section("Rendering engine")
         combo(renderer, ["chromium"])
         tk.Label(outer, text="Auto uses Tekzite first where practical and Chromium for compatibility-heavy sites.",
-                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, 8)).pack(anchor="w")
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w")
         tk.Checkbutton(outer, text="Automatically fall back to Chromium when native rendering fails",
                        variable=auto_fallback, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Chromium presentation", fg=self.ui["muted"], bg=self.ui["bg"],
-                 font=(self._ui_font_family, 8)).pack(anchor="w", pady=(7, 1))
+                 font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(7, 1))
         combo(chromium_presentation, ["native", "software"])
         tk.Label(outer, text="Native is GPU-backed and is kept for normal browsing. Software is manual diagnostics only.",
-                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, 8)).pack(anchor="w")
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w")
 
         section("Privacy")
-        tk.Label(outer, text="Browser telemetry blocked • GPC + DNT enabled • third-party cookies blocked",
-                 fg=self.ui["text"], bg=self.ui["bg"], font=(self._ui_font_family, 9)).pack(anchor="w", pady=3)
+        tk.Label(outer, text="Privacy Core: vendor telemetry off • GPC + DNT • third-party cookies blocked • no built-in DoH",
+                 fg=self.ui["text"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=3)
+        tk.Checkbutton(outer, text="Privacy Lockdown: never persist browsing history or open-tab session to disk",
+                       variable=privacy_lockdown, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
+                       activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+        tk.Checkbutton(outer, text="Block dedicated tracker/analytics hosts before TLS connects",
+                       variable=tracker_blocking, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
+                       activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+        tk.Checkbutton(outer, text="Remove known click/marketing parameters (utm_*, fbclid, gclid, etc.)",
+                       variable=strip_tracking, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
+                       activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+        tk.Checkbutton(outer, text="Strip Referer on web requests",
+                       variable=strip_referrer, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
+                       activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+        tk.Checkbutton(outer, text="HTTPS-first: upgrade ordinary HTTP navigation",
+                       variable=https_first, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
+                       activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+        tk.Checkbutton(outer, text="Restrict Python localhost connections to Tekzite's required ports",
+                       variable=strict_python_loopback, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
+                       activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+        tk.Label(outer, text="Allows only Tekzite Network proxy + Chromium DevTools/CDP destinations. Restart applies the setting to the network helper too.",
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
         tk.Label(outer, text="Notifications, location, camera, microphone, sensors, password saving and autofill are disabled by default.",
-                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, 8), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
         tk.Checkbutton(outer, text="Block ads with Tekzite Adblock",
                        variable=adblock_enabled, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Blocks dedicated advertising hosts before Chromium connects to them. Restart Tekzite after changing this setting.",
-                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, 8), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
         tk.Checkbutton(outer, text="Clear Chromium cookies, storage, cache and history on exit",
                        variable=clear_on_exit, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Network diagnostics", fg=self.ui["muted"], bg=self.ui["bg"],
-                 font=(self._ui_font_family, 8)).pack(anchor="w", pady=(6, 1))
+                 font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(6, 1))
         combo(network_diagnostics, ["off", "errors", "full"])
         tk.Label(outer, text="Off is the privacy-first default. Full can include destination hosts and plain-HTTP paths.",
-                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, 8)).pack(anchor="w")
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w")
+
+        section("Downloads & updates")
+        tk.Checkbutton(outer, text="Ask where to save each download (restart required)", variable=download_prompt,
+                       bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
+                       activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+        tk.Label(outer, text="GitHub repository for update checks (owner/repository)", fg=self.ui["muted"], bg=self.ui["bg"],
+                 font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(4,1))
+        tk.Entry(outer, textvariable=update_repository, bg=self.ui["field"], fg=self.ui["text"],
+                 insertbackground=self.ui["text"], relief="flat").pack(fill="x", ipady=4, pady=(0,4))
 
         section("Interface")
         tk.Label(outer, text="Default page zoom", fg=self.ui["muted"], bg=self.ui["bg"],
-                 font=(self._ui_font_family, 8)).pack(anchor="w", pady=(0, 1))
+                 font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(0, 1))
         zoom_box = combo(page_zoom, ["75%", "80%", "90%", "100%", "110%", "125%", "150%", "175%", "200%"] )
         original_zoom = self._page_zoom_percent()
         preview_zoom = {"value": original_zoom}
@@ -4205,7 +6272,7 @@ class BrowserApp:
 
         zoom_box.bind("<<ComboboxSelected>>", preview_selected_zoom)
         tk.Label(outer, text="Changes preview immediately on every open Chromium web page; Save makes the value permanent.",
-                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, 8)).pack(anchor="w", pady=(0, 5))
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(0, 5))
         tk.Checkbutton(outer, text="Show status bar", variable=status_bar, bg=self.ui["bg"], fg=self.ui["text"],
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
@@ -4217,6 +6284,8 @@ class BrowserApp:
             self.preferences.update({
                 "homepage": homepage.get().strip() or START_URL,
                 "startup": startup.get(),
+                "restore_tabs": bool(restore_tabs.get()),
+                "quiet_mode": bool(quiet_mode.get()),
                 "new_tab": new_tab.get(),
                 "renderer": "chromium",
                 "chromium_presentation": chromium_presentation.get(),
@@ -4224,14 +6293,24 @@ class BrowserApp:
                 "reuse_open_tabs": bool(reuse_tabs.get()),
                 "show_status_bar": bool(status_bar.get()),
                 "network_diagnostics": network_diagnostics.get(),
+                "strict_python_loopback": bool(strict_python_loopback.get()),
+                "privacy_lockdown": bool(privacy_lockdown.get()),
+                "tracker_blocking_enabled": bool(tracker_blocking.get()),
+                "strip_tracking_parameters": bool(strip_tracking.get()),
+                "strip_referrer": bool(strip_referrer.get()),
+                "https_first": bool(https_first.get()),
                 "clear_browsing_data_on_exit": bool(clear_on_exit.get()),
                 "adblock_enabled": bool(adblock_enabled.get()),
                 "page_zoom_percent": selected_zoom,
+                "sleeping_tabs_enabled": bool(sleeping_tabs_enabled.get()),
+                "sleeping_tabs_minutes": max(5, min(240, int(sleeping_tabs_minutes.get() or 30))),
+                "download_prompt": bool(download_prompt.get()),
+                "update_repository": update_repository.get().strip(),
             })
             try:
                 save_preferences(self.preferences)
             except Exception as exc:
-                messagebox.showerror("Tekzite Preferences", f"Could not save preferences:\n{exc}", parent=win)
+                messagebox.showerror("Tekzite Settings", f"Could not save preferences:\n{exc}", parent=win)
                 return
             self._apply_preferences_runtime()
             # Apply synchronously once before closing the modal, then keep a
@@ -4240,7 +6319,13 @@ class BrowserApp:
             self._schedule_chromium_zoom_apply(all_tabs=True)
             os.environ["TEKZITE_NETWORK_LOG_LEVEL"] = str(self.preferences.get("network_diagnostics", "off"))
             os.environ["TEKZITE_ADBLOCK_ENABLED"] = "1" if self.preferences.get("adblock_enabled", True) else "0"
-            self.status_var.set("Preferences saved — restart Tekzite to apply network/privacy changes")
+            os.environ["TEKZITE_PRIVACY_LOCKDOWN"] = "1" if self.preferences.get("privacy_lockdown", True) else "0"
+            os.environ["TEKZITE_TRACKER_BLOCKING"] = "1" if self.preferences.get("tracker_blocking_enabled", True) else "0"
+            os.environ["TEKZITE_STRIP_REFERRER"] = "1" if self.preferences.get("strip_referrer", True) else "0"
+            os.environ["TEKZITE_HTTPS_FIRST"] = "1" if self.preferences.get("https_first", True) else "0"
+            os.environ["TEKZITE_DOWNLOAD_PROMPT"] = "1" if self.preferences.get("download_prompt", False) else "0"
+            self._schedule_sleeping_tabs(1000)
+            self.status_var.set("Preferences saved — restart Tekzite to apply network/privacy/download launch changes")
             win.destroy()
         def cancel_preferences():
             # Live zoom selection is only a preview until Save. Restore the
@@ -4323,7 +6408,7 @@ class BrowserApp:
     def _show_about(self):
         messagebox.showinfo(
             "About Tekzite",
-            f"Tekzite Browser v{BROWSER_VERSION}\n\nChromium-only web engine with Tekzite-native browser UI and DWM presentation.",
+            f"Tekzite Browser v{BROWSER_VERSION}{' — Private Window' if self._private_mode else ''}\n\nChromium-only web engine with Tekzite-native browser UI and DWM presentation.",
             parent=self.root,
         )
 
@@ -4340,6 +6425,13 @@ class BrowserApp:
     def navigate_to(self, url, add_history=True, reuse_existing=True):
         """Navigate using Chromium only. Tekzite no longer has a web renderer."""
         url = self.normalize_url(url)
+        if self.preferences.get("strip_tracking_parameters", True):
+            url, removed = strip_tracking_parameters(url)
+            if removed:
+                self._privacy_tracking_params_stripped += int(removed)
+                self.status_var.set(f"Privacy Shield removed {removed} tracking parameter{'s' if removed != 1 else ''}")
+        if self.preferences.get("https_first", True):
+            url = upgrade_to_https(url)
         url = self.apply_site_compatibility(url)
 
         active = self._active_tab()
@@ -4483,7 +6575,7 @@ class BrowserApp:
         text = tk.Text(
             frame,
             wrap=wrap,
-            font=("Consolas", 9),
+            font=(self._ui_monospace_font_family, self._font_size(9)),
         )
         ybar = tk.Scrollbar(
             frame,
@@ -4597,14 +6689,14 @@ class BrowserApp:
         )
         tk.Label(
             toolbar, textvariable=source_var, bg=self.ui["chrome"],
-            fg=self.ui["muted"], font=(self._ui_font_family, 9), padx=12
+            fg=self.ui["muted"], font=(self._ui_font_family, self._font_size(9)), padx=12
         ).pack(side="left")
 
         find_var = tk.StringVar()
         find_entry = tk.Entry(
             toolbar, textvariable=find_var, bg=self.ui["field"],
             fg=self.ui["text"], insertbackground=self.ui["text"],
-            relief="flat", bd=0, font=(self._ui_font_family, 9)
+            relief="flat", bd=0, font=(self._ui_font_family, self._font_size(9))
         )
         find_entry.pack(side="left", fill="x", expand=True, padx=(8, 6), pady=8)
 
@@ -4615,7 +6707,7 @@ class BrowserApp:
         xscroll = tk.Scrollbar(body, orient="horizontal")
         xscroll.pack(side="bottom", fill="x")
         text = tk.Text(
-            body, wrap="none", font=("Consolas", 10),
+            body, wrap="none", font=(self._ui_monospace_font_family, self._font_size(10)),
             bg="#090d16", fg="#dce6f7", insertbackground="#ffffff",
             selectbackground=self.ui["accent"], selectforeground="#ffffff",
             relief="flat", bd=0, padx=12, pady=10,
@@ -4629,7 +6721,7 @@ class BrowserApp:
         status = tk.Label(
             window, textvariable=status_var, anchor="w",
             bg=self.ui["chrome"], fg=self.ui["muted"],
-            font=(self._ui_font_family, 8), padx=10, pady=4
+            font=(self._ui_font_family, self._font_size(8)), padx=10, pady=4
         )
         status.pack(fill="x")
 
@@ -4752,14 +6844,40 @@ class BrowserApp:
 
 
     def on_close(self):
-        self._navigation_generation += 1
+        # WM_CLOSE, a restart request and a keyboard shortcut can converge on
+        # shutdown in the same UI turn. Teardown is intentionally idempotent.
+        if getattr(self, "_closing", False):
+            return True
+        if not getattr(self, "_private_mode", False):
+            try:
+                self._save_session()
+                write_json(self._state_directory / "history.json", [] if self.preferences.get("clear_browsing_data_on_exit", True) else self.visits)
+            except OSError as exc:
+                if not messagebox.askyesno("Save browser state", f"Could not save browser state:\n{exc}\n\nClose anyway?", parent=self.root):
+                    self._restart_after_close = False
+                    return False
+        self._closing = True
+        try:
+            if self._checkpoint_job is not None:
+                self.root.after_cancel(self._checkpoint_job)
+        except Exception:
+            pass
         try:
             if self._page_state_after_id is not None:
                 self.root.after_cancel(self._page_state_after_id)
         except Exception:
             pass
+        # Hundreds of small after() callbacks drive animation, frame polling,
+        # input coalescing and recovery. Cancel them before destroying native
+        # windows so none can wake mid-teardown and touch a dead HWND/Tk widget.
+        self._cancel_all_tk_after_jobs()
+        self._navigation_generation += 1
         try:
-            close_embedded_chromium(clear_profile=bool(self.preferences.get("clear_browsing_data_on_exit", True)))
+            close_embedded_chromium(clear_profile=bool(
+                getattr(self, "_private_mode", False)
+                or self.preferences.get("privacy_lockdown", True)
+                or self.preferences.get("clear_browsing_data_on_exit", True)
+            ))
         except Exception:
             pass
         try:
@@ -4792,7 +6910,24 @@ class BrowserApp:
                     ctypes.WinDLL("user32", use_last_error=True).DestroyWindow(wintypes.HWND(int(self._dwm_host)))
             except Exception:
                 pass
-            self.root.destroy()
+            for temp_profile in (getattr(self, "_private_profile_dir", None), getattr(self, "_privacy_profile_dir", None)):
+                if temp_profile:
+                    try:
+                        shutil.rmtree(temp_profile, ignore_errors=True)
+                    except Exception:
+                        pass
+            restart_after_close = bool(getattr(self, "_restart_after_close", False))
+            restart_private = bool(getattr(self, "_private_mode", False))
+            try:
+                self.root.destroy()
+            except Exception as exc:
+                self._write_stability_log("Tk destroy error", f"{type(exc).__name__}: {exc}")
+            if restart_after_close:
+                try:
+                    self._spawn_browser_process(private=restart_private)
+                except Exception:
+                    pass
+        return True
 
     def run(self):
         self.root.mainloop()

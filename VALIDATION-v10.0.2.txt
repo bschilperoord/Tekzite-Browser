@@ -1,0 +1,10 @@
+Passed on Linux:
+- Python compilation of changed modules.
+- 34 unittest behavior tests, including eight tests for native-owner recovery and deferred startup services.
+- 63 existing regression functions via direct invocation (pytest unavailable).
+
+New coverage: no delay on healthy native owners, recovery after transient loss, bounded rejection of permanently invalid owners, dead-process stop, activation-error handling, one-time service initialization only for the current session, shutdown exclusion, preservation of the requested launch URL.
+
+Actual HWND validation, live DWM output and Windows executable build cannot be verified in this Linux runtime. This release repairs the startup sequencing regression and tests recovery orchestration with mocked Windows/CDP boundaries. It does not claim a verified end-to-end Windows fix.
+
+Build from a fresh extraction using build_windows.ps1. Confirm the first page appears and typing/tab switching works. If rendering still fails, Copy All Debug now includes embed_owner_wait_attempts and embed_owner_activation_error alongside pre_attach_owner diagnostics.

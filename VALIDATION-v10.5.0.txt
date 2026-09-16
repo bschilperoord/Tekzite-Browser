@@ -1,0 +1,7 @@
+Tekzite Browser v10.5.0 Luxe UI validation
+
+- Python test suite: 176 tests
+- Chromium extension mocked API checks: passed
+- Tk Luxe UI smoke: Aurora Glass + rounded Canvas tab + traffic-light controls passed
+- Environment doctor: no blocking setup issues (DWM runtime remains Windows-only)
+- Package ZIP integrity: verify after packaging

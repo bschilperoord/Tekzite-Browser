@@ -19,5 +19,8 @@
    - maximized/restored DWM geometry;
    - Preferences dialog;
    - Microsoft account/page access;
-   - ad blocker toggle after restart.
+   - ad blocker toggle after restart;
+   - New Private Window opens a distinct temporary profile and leaves no saved private session/history;
+   - Site Info reports the current origin and Clear site data affects only that origin;
+   - Extension Manager can load a small unpacked test extension after restart.
 5. Tag the release as `vX.Y` and attach the source archive/binary artifacts as appropriate.

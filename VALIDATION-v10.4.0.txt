@@ -1,0 +1,10 @@
+Tekzite Browser v10.5.0 validation
+
+- 167/167 current Python tests passed.
+- Bundled Chromium extension mocked API tests passed.
+- tools/doctor.py found no blocking setup issues in the Linux validation environment.
+- Privacy proxy integration passed: tracker CONNECT blocked before upstream, public HTTP upgraded to HTTPS, private-LAN HTTP excluded from forced upgrade.
+- Tk Privacy Lockdown construction smoke passed under a virtual display.
+- Privacy Lockdown uses a process-temporary Chromium profile, suppresses persistent Tekzite history/session, and disables user-installed unpacked extensions.
+- HTTPS remains end-to-end; Tekzite does not decrypt CONNECT tunnels.
+- Windows-only DWM/native presentation still requires a Windows smoke test.

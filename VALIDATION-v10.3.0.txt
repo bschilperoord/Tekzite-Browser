@@ -1,0 +1,17 @@
+v10.3.0 fully-customizable-browser validation in build environment
+Date: 2026-09-16
+
+PASS: 139/139 Python tests (`python -m pytest -q`)
+PASS: Chromium extension feature checks (`node tests/current/test_extension_features.cjs`)
+PASS: Environment doctor found no blocking setup issues
+PASS: Tk customization smoke test under Xvfb
+PASS: Hidden-toolbar/address recovery smoke test under Xvfb (Ctrl+L path)
+
+Expected environment warning:
+- Linux build environment cannot execute the Windows-only native DWM presentation path.
+
+Windows smoke-test focus after extraction/build:
+- Native DWM embedding still presents Chromium after toolbar/tab chrome height changes.
+- Drag/maximize/restore behavior remains correct with custom app-bar heights.
+- Light/OLED/custom palettes render correctly on Windows Tk.
+- Hiding/reordering toolbar items and switching tab-strip position keeps the Chromium viewport aligned.

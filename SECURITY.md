@@ -17,6 +17,8 @@ Please avoid posting sensitive exploit details in a public issue. If the GitHub 
 The intended design is:
 
 - the Tekzite network helper listens only on loopback;
+- Python-originated loopback egress is restricted by default to Tekzite's registered proxy and Chromium DevTools/CDP destination ports;
+- the network-helper Python process may accept its loopback listener but is denied unexpected outbound loopback connects;
 - HTTPS CONNECT is tunneled without TLS decryption;
 - Chromium uses a dedicated Tekzite profile;
 - the local zoom extension has `tabs` and `storage` permissions and no host permissions;

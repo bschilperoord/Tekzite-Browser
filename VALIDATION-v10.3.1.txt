@@ -1,0 +1,24 @@
+v10.3.3 DWM performance hardening validation in build environment
+Date: 2026-09-16
+
+PASS: 145/145 Python tests (`python -m pytest tests/current -q`)
+PASS: Chromium extension feature checks (`node tests/current/test_extension_features.cjs`)
+PASS: Environment doctor found no blocking setup issues
+PASS: Python syntax compilation for `main.py` and `engine/net.py`
+
+DWM performance changes covered by regression tests:
+- Steady-state thumbnail resizes use the fast path and do not call DwmFlush.
+- Navigation settle can force the full DWM crop-discovery path.
+- Chromium presenter parking is rate-limited/single-flight.
+- Tekzite + DWM drag moves use deferred Win32 positioning.
+- Move-only DWM host updates use SWP_NOSIZE.
+
+Expected environment warning:
+- Linux build environment cannot execute the Windows-only native DWM presentation path.
+
+Windows smoke-test focus after extraction/build:
+- Resize the window continuously and verify the Chromium surface tracks smoothly without black/gray flashes.
+- Drag the frameless window rapidly and verify the DWM page remains locked to the Tekzite chrome.
+- Maximize/restore repeatedly and confirm page viewport/crop correctness.
+- Navigate between sites with different Chromium app-shell behavior and confirm no title/chrome strip leaks into the DWM mirror.
+- Switch tabs rapidly and verify no stale previous-tab frame remains visible.

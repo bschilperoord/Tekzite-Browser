@@ -1,0 +1,23 @@
+v10.1.1 stability hardening validation in build environment
+
+Automated:
+- python -m py_compile main.py browser_features.py browser_state.py engine/net.py engine/features.py tekzite_network.py: PASS
+- python -m pytest -q: PASS (113 tests)
+- node tests/current/test_extension_features.cjs: PASS (mocked Chrome APIs)
+- python tools/doctor.py: PASS with expected Linux warning for Windows-only DWM runtime
+
+Hardening covered:
+- one-generation atomic JSON recovery for session/history/bookmarks/preferences
+- serialized Chromium bootstrap/recovery and serialized Chromium shutdown
+- two-probe stale Chromium detection before helper replacement
+- stale per-tab target replacement after Chromium restart
+- automatic tab reload after failed target activation
+- thread-safe network-engine lifecycle
+- same-port local proxy recovery so live Chromium keeps its configured proxy URL
+- background network-engine health monitoring
+- bounded local Tk callback stability diagnostics
+- idempotent shutdown with queued Tk after() cancellation before native teardown
+
+Windows manual smoke test still required for live DWM/native Chromium presentation,
+forced Chromium crash recovery, forced network-engine crash recovery, private profile
+deletion and real unpacked-extension loading.

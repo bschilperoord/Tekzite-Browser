@@ -1,6 +1,33 @@
+try { importScripts("features.js"); } catch (error) { console.error("Tekzite services:", error); }
 const KEY = "tekziteDesiredZoom";
 let desiredZoom = 1.0;
 const applying = new Set();
+
+const TRACKING_KEYS = new Set([
+  "fbclid","gclid","dclid","msclkid","twclid","ttclid","li_fat_id","igshid",
+  "mc_cid","mc_eid","mkt_tok","vero_conv","vero_id","oly_anon_id","oly_enc_id",
+  "rb_clickid","s_cid","wickedid","_hsenc","_hsmi","ga_source","ga_medium","ga_term",
+  "ga_content","ga_campaign","yclid","gbraid","wbraid","epik","irclickid","ref_src",
+  "ref_url","spm","scm","campaign_id","ad_id","adset_id"
+]);
+
+function sanitizeTrackingUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (!/^https?:$/.test(url.protocol)) return String(value || "");
+    let changed = false;
+    for (const key of [...url.searchParams.keys()]) {
+      const lower = String(key).toLowerCase();
+      if (TRACKING_KEYS.has(lower) || lower.startsWith("utm_")) {
+        url.searchParams.delete(key);
+        changed = true;
+      }
+    }
+    return changed ? url.toString() : String(value || "");
+  } catch (_) {
+    return String(value || "");
+  }
+}
 
 function usableUrl(url) {
   return /^(https?:|file:|about:)/i.test(String(url || ""));
@@ -45,6 +72,13 @@ chrome.runtime.onInstalled.addListener(() => { applyAll(); });
 chrome.runtime.onStartup.addListener(() => { applyAll(); });
 chrome.tabs.onCreated.addListener(tab => { setTimeout(() => applyZoom(tab.id), 80); });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url) {
+    const clean = sanitizeTrackingUrl(changeInfo.url);
+    if (clean && clean !== changeInfo.url) {
+      chrome.tabs.update(tabId, {url: clean}).catch(() => {});
+      return;
+    }
+  }
   if (changeInfo.status || changeInfo.url) setTimeout(() => applyZoom(tabId), 40);
 });
 chrome.tabs.onActivated.addListener(info => { applyZoom(info.tabId); });

@@ -10,7 +10,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_current_version():
-    assert main.BROWSER_VERSION == "9.8"
+    assert main.BROWSER_VERSION == "10.5.0"
 
 
 def test_zoom_normalization():
@@ -39,8 +39,10 @@ def test_fast_target_activation_path_is_present():
 def test_native_zoom_bridge_is_minimally_privileged():
     manifest = json.loads((ROOT / "chromium_zoom_extension" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifest_version"] == 3
-    assert set(manifest.get("permissions", [])) <= {"tabs", "storage"}
-    assert not manifest.get("host_permissions")
+    assert set(manifest.get("permissions", [])) <= {"tabs", "storage", "downloads", "downloads.open", "declarativeNetRequest"}
+    assert set(manifest.get("host_permissions", [])) == {"http://*/*", "https://*/*"}
+    assert manifest.get("content_scripts")
+    assert not manifest.get("externally_connectable")
     bridge = (ROOT / "chromium_zoom_extension" / "background.js").read_text(encoding="utf-8")
     assert "chrome.tabs.setZoom" in bridge
     assert 'mode: "automatic"' in bridge

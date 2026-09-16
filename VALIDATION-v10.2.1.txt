@@ -1,0 +1,20 @@
+v10.2.1 standard-browser-controls validation in build environment
+
+Python tests: 131 collected, 131 passed
+Chromium extension mocked API checks: passed
+Python compile checks: passed
+Environment doctor: no blocking setup issues
+
+Validated wiring:
+- Back and Forward remain connected to per-tab Tekzite history.
+- Reload changes to Stop while the active Chromium tab reports loading.
+- Stop sends CDP Page.stopLoading to the active target.
+- Home navigates to the configured homepage.
+- Bookmark star toggles the active URL in bookmarks and reflects saved state.
+- Downloads button opens Downloads 2.0.
+- Three-dot menu exposes common browser actions and settings.
+- New Tab remains on the tab strip using the conventional + control.
+- Debug buttons were removed from the primary toolbar and remain under Tools.
+
+Platform note:
+The validation host is Linux. Windows-only DWM/native presentation still requires a short Windows smoke test.

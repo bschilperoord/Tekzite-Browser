@@ -1,3 +1,148 @@
+# Tekzite Browser v10.5.0
+
+v10.5.0 introduces the **Luxe UI**: rounded Canvas-rendered tabs, optional macOS-style traffic-light window controls, Aurora Glass and OLED Neon themes, and a more layered premium browser chrome while preserving Tekzite's Privacy Core.
+
+# Changelog
+
+## v10.5.0 — Luxe UI
+
+- Added true rounded **Soft Tabs** rendered on Tk Canvas with active accent pills, hover surfaces, favicons and dedicated close hit areas.
+- Added **Traffic Lights** window controls with red/yellow/green drawn controls, hover glyphs and macOS-style left-side placement.
+- Kept the existing Tekzite window controls as a selectable alternative on the right side.
+- Added **Aurora Glass** and **OLED Neon** presets alongside Aurora, Midnight, OLED Black, Graphite and Light.
+- Added live customization options for `window_control_style` and `tab_style`; both remain profile-specific and exportable.
+- Refined chrome layering, toolbar borders, tab spacing and titlebar proportions without enabling risky whole-window transparency.
+- The glass appearance is composited from opaque layered surfaces so Chromium/DWM presentation stays stable.
+
+## v10.4.0 — Privacy Core
+
+- Added **Privacy Lockdown**, enabled by default. Normal browsing history and open-tab sessions are not persisted while it is active.
+- Chromium runs from a process-temporary profile in Lockdown, then the profile is erased on shutdown; bookmarks and explicitly downloaded files remain user-owned data.
+- User-installed unpacked extensions are disabled in Lockdown so an arbitrary extension cannot silently widen the browser's privacy boundary.
+- Changed the default omnibox search provider to Startpage.
+- Added conservative tracking-parameter removal for `utm_*`, `fbclid`, `gclid`, `msclkid` and other known click IDs while preserving unknown query parameters.
+- Added dedicated tracker/analytics host blocking in both the local network proxy and the bundled Chromium ruleset.
+- Added HTTPS-first upgrades for ordinary HTTP browsing, with loopback kept separate for local development/device compatibility.
+- Added global DNT + GPC signaling and referrer stripping. Chromium client metadata headers are stripped by the bundled privacy ruleset where supported.
+- Blocked/disabled Chromium background networking, sync, crash reporting, domain reliability, prediction/prefetch, built-in DoH, QUIC, non-proxied WebRTC UDP and Privacy Sandbox ad APIs.
+- Expanded default-deny device permissions to include camera, microphone, geolocation, notifications, sensors, MIDI SysEx, WebBluetooth/USB/Serial/HID and idle detection paths where Chromium exposes those controls.
+- Added **Tools → Privacy Shield** with a live, destination-free audit of enabled protections and aggregate counters for blocked telemetry, trackers, ads, HTTPS upgrades and stripped tracking parameters.
+- Privacy counters store totals only, not a browsing destination log. HTTPS CONNECT remains end-to-end encrypted; Tekzite does not MITM TLS.
+- Retains the strict Python loopback destination allow-list introduced in v10.3.6.
+- Explicitly documents the remaining boundary: without an upstream VPN/proxy/Tor layer, visited websites can still observe the network's public IP address.
+
+## v10.3.6 — Strict Python loopback policy and port diagnostics
+
+- Registers Tekzite Network proxy and Chromium DevTools/CDP ports by purpose before Python connects to them.
+- Blocks all other Python-originated loopback destination ports while leaving public internet connections unaffected.
+- Revokes transient allow-list entries when services stop or Chromium launch attempts fail.
+- Adds **Tools → Local Ports & Loopback** with service-purpose labels, live Windows endpoint rows, temporary source-port explanation and recent denied attempts.
+- Records only denied loopback events in a bounded audit log, not normal web destinations.
+
+## v10.3.5 — Tekzite-native window controls
+
+- Replaced plain Windows-style titlebar glyphs with custom-drawn Tekzite minimize, maximize/restore and close controls.
+- Added themed hover/pressed states while preserving frameless drag, maximize and DWM behavior.
+
+## v10.3.4 — Reliable Chromium bootstrap target claim
+
+- Starts the cold Chromium bootstrap on `about:blank`, claims the existing app target, then performs normal navigation.
+- Prevents redirects/canonicalization from making Tekzite lose the first Chromium target.
+- Waits briefly for DevTools target discovery and uses a guarded sole-page fallback.
+
+## v10.3.1 — DWM performance hardening
+
+- Added a low-overhead steady-state DWM thumbnail resize path.
+- Avoided `DwmFlush` on normal interactive resize updates.
+- Batched native window + DWM-host drag moves into one deferred Win32 commit.
+- Prevented move-only DWM updates from generating unnecessary resize work.
+- Rate-limited Chromium presenter cleanup while preserving full recovery paths.
+
+## v10.3.0 — Fully customizable Tekzite UI
+
+- Added per-profile customization with live preview, JSON import/export and safe UI-only reset.
+- Added editable palette roles and Midnight, OLED Black, Graphite and Light presets.
+- Added custom fonts, font sizes, density, UI scale and animation preference.
+- Added toolbar ordering, visibility and icon/text/both label modes.
+- Added app-bar, branding, menu, window-control, tab-strip, favicon, close-button, group-chip, active-indicator, scrollbar and status-dot toggles.
+- Added tab-strip placement, new-tab button placement, tab-title length and configurable chrome heights.
+- Added initial/minimum window sizing and start-maximized preference.
+- Added configurable omnibox search URL templates while preserving Ctrl+L as a recovery path when toolbar/address chrome is hidden.
+
+
+## v10.2.1 — Standard browser controls
+
+- Added Back, Forward, Reload/Stop and Home controls to the main toolbar.
+- Added a bookmark star in the omnibox with add/remove toggle behavior.
+- Added dedicated Downloads and three-dot browser menu buttons.
+- Added Chromium `Page.stopLoading` support so Reload becomes Stop during page loads.
+- Removed debug buttons from the primary toolbar while preserving them under Tools.
+
+## v10.2.0 — Browser management & productivity suite
+
+- Added real sleeping tabs with configurable inactivity timeout and pinned-tab protection.
+- Added persistent tab groups with collapse/expand controls and session restore.
+- Added per-origin Permissions Manager for notifications, location, microphone, camera, clipboard and sensors.
+- Expanded Downloads with pause/resume, open file/folder, retry, cancel and remove-from-list actions.
+- Added configurable download save prompting.
+- Added profile isolation for Tekzite state and Chromium browsing data.
+- Added GitHub release update checks with optional SHA-256 verification when GitHub publishes an asset digest.
+- Added Diagnostics and Task Manager panels.
+- Added crash-recovery prompt for sessions left with an unclean-exit checkpoint.
+- Extended Preferences with sleeping-tab, download and updater controls.
+
+# v10.1.1
+
+- Serialize Chromium bootstrap/recovery to prevent competing helper launches.
+- Confirm DevTools failure twice before replacing a running Chromium session, then dispose stale CDP channels and helper processes cleanly.
+- Recover a crashed Tekzite Network Engine on Chromium's existing proxy port and watch its health in the background.
+- Retain one previous valid JSON generation and use it when a primary state/preferences file becomes corrupt.
+- Contain Tk callback exceptions in a bounded local stability log instead of letting UI callbacks fail silently.
+- Make browser shutdown idempotent and cancel queued Tk timers before tearing down native windows.
+- Replace stale per-tab Chromium target IDs after helper recovery and reload tabs whose old target disappeared.
+
+# v10.1.0
+
+- Add private windows on Ctrl+Shift+N using process-unique temporary Chromium profiles.
+- Prevent private windows from restoring/saving Tekzite sessions or writing browsing history; always erase private Chromium data on close.
+- Add Site Info & Privacy with live Chromium security, cookie-count and origin-storage information.
+- Add origin-scoped Clear Site Data without exposing cookie values or clearing unrelated sites.
+- Add an unpacked Chromium Extension Manager with add, enable/disable, remove, folder, permission/details and safe restart controls.
+- Launch enabled user extensions beside Tekzite's mandatory local browser-services extension.
+- Keep extension launch configuration validated and ignore stale/invalid extension folders instead of failing browser startup.
+
+# v10.0.2
+
+- Restore the requested direct app launch URL from the v9.8 startup path.
+- Defer optional extension services until after successful native/software presentation.
+- Retry transient render-owner replacement before attachment and after compositor priming, retaining live-host validation.
+- Record retry counts and activation errors for diagnosis.
+
+# v10.0.1
+
+- Prevent optional extension-service readiness failure from aborting Chromium startup.
+- Enable/wake the service-worker runtime before readiness checks and recover a missing entry point using bundled local code.
+- Retain proxy ad blocking as a fallback until extension configuration succeeds; support live policy changes.
+- Include service readiness/error details in debug reports.
+- Guard service imports so failure cannot prevent zoom listener registration.
+
+# v10.0
+
+- Add Chromium downloads panel with live progress, cancel, retry/resume and open folder.
+- Add searchable local history and Clear History; honor Clear browsing data on exit.
+- Move ad filtering into local extension rules with persistent hostname exceptions.
+- Add compact pinned tabs, protected from bulk close and retained in sessions.
+- Add quiet mode for fewer controls and reduced animation.
+- Save session checkpoints every two seconds for crash recovery.
+- Configure blocking rules before first webpage navigation. Use the extension worker without creating extra DWM presenters.
+
+# v9.9
+
+- Add persistent bookmarks, Ctrl+D, and an open/rename/remove manager.
+- Restore tab order and selected tab after normal exit, loading background tabs on selection.
+- Add a preference to disable restoration.
+- Keep unsubmitted address-bar text out of saved tab URLs.
+
 ## v9.8 black-launch hardening hotfix
 
 - Protects all plausible live `Chrome_WidgetWin_1` presenters from asynchronous late-presenter hiding.
@@ -27,8 +172,6 @@
 - Full Chromium profile recovery runs only when dirty-session markers exist or a first launch fails.
 - Chromium top-level window discovery polling tightened from 100 ms to 10 ms.
 - Startup diagnostics now record profile recovery, process spawn, DevTools readiness and window-discovery timings.
-
-# Changelog
 
 ## 9.2
 

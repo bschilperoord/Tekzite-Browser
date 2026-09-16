@@ -1,0 +1,24 @@
+v10.2.0 feature release validation in build environment
+
+Python tests: 125 collected, 125 passed
+Chromium extension mocked API checks: passed
+Python compile checks: passed
+Environment doctor: no blocking setup issues
+
+Validated feature wiring:
+- Sleeping tabs release inactive Chromium targets and restore on selection.
+- Active, pinned and currently-audible media tabs are excluded from automatic sleeping.
+- Tab groups persist in session snapshots and expose collapse/expand management.
+- Per-origin Chromium permissions use Browser.setPermission and persisted site rules.
+- Downloads expose pause/resume/cancel/retry/open/show/erase actions.
+- Named profiles isolate Tekzite state and Chromium profile data.
+- Task Manager uses tab Performance metrics plus Chromium process info.
+- Diagnostics exposes current browser/network/tab state and local stability log tail.
+- Update checker compares GitHub release tags, downloads to a .part file, computes SHA-256,
+  and verifies GitHub sha256 asset digests when supplied before committing the file.
+- Unclean session checkpoints trigger an explicit restore prompt.
+
+Platform note:
+The validation host is Linux. The Windows-only DWM/native embedding path, Windows process
+working-set reporting, save-location prompt behavior and final installer/EXE startup still
+require a short Windows smoke test after building.

@@ -42,3 +42,7 @@ Desktop.ini
 *.dmp
 *.tmp
 Pasted text*.txt
+
+# Windows/PyInstaller build output
+installer-dist/
+*.spec.bak

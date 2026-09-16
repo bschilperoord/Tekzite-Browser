@@ -1,0 +1,15 @@
+[
+  {
+    "id": 11001,
+    "priority": 100,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {"header": "referer", "operation": "remove"},
+        {"header": "x-client-data", "operation": "remove"},
+        {"header": "x-chrome-connected", "operation": "remove"}
+      ]
+    },
+    "condition": {"regexFilter": "^https?://"}
+  }
+]

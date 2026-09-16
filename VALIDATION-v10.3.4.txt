@@ -1,0 +1,23 @@
+Tekzite Browser v10.5.0 bootstrap reliability validation
+Date: 2026-09-16
+
+PASS: 149/149 Python tests (`python -m pytest -q`)
+PASS: Chromium extension feature checks (`node tests/current/test_extension_features.cjs`)
+PASS: Environment doctor found no blocking setup issues
+PASS: Tk runtime smoke test in virtual display
+
+Bootstrap changes covered by regression tests:
+- Cold native startup uses `--app=about:blank` instead of the requested site URL.
+- The first Tekzite tab claims the existing Chromium app target before real navigation.
+- Bootstrap discovery tolerates a briefly empty `/json/list` result.
+- A sole valid page target can be claimed as a guarded fallback instead of creating a second native target.
+- Normal target creation remains available for later tabs.
+
+Expected environment warning:
+- Linux build environment cannot execute the Windows-only DWM presentation path.
+
+Windows smoke-test focus after extraction/build:
+- Launch with a saved/restored external URL such as https://guru3d.com and confirm the first page loads instead of showing a bootstrap-target error.
+- Launch with homepage and blank startup modes.
+- Open a second tab and verify it creates/activates normally.
+- Navigate through a redirecting site and confirm the first Chromium/DWM surface remains attached.

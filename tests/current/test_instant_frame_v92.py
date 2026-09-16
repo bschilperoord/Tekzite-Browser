@@ -32,5 +32,5 @@ def test_navigation_future_poll_is_low_latency():
 
 
 def test_startup_has_no_fixed_quarter_second_delay():
-    assert "self.root.after_idle(startup_action)" in MAIN
+    assert "self.root.after_idle(lambda: self._feature_startup(lambda: self._restore_startup_tabs(startup_action)))" in MAIN
     assert "250,\n            startup_action" not in MAIN

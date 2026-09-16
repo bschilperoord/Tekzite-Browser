@@ -5,7 +5,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 def test_version_v93():
-    assert 'BROWSER_VERSION = "9.8"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.0"' in MAIN
 
 def test_frame_gate_reuses_persistent_input_lane():
     block = NET[NET.index("def _wait_for_attached_first_frame"):NET.index("def navigate_embedded_chromium")]

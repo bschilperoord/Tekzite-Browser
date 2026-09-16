@@ -1,0 +1,49 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "requestDomains": [
+        "adform.com",
+        "adform.net",
+        "adnxs-simple.com",
+        "adnxs.com",
+        "ads.youtube.com",
+        "adservice.google.com",
+        "adsrvr.org",
+        "advertising.com",
+        "bidswitch.net",
+        "casalemedia.com",
+        "contextweb.com",
+        "criteo.com",
+        "criteo.net",
+        "doubleclick.net",
+        "googleadservices.com",
+        "googlesyndication.com",
+        "lijit.com",
+        "media.net",
+        "moatads.com",
+        "openx.net",
+        "outbrain.com",
+        "pagead2.googlesyndication.com",
+        "pubmatic.com",
+        "quantserve.com",
+        "rubiconproject.com",
+        "securepubads.g.doubleclick.net",
+        "serving-sys.com",
+        "sharethrough.com",
+        "smartadserver.com",
+        "static.doubleclick.net",
+        "taboola.com",
+        "taboolasyndication.com",
+        "tpc.googlesyndication.com",
+        "www.googleadservices.com",
+        "yieldmo.com",
+        "zedo.com"
+      ]
+    }
+  }
+]

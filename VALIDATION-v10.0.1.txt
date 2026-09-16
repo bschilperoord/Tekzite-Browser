@@ -1,0 +1,9 @@
+Passed on Linux:
+- 26 Python behavior tests, including six new startup/fallback regression tests.
+- 63 existing regression functions (direct invocation; pytest unavailable).
+- Mocked Chrome extension API tests and JavaScript syntax check.
+- Python compilation.
+
+The reported service-readiness failure is exercised in tests: initialize_optional returns failure diagnostics without raising or terminating Chromium, even if fallback-policy writing also fails. Missing-entry-point recovery and policy transitions are covered.
+
+Windows executable build, actual worker readiness and live DWM rendering remain unverified here. Rebuild with build_windows.ps1 in a freshly extracted folder; both the browser and network helper changed.

@@ -1,0 +1,8 @@
+Tekzite Browser v10.5.0 validation
+
+- Python tests: 158/158 passed
+- Chromium extension mocked API checks: passed
+- Environment doctor: no blocking setup issues
+- Actual Python audit-hook loopback block/allow integration test: passed
+- Tekzite Network helper loopback-egress integration test: passed (unexpected CONNECT to 127.0.0.1 returned 502 and no target connection was made)
+- Linux Chromium full native/DWM smoke remains non-authoritative because the production native presentation path is Windows-only.

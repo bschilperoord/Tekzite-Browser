@@ -1,0 +1,15 @@
+[
+  {
+    "id": 12001,
+    "priority": 200,
+    "action": {
+      "type": "redirect",
+      "redirect": {"regexSubstitution": "https://\\1"}
+    },
+    "condition": {
+      "regexFilter": "^http://(.+)",
+      "resourceTypes": ["main_frame"],
+      "excludedRequestDomains": ["localhost", "127.0.0.1"]
+    }
+  }
+]
