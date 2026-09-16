@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 Write-Host "== Tekzite Browser Windows build ==" -ForegroundColor Cyan
@@ -31,7 +31,7 @@ Copy-Item (Join-Path $helperDist "tekzite-network.exe") (Join-Path $PSScriptRoot
 Write-Host "Building Tekzite Browser..." -ForegroundColor Yellow
 python -m PyInstaller --noconfirm --clean TekziteBrowser.spec
 
-$exe = Join-Path $PSScriptRoot "dist\Tekzite Browser\Tekzite Browser.exe"
+$exe = Join-Path $PSScriptRoot "dist\Tekzite Browser.exe"
 if (-not (Test-Path $exe)) {
     throw "Build completed without expected executable: $exe"
 }
@@ -41,4 +41,5 @@ Write-Host "Built successfully:" -ForegroundColor Green
 Write-Host $exe
 Write-Host ""
 Write-Host "Run it with:" -ForegroundColor Cyan
-Write-Host '& ".\dist\Tekzite Browser\Tekzite Browser.exe"'
+Write-Host '& ".\dist\Tekzite Browser.exe"'
+
