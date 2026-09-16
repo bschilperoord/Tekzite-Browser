@@ -3,54 +3,47 @@ from __future__ import annotations
 """Tekzite Browser low-latency executable entry point."""
 
 import os
-import subprocess
+import time
 
 from ultraspeed_runtime import apply_ultraspeed
 
 
-def _shutdown_network_engine_for_onefile() -> None:
-    """Stop the bundled helper before PyInstaller removes its _MEI tree."""
+def _shutdown_onefile_children() -> None:
+    """Release every Tekzite child that can hold PyInstaller's _MEI tree open."""
     try:
         import engine.net as net
     except Exception:
         return
 
-    state = getattr(net, "_NETWORK_ENGINE", None) or {}
-    proc = state.get("process") if isinstance(state, dict) else None
+    # Chromium loads Tekzite's bundled unpacked extension from the OneFile
+    # extraction tree, so Chromium must be gone before the PyInstaller
+    # bootloader tries to delete that tree.
+    session = getattr(net, "_EDGE_SESSION", None) or {}
+    profile = session.get("profile") if isinstance(session, dict) else None
 
-    if proc is not None and proc.poll() is None:
+    try:
+        net.close_embedded_chromium(clear_profile=False)
+    except Exception:
+        pass
+
+    # close_embedded_chromium() normally terminates the exact Tekzite Chromium
+    # process tree. Perform one profile-scoped verification/fallback because an
+    # adopted Chromium process can outlive the launcher process that started it.
+    if os.name == "nt" and profile:
         try:
-            proc.terminate()
-            proc.wait(timeout=2)
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if not net._profile_chromium_pids(profile):
+                    break
+                time.sleep(0.05)
+            remaining = net._profile_chromium_pids(profile)
+            if remaining:
+                net._terminate_profile_chromium_processes(profile)
         except Exception:
-            # The helper is itself a PyInstaller OneFile executable on Windows.
-            # Kill its complete process tree if graceful shutdown times out so
-            # no child keeps tekzite-network.exe open inside Tekzite's _MEI dir.
-            if os.name == "nt" and proc.poll() is None:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(int(proc.pid)), "/T", "/F"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=5,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                    )
-                except Exception:
-                    pass
-            elif proc.poll() is None:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            pass
 
-            # Reap the helper before control returns to the PyInstaller
-            # bootloader, which immediately starts deleting the _MEI directory.
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                pass
-
-    # Release Tekzite's proxy state, loopback registration and log handle.
+    # The proxy helper is also bundled inside the outer OneFile extraction.
+    # Stop/reap it only after Chromium no longer needs the proxy.
     try:
         net._stop_network_engine()
     except Exception:
@@ -67,9 +60,10 @@ def main() -> int:
     try:
         app.run()
     finally:
-        # Do this before Python/PyInstaller shutdown rather than relying only on
-        # atexit, because Windows file handles can otherwise outlive _MEI cleanup.
-        _shutdown_network_engine_for_onefile()
+        # Run while Python is still alive. Relying only on atexit is too late
+        # for PyInstaller OneFile because the bootloader immediately starts
+        # removing its _MEI extraction directory.
+        _shutdown_onefile_children()
     return 0
 
 

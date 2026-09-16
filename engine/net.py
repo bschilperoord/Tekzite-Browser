@@ -154,27 +154,107 @@ def _stop_network_engine_unlocked():
     state = _NETWORK_ENGINE
     _NETWORK_ENGINE = None
     _NETWORK_OPENER = None
+
     if state:
         state_port = state.get("port")
         proc = state.get("process")
-        if proc is not None and proc.poll() is None:
+
+        # Important for nested PyInstaller OneFile:
+        # the Popen PID can be only the short-lived bootloader parent. The real
+        # tekzite-network worker keeps listening on the proxy port after that
+        # parent has already exited. Therefore resolve the listener PID from the
+        # actual proxy port and terminate it independently of proc.poll().
+        listener_pid = None
+        if os.name == "nt" and state_port:
+            try:
+                listener_pid = _listener_pid_for_port(int(state_port))
+            except Exception:
+                listener_pid = None
+
+        pids = []
+        for candidate in (
+            getattr(proc, "pid", None) if proc is not None else None,
+            listener_pid,
+        ):
+            try:
+                candidate = int(candidate)
+            except (TypeError, ValueError):
+                continue
+            if candidate > 0 and candidate != os.getpid() and candidate not in pids:
+                pids.append(candidate)
+
+        if os.name == "nt":
+            for pid in pids:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                except Exception:
+                    pass
+
+            # A nested OneFile worker can survive the tracked bootloader parent.
+            # Wait until nothing is listening on Tekzite's exact proxy port.
+            if state_port:
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    try:
+                        if _listener_pid_for_port(int(state_port)) is None:
+                            break
+                    except Exception:
+                        break
+                    time.sleep(0.05)
+
+                # Final exact-port fallback in case the worker changed PID while
+                # the PyInstaller bootloader was handing off.
+                try:
+                    final_pid = _listener_pid_for_port(int(state_port))
+                except Exception:
+                    final_pid = None
+                if final_pid:
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/PID", str(int(final_pid)), "/T", "/F"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=5,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        )
+                    except Exception:
+                        pass
+        elif proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
                 proc.wait(timeout=2)
             except Exception:
                 try:
                     proc.kill()
+                    proc.wait(timeout=5)
                 except Exception:
                     pass
+
+        # Reap the original Popen object when possible. It may already represent
+        # an exited OneFile bootloader parent, which is fine.
+        if proc is not None:
+            try:
+                wait = getattr(proc, "wait", None)
+                if callable(wait):
+                    wait(timeout=1)
+            except Exception:
+                pass
+
         if state_port:
             revoke_loopback_port(state_port)
+
     if _NETWORK_ENGINE_LOG_HANDLE is not None:
         try:
             _NETWORK_ENGINE_LOG_HANDLE.close()
         except Exception:
             pass
         _NETWORK_ENGINE_LOG_HANDLE = None
-
 
 atexit.register(_stop_network_engine)
 

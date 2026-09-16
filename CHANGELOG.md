@@ -1,3 +1,15 @@
+# Tekzite Browser v10.5.2
+
+## UltraSpeed cleanup and release hardening
+
+- Added explicit pre-PyInstaller shutdown of the bundled Tekzite Network helper.
+- Waits for the helper to exit after graceful termination.
+- Falls back to terminating the helper process tree on Windows when required, then reaps the process before OneFile cleanup.
+- Prevents stale helper handles from keeping PyInstaller `_MEI...` temporary directories open at browser shutdown.
+- Keeps the v10.5.1 UltraSpeed scheduler, timer, proxy-cache and coalesced-stat optimizations.
+- Updated README, architecture, network, contribution, releasing and installer documentation for the UltraSpeed OneFile architecture.
+- Synchronized browser, extension, Windows resource and installer version metadata on v10.5.2.
+
 # Tekzite Browser v10.5.1
 
 ## UltraSpeed

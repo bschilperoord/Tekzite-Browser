@@ -54,11 +54,23 @@ def test_ultraspeed_launcher_applies_tuning_before_main_import():
     source = Path("ultraspeed_launcher.py").read_text(encoding="utf-8")
     assert source.index("apply_ultraspeed()") < source.index("from main import BrowserApp")
 
-def test_ultraspeed_launcher_cleans_onefile_helper_before_exit():
+def test_ultraspeed_launcher_closes_chromium_before_network_helper():
     source = Path("ultraspeed_launcher.py").read_text(encoding="utf-8")
-    assert "def _shutdown_network_engine_for_onefile" in source
-    assert '["taskkill", "/PID", str(int(proc.pid)), "/T", "/F"]' in source
-    assert "proc.wait(timeout=5)" in source
-    assert "finally:" in source
-    assert "_shutdown_network_engine_for_onefile()" in source
+    assert "def _shutdown_onefile_children" in source
+    assert "net.close_embedded_chromium(clear_profile=False)" in source
+    assert "net._profile_chromium_pids(profile)" in source
+    assert "net._terminate_profile_chromium_processes(profile)" in source
+    assert "net._stop_network_engine()" in source
+    assert source.index("net.close_embedded_chromium(clear_profile=False)") < source.index("net._stop_network_engine()")
+
+def test_network_helper_shutdown_targets_real_listener_pid():
+    source = Path("engine/net.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("def _stop_network_engine_unlocked():"):
+        source.index("atexit.register(_stop_network_engine)")
+    ]
+    assert "_listener_pid_for_port(int(state_port))" in block
+    assert "independently of proc.poll()" in block
+    assert '["taskkill", "/PID", str(pid), "/T", "/F"]' in block
+    assert "Final exact-port fallback" in block
 

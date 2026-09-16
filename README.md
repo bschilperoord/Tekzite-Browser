@@ -2,13 +2,14 @@
 
 Tekzite Browser is an experimental Windows desktop browser shell built in Python/Tk around a real Chromium renderer. Tekzite keeps its own tabs, omnibox, menus, preferences and interaction layer while Chromium handles web standards, JavaScript, media, cookies, canvas, WebGL and page rendering.
 
-> **Current release:** v10.5.1 Windows source tree  
+> **Current release:** v10.5.2 UltraSpeed for Windows  
 > **Platform:** Windows 10/11  
 > **Status:** experimental, actively developed
 
 ## Highlights
 
 - Chromium-only web rendering with a dedicated Tekzite profile.
+- **UltraSpeed runtime:** 1 ms Windows timer request while running, above-normal browser/UI scheduling, execution-speed throttling disabled where supported, cached privacy hot paths and coalesced privacy-stat writes.
 - Native DWM presentation instead of screenshot polling.
 - Real Chromium page zoom with a local Manifest V3 zoom bridge.
 - Zoom-aware mouse input, cursor feedback and text selection.
@@ -44,7 +45,7 @@ Tekzite intentionally does not silently switch to Microsoft Edge.
 
 ```powershell
 # Clone the repository
-git clone https://github.com/YOUR-ACCOUNT/tekzite-browser.git
+git clone https://github.com/bschilperoord/Tekzite-Browser.git
 cd tekzite-browser
 
 # Create an isolated environment
@@ -68,7 +69,7 @@ You can also use `run.bat` or `run.ps1` after creating the virtual environment.
 
 ```powershell
 python -m pip install -r requirements.txt -r requirements-dev.txt
-python -m py_compile main.py engine\net.py tekzite_network.py
+python -m py_compile main.py engine\net.py tekzite_network.py tekzite_network_fast.py ultraspeed_runtime.py ultraspeed_launcher.py
 python -m pytest
 ```
 
@@ -145,14 +146,35 @@ Tekzite customization applies to Tekzite-owned browser chrome. Website HTML/CSS 
 
 ```text
 main.py                     Tekzite UI and browser shell
+ultraspeed_launcher.py      OneFile entry point + orderly helper shutdown
+ultraspeed_runtime.py       Low-latency Windows process/runtime tuning
 engine/net.py               Chromium, CDP, DWM and browser integration
 tekzite_network.py          Loopback proxy, telemetry policy and ad blocking
+tekzite_network_fast.py     Cached/coalesced UltraSpeed proxy hot paths
 chromium_zoom_extension/    Local native Chromium zoom bridge
+build_windows.ps1           Optimized Windows OneFile build pipeline
 tests/current/              Tests for the current architecture
 tests/legacy/               Historical version-specific regression tests
 tools/doctor.py             Local environment diagnostics
 docs/                       Architecture and release documentation
 ```
+
+## Building the Windows UltraSpeed OneFile executable
+
+The normal Windows release build packages Tekzite into a single `TekziteBrowser.exe`. The build also creates and embeds the `tekzite-network.exe` helper used by the loopback privacy proxy.
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\build_windows.ps1
+```
+
+The result is:
+
+```text
+dist\TekziteBrowser.exe
+```
+
+At runtime PyInstaller expands the bundled application into a temporary `_MEI...` directory. Tekzite shuts down and reaps the bundled network helper before the OneFile bootloader removes that directory, preventing stale helper handles from blocking cleanup.
 
 ## Building the optional network helper executable
 
@@ -191,6 +213,17 @@ Bookmarks and session addresses are stored locally alongside preferences, separa
 
 Build on Windows with `powershell -ExecutionPolicy Bypass -File .\build_windows.ps1`, or run `python main.py` after installing requirements.
 
+
+## New in v10.5.2
+
+### UltraSpeed cleanup and release hardening
+
+- Keeps the v10.5.1 UltraSpeed runtime: 1 ms Windows timer request, above-normal process/UI scheduling, cached privacy hot paths and coalesced privacy-stat writes.
+- Explicitly shuts down and reaps the bundled `tekzite-network.exe` helper before PyInstaller OneFile removes its temporary `_MEI...` directory.
+- Uses a Windows process-tree fallback only when graceful helper shutdown does not complete in time.
+- Keeps the DWM presentation path unchanged, avoiding risky window-hook or compositor changes.
+- Synchronizes Windows executable metadata, Chromium extension metadata, installer metadata, tests and documentation on v10.5.2.
+- The release artifact remains a single Windows x64 executable: `TekziteBrowser.exe`.
 
 ## New in v10.5.0
 

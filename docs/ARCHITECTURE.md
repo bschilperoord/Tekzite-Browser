@@ -40,6 +40,14 @@ The visible DWM thumbnail does not directly receive Chromium input. Tekzite forw
 
 See `NETWORK_ENGINE.md` for implementation history and diagnostics.
 
+### UltraSpeed runtime and OneFile packaging
+
+Windows release builds enter through `ultraspeed_launcher.py`. Before importing the Tk/browser stack, `ultraspeed_runtime.py` applies conservative process-local latency tuning. The current layer requests 1 ms timer resolution while Tekzite is running, gives the browser process and UI thread above-normal scheduling priority, and disables Windows execution-speed power throttling where supported.
+
+`tekzite_network_fast.py` wraps the normal network helper policy rather than replacing it. It accelerates repeated host classification, policy-file checks and privacy-stat persistence while retaining the blocking semantics implemented by `tekzite_network.py`.
+
+The release executable is a PyInstaller OneFile package. Its bundled `tekzite-network.exe` runs as a child process from PyInstaller's temporary `_MEI...` extraction directory. On browser shutdown the UltraSpeed launcher explicitly stops and reaps that child before the bootloader removes the extraction directory.
+
 ### Native zoom bridge
 
 `chromium_zoom_extension/` is a local Manifest V3 extension used only to control Chromium's actual tab zoom through `chrome.tabs.setZoom()`. It has no host permissions.

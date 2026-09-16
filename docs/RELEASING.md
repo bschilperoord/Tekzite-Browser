@@ -5,9 +5,10 @@
 3. Run:
 
    ```powershell
-   python -m py_compile main.py engine\net.py tekzite_network.py
-   python -m pytest
+   python -m py_compile main.py engine\net.py tekzite_network.py tekzite_network_fast.py ultraspeed_runtime.py ultraspeed_launcher.py
+   python -m pytest -q
    python tools\doctor.py
+   powershell -ExecutionPolicy Bypass -File .\build_windows.ps1
    ```
 
 4. Manually smoke-test on Windows:
@@ -23,4 +24,6 @@
    - New Private Window opens a distinct temporary profile and leaves no saved private session/history;
    - Site Info reports the current origin and Clear site data affects only that origin;
    - Extension Manager can load a small unpacked test extension after restart.
-5. Tag the release as `vX.Y` and attach the source archive/binary artifacts as appropriate.
+   - `dist\TekziteBrowser.exe` starts and closes normally;
+   - closing the OneFile build leaves no `tekzite-network.exe` child running and shows no `_MEI...` cleanup warning.
+5. Tag the release as `vX.Y.Z` and attach the Windows OneFile executable and any source artifacts as appropriate.

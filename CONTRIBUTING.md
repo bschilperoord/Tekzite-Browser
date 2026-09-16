@@ -27,7 +27,7 @@ python main.py
 Run:
 
 ```powershell
-python -m py_compile main.py engine\net.py tekzite_network.py
+python -m py_compile main.py engine\net.py tekzite_network.py tekzite_network_fast.py ultraspeed_runtime.py ultraspeed_launcher.py
 python -m pytest
 ```
 
@@ -48,6 +48,10 @@ Please keep pull requests focused. For browser-behavior changes, include:
 - Keep the Tekzite Chromium profile isolated under `%LOCALAPPDATA%\Tekzite Browser`.
 - HTTPS CONNECT traffic must remain end-to-end unless the project explicitly adopts a different security model.
 - Avoid site-specific DOM hacks when a Chromium/browser-level solution exists.
+
+## UltraSpeed and OneFile changes
+
+Performance changes must preserve the native Chromium/DWM path and the existing privacy boundary. When touching `ultraspeed_launcher.py`, `ultraspeed_runtime.py`, `tekzite_network_fast.py` or the Windows build pipeline, test both normal startup and normal shutdown of the built OneFile executable. In particular, closing `dist\TekziteBrowser.exe` must not leave `tekzite-network.exe` running or produce a PyInstaller `_MEI...` cleanup warning.
 
 ## Tests
 
