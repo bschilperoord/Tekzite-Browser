@@ -3,7 +3,7 @@ from pathlib import Path
 MAIN = (Path(__file__).resolve().parents[2] / "main.py").read_text(encoding="utf-8")
 
 def test_v97_drag_is_coalesced():
-    assert 'BROWSER_VERSION = "10.5.0"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.1"' in MAIN
     assert 'self._window_drag_pending_xy' in MAIN
     assert 'self.root.after(8, self._flush_window_drag)' in MAIN
     assert '16 if self._window_drag_active else 1' in MAIN

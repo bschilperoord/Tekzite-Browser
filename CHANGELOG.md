@@ -1,3 +1,18 @@
+# Tekzite Browser v10.5.1
+
+## UltraSpeed
+
+- Added a low-latency Windows runtime layer.
+- Requests 1 ms Windows timer resolution while Tekzite is running.
+- Uses above-normal scheduling for the browser process and UI thread.
+- Disables Windows execution-speed power throttling where supported.
+- Added cached tracker, telemetry and ad-host classification.
+- Avoids repeated adblock JSON parsing while preserving instant live policy updates.
+- Coalesces privacy-counter disk writes during request bursts.
+- Increased proxy relay buffer efficiency.
+- Reduced OneFile size and startup overhead by excluding unused heavy Python modules.
+- Preserves the existing DWM fast paths and Privacy Core behavior.
+
 # Tekzite Browser v10.5.0
 
 v10.5.0 introduces the **Luxe UI**: rounded Canvas-rendered tabs, optional macOS-style traffic-light window controls, Aurora Glass and OLED Neon themes, and a more layered premium browser chrome while preserving Tekzite's Privacy Core.

@@ -1,7 +1,7 @@
 #define MyAppName "Tekzite Browser"
-#define MyAppVersion "10.5.0"
+#define MyAppVersion "10.5.1"
 #define MyAppPublisher "Tekzite"
-#define MyAppExeName "Tekzite Browser.exe"
+#define MyAppExeName "TekziteBrowser.exe"
 
 [Setup]
 AppId={{53D205D4-7AA9-4F48-A3C4-A9A5D6C1C983}
@@ -25,7 +25,7 @@ SetupIconFile=..\assets\tekzite.ico
 #endif
 
 [Files]
-Source: "..\dist\Tekzite Browser\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\TekziteBrowser.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
