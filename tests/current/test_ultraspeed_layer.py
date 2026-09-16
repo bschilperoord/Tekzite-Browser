@@ -53,3 +53,12 @@ def test_privacy_stats_are_coalesced(monkeypatch):
 def test_ultraspeed_launcher_applies_tuning_before_main_import():
     source = Path("ultraspeed_launcher.py").read_text(encoding="utf-8")
     assert source.index("apply_ultraspeed()") < source.index("from main import BrowserApp")
+
+def test_ultraspeed_launcher_cleans_onefile_helper_before_exit():
+    source = Path("ultraspeed_launcher.py").read_text(encoding="utf-8")
+    assert "def _shutdown_network_engine_for_onefile" in source
+    assert '["taskkill", "/PID", str(int(proc.pid)), "/T", "/F"]' in source
+    assert "proc.wait(timeout=5)" in source
+    assert "finally:" in source
+    assert "_shutdown_network_engine_for_onefile()" in source
+
