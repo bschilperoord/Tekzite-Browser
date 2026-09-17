@@ -1,3 +1,5 @@
+<img width="902" height="752" alt="afbeelding" src="https://github.com/user-attachments/assets/36bd1ab3-0b48-43fc-af98-fc7db6861157" />
+
 # Tekzite Browser
 
 Tekzite Browser is an experimental Windows desktop browser shell built in Python/Tk around a real Chromium renderer. Tekzite keeps its own tabs, omnibox, menus, preferences and interaction layer while Chromium handles web standards, JavaScript, media, cookies, canvas, WebGL and page rendering.
