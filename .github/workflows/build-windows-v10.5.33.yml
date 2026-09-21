@@ -1,0 +1,92 @@
+name: Build Windows v10.5.33
+
+on:
+  push:
+    branches:
+      - build-v10.5.33-windows
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Apply v10.5.33 HRESULT compatibility hotfix
+        shell: pwsh
+        run: |
+          $path = "engine/net.py"
+          $content = Get-Content $path -Raw
+          $anchor = "from loopback_policy import allow_loopback_port, revoke_loopback_port, snapshot as loopback_policy_snapshot"
+          $insert = @'
+
+# ctypes.wintypes does not expose HRESULT on every supported Python build
+# (notably some packaged Windows/Python combinations). HRESULT is always a
+# signed 32-bit LONG, so keep one stable local alias instead of depending on
+# that optional wintypes attribute at runtime.
+import ctypes as _ctypes
+try:
+    from ctypes import wintypes as _ctypes_wintypes
+    HRESULT = getattr(_ctypes_wintypes, "HRESULT", _ctypes.c_int32)
+except Exception:
+    HRESULT = _ctypes.c_int32
+'@
+          if (-not $content.Contains("HRESULT = getattr(_ctypes_wintypes")) {
+            $content = $content.Replace($anchor, $anchor + $insert)
+          }
+          $content = $content.Replace("wintypes.HRESULT", "HRESULT")
+          $content = $content.Replace("v10.5.32 uses Chromium", "v10.5.33 uses Chromium")
+          Set-Content -Path $path -Value $content -Encoding UTF8
+
+          $versionFiles = @(
+            "main.py",
+            "tekzite_version_info.txt",
+            "tekzite_browser.manifest",
+            "installer/TekziteBrowser.iss",
+            "chromium_zoom_extension/manifest.json"
+          )
+          foreach ($file in $versionFiles) {
+            $text = Get-Content $file -Raw
+            $text = $text.Replace("10.5.32", "10.5.33")
+            Set-Content -Path $file -Value $text -Encoding UTF8
+          }
+
+      - name: Verify hotfix source
+        shell: pwsh
+        run: |
+          python -m py_compile main.py engine/net.py browser_features.py
+          python -c "import pathlib; t=pathlib.Path('engine/net.py').read_text(encoding='utf-8-sig'); assert 'wintypes.HRESULT' not in t; assert 'HRESULT = getattr(_ctypes_wintypes' in t"
+          python -c "import pathlib; t=pathlib.Path('main.py').read_text(encoding='utf-8-sig'); assert 'BROWSER_VERSION = \"10.5.33\"' in t"
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: .\build_windows.ps1
+
+      - name: Prepare release files
+        shell: pwsh
+        run: |
+          Copy-Item ".\dist\TekziteBrowser.exe" ".\Tekzite-Browser-v10.5.33-Windows-x64.exe" -Force
+          $hash = (Get-FileHash ".\Tekzite-Browser-v10.5.33-Windows-x64.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  Tekzite-Browser-v10.5.33-Windows-x64.exe" | Set-Content ".\SHA256SUMS.txt" -Encoding ascii
+          Get-Item ".\Tekzite-Browser-v10.5.33-Windows-x64.exe"
+          Get-Content ".\SHA256SUMS.txt"
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Tekzite-Browser-v10.5.33-Windows-x64
+          path: |
+            Tekzite-Browser-v10.5.33-Windows-x64.exe
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
