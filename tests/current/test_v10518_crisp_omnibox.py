@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_address_keeps_real_entry_and_adds_grayscale_preview():
@@ -29,3 +29,4 @@ def test_preview_click_restores_entry_and_caret():
     block = MAIN[MAIN.index("def _activate_address_preview"):MAIN.index("def _show_address_preview_context_menu")]
     assert "self.address.focus_set()" in block
     assert "self.address.icursor" in block
+

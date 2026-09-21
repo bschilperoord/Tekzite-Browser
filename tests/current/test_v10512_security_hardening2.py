@@ -18,7 +18,7 @@ BUILD = (ROOT / 'build_windows.ps1').read_text(encoding='utf-8')
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == '10.5.32'
+    assert main.BROWSER_VERSION == '10.5.33'
 
 
 def test_network_helper_kill_requires_instance_identity():
@@ -122,3 +122,4 @@ def test_main_has_no_dynamic_code_execution_or_shell_subprocesses():
                     if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value:
                         banned.append((node.lineno, full + " shell=True"))
     assert not banned
+

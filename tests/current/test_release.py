@@ -10,7 +10,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_current_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_zoom_normalization():
@@ -83,3 +83,4 @@ def test_github_repo_metadata_exists():
         ".github/workflows/ci.yml",
     ):
         assert (ROOT / relative).is_file(), relative
+

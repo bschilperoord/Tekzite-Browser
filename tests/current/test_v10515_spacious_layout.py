@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_spacious_defaults_are_the_new_baseline():
@@ -64,3 +64,4 @@ def test_spacious_padding_is_used_across_primary_chrome():
     assert 'outer = self._ui_padding(12)' in MAIN
     assert 'padx=(self._ui_padding(16), self._ui_padding(10))' in MAIN
     assert 'padx=self._ui_padding(14), pady=self._ui_padding(9)' in MAIN
+

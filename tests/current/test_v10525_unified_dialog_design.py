@@ -8,7 +8,7 @@ FEATURES = (ROOT / "browser_features.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_all_animated_toplevels_are_branded_by_default():
@@ -43,3 +43,4 @@ def test_shared_header_preserves_existing_dialog_body_height():
     assert "header_h = max(1, int(shell.winfo_reqheight()))" in block
     assert "current_h + header_h" in block
     assert "target_h > current_h" in block
+

@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_about_is_dedicated_toplevel_not_generic_message():
@@ -31,3 +31,4 @@ def test_about_actions_are_wired():
     assert 'command=self._check_for_updates' in block
     assert 'text="Close"' in block
     assert 'win.bind("<Escape>"' in block
+

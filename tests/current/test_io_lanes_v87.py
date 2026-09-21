@@ -6,7 +6,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_version_87():
-    assert 'BROWSER_VERSION = "10.5.32"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.33"' in MAIN
 
 
 def test_latency_sensitive_io_channels_are_warmed():
@@ -30,3 +30,4 @@ def test_scroll_isolated_and_coalesced():
     assert '_chromium_scroll_executor.submit' in wheel
     assert 'purpose="scroll"' in wheel
     assert '_submit_chromium_input' not in wheel
+

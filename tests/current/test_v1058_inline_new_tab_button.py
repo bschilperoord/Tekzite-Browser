@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_new_tab_button_belongs_to_tab_items_row():
@@ -28,3 +28,4 @@ def test_refresh_preserves_inline_button_and_places_it_after_tabs():
 
 def test_tab_items_still_expand_to_fill_unused_strip_space():
     assert 'self.tab_items.pack(side="left", fill="both", expand=True' in MAIN
+

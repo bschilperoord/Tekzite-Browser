@@ -12,7 +12,7 @@ FEATURES = (ROOT / "browser_features.py").read_text(encoding="utf-8")
 
 
 def test_release_version_1036():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_strict_python_loopback_is_on_by_default():
@@ -50,3 +50,4 @@ def test_local_ports_diagnostics_explains_ephemeral_source_ports():
     assert 'def _show_local_ports' in FEATURES
     assert 'temporary client/source ports' in FEATURES
     assert 'Recent blocked Python loopback attempts' in FEATURES
+

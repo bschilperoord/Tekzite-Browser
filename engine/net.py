@@ -21,6 +21,18 @@ from urllib.request import urlopen as _stdlib_urlopen
 from urllib.parse import urlsplit
 from loopback_policy import allow_loopback_port, revoke_loopback_port, snapshot as loopback_policy_snapshot
 
+# ctypes.wintypes does not expose HRESULT on every supported Python build
+# (notably some packaged Windows/Python combinations). HRESULT is always a
+# signed 32-bit LONG, so keep one stable local alias instead of depending on
+# that optional wintypes attribute at runtime.
+import ctypes as _ctypes
+try:
+    from ctypes import wintypes as _ctypes_wintypes
+    HRESULT = getattr(_ctypes_wintypes, "HRESULT", _ctypes.c_int32)
+except Exception:
+    HRESULT = _ctypes.c_int32
+
+
 
 _ORIGINAL_URLOPEN = urlopen
 
@@ -4704,7 +4716,7 @@ def _resize_existing_dwm_thumbnail_fast(session, width: int, height: int):
             ]
 
         dwmapi.DwmUpdateThumbnailProperties.argtypes = [HTHUMBNAIL, ctypes.POINTER(DWM_THUMBNAIL_PROPERTIES)]
-        dwmapi.DwmUpdateThumbnailProperties.restype = wintypes.HRESULT
+        dwmapi.DwmUpdateThumbnailProperties.restype = HRESULT
         DWM_TNP_RECTDESTINATION = 0x00000001
         DWM_TNP_RECTSOURCE = 0x00000002
         props = DWM_THUMBNAIL_PROPERTIES()
@@ -5128,13 +5140,13 @@ def _position_native_chromium_overlay(session, width: int, height: int):
             ]
 
         dwmapi.DwmRegisterThumbnail.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.POINTER(HTHUMBNAIL)]
-        dwmapi.DwmRegisterThumbnail.restype = wintypes.HRESULT
+        dwmapi.DwmRegisterThumbnail.restype = HRESULT
         dwmapi.DwmUpdateThumbnailProperties.argtypes = [HTHUMBNAIL, ctypes.POINTER(DWM_THUMBNAIL_PROPERTIES)]
-        dwmapi.DwmUpdateThumbnailProperties.restype = wintypes.HRESULT
+        dwmapi.DwmUpdateThumbnailProperties.restype = HRESULT
         dwmapi.DwmUnregisterThumbnail.argtypes = [HTHUMBNAIL]
-        dwmapi.DwmUnregisterThumbnail.restype = wintypes.HRESULT
+        dwmapi.DwmUnregisterThumbnail.restype = HRESULT
         dwmapi.DwmFlush.argtypes = []
-        dwmapi.DwmFlush.restype = wintypes.HRESULT
+        dwmapi.DwmFlush.restype = HRESULT
 
         old_thumb = session.get("dwm_thumbnail_handle")
         old_source = _hwnd_int(session.get("dwm_thumbnail_source") or 0)
@@ -5879,7 +5891,7 @@ def _pulse_tekzite_top_level_activation(session=None):
         try:
             dwmapi = ctypes.windll.dwmapi
             dwmapi.DwmFlush.argtypes = []
-            dwmapi.DwmFlush.restype = wintypes.HRESULT
+            dwmapi.DwmFlush.restype = HRESULT
             dwm_ok = (int(dwmapi.DwmFlush()) == 0)
         except Exception:
             dwm_ok = False
@@ -5986,7 +5998,7 @@ def _reapply_native_content_crop_after_activation(session=None):
         try:
             dwmapi = ctypes.windll.dwmapi
             dwmapi.DwmFlush.argtypes = []
-            dwmapi.DwmFlush.restype = wintypes.HRESULT
+            dwmapi.DwmFlush.restype = HRESULT
             dwm_ok = (int(dwmapi.DwmFlush()) == 0)
         except Exception:
             dwm_ok = False
@@ -7273,7 +7285,7 @@ def _close_embedded_chromium_unlocked(clear_profile=False):
                 from ctypes import wintypes
                 dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
                 dwmapi.DwmUnregisterThumbnail.argtypes = [wintypes.HANDLE]
-                dwmapi.DwmUnregisterThumbnail.restype = wintypes.HRESULT
+                dwmapi.DwmUnregisterThumbnail.restype = HRESULT
                 dwmapi.DwmUnregisterThumbnail(wintypes.HANDLE(_hwnd_int(thumb)))
             except Exception:
                 pass
@@ -7449,3 +7461,4 @@ def get_embedded_chromium_target_metrics(target_id: str, *, timeout: int = 3):
         if isinstance(item, dict) and item.get('name'):
             metrics[str(item['name'])] = item.get('value')
     return metrics
+

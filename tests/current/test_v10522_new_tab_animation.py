@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_new_tab_records_open_animation_after_initial_tab():
@@ -35,3 +35,4 @@ def test_animation_respects_global_motion_setting():
     block = MAIN[MAIN.index("def _animate_opening_tab_widget"):MAIN.index("def _draw_soft_tab")]
     assert "if not self._motion_enabled()" in block
     assert "self.root.after(12, frame)" in block
+

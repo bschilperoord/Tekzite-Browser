@@ -10,7 +10,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_soft_tab_close_runs_on_mouse_release_not_press():
@@ -67,3 +67,4 @@ def test_http_target_command_is_loopback_only_and_bounded(monkeypatch):
     assert net._devtools_target_http_command({"port": 9222}, "activate", "ABC/123", timeout=0.2)
     assert called["url"] == "http://127.0.0.1:9222/json/activate/ABC%2F123"
     assert called["timeout"] == 0.2
+

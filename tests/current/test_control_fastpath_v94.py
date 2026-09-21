@@ -5,7 +5,7 @@ NET = Path('engine/net.py').read_text(encoding='utf-8')
 
 
 def test_v94_version():
-    assert 'BROWSER_VERSION = "10.5.32"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.33"' in MAIN
 
 
 def test_browser_level_cdp_is_persistent():
@@ -28,3 +28,4 @@ def test_bootstrap_skips_unneeded_page_socket_and_default_zoom():
     assert 'bootstrap_socket_skipped' in block
     assert 'if inherited_zoom != 100' in block
     assert 'target_zoom_bootstrap_skipped_default' in block
+

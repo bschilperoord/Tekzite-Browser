@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_dwm_host_is_layered_and_alpha_driven():
@@ -31,3 +31,4 @@ def test_initial_dwm_reveal_starts_transparent_then_turns_opaque():
 def test_geometry_sync_preserves_transparent_reveal_guard():
     block = MAIN[MAIN.index("def _schedule_dwm_geometry_sync"):MAIN.index("def _hide_dwm_host")]
     assert "transparent=bool(self._dwm_reveal_pending)" in block
+

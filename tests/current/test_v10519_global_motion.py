@@ -8,7 +8,7 @@ FEATURES = (ROOT / 'browser_features.py').read_text(encoding='utf-8')
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == '10.5.32'
+    assert main.BROWSER_VERSION == '10.5.33'
 
 
 def test_app_owned_toplevels_use_shared_motion_factory():
@@ -53,3 +53,4 @@ def test_standard_controls_share_motion_bindings():
     assert 'bind_class("Button", "<ButtonPress-1>"' in block
     assert 'bind_class("Entry", "<FocusIn>"' in block
     assert '_animate_widget_color' in block
+

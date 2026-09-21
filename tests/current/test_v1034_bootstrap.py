@@ -15,7 +15,7 @@ def _page(target_id, url):
 
 
 def test_release_is_v1034():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_cold_native_start_always_uses_blank_bootstrap():
@@ -70,3 +70,4 @@ def test_bootstrap_claims_single_canonicalized_page_instead_of_creating_second_t
     page_call.assert_called_once()
     assert page_call.call_args.args[1] == "Page.navigate"
     assert page_call.call_args.args[2] == {"url": "about:blank"}
+

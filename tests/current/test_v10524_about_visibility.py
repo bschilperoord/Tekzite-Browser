@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_animated_toplevel_does_not_start_from_idle_layout_pass():
@@ -35,3 +35,4 @@ def test_existing_about_is_raised_not_duplicated():
     block = MAIN[MAIN.index("def _show_about"):MAIN.index("def navigate(self)")]
     assert 'getattr(self, "_about_window", None)' in block
     assert "self._raise_toplevel_above_dwm(existing" in block
+

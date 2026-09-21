@@ -13,4 +13,5 @@ Tekzite Browser installer
    & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" ".\installer\TekziteBrowser.iss"
 
 Installer output:
-   installer-dist\Tekzite-Browser-Setup-10.5.32.exe
+   installer-dist\Tekzite-Browser-Setup-10.5.33.exe
+

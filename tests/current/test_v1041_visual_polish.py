@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_is_v1041():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_visual_polish_defaults_use_aurora_preset():
@@ -28,3 +28,4 @@ def test_visual_polish_code_paths_exist():
         'self.tab_bar = tk.Frame(self.root, bg=self.ui["chrome"]',
     ):
         assert token in MAIN
+

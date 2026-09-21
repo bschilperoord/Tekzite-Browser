@@ -6,7 +6,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version_1053():
-    assert 'BROWSER_VERSION = "10.5.32"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.33"' in MAIN
 
 
 def test_dwm_crop_no_longer_rejects_normal_browser_chrome_above_160px():
@@ -29,3 +29,4 @@ def test_dwm_crop_limit_preserves_minimum_page_surface():
     assert 181 <= limit(714)
     assert limit(300) == 160
     assert limit(1080) == 360
+

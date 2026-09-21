@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_wider_tab_defaults():
@@ -32,3 +32,4 @@ def test_tab_width_customization_is_exposed_and_normalized():
     normalized = main._normalized_customization({"tab_min_width": 260, "tab_max_width": 180})
     assert normalized["tab_min_width"] == 260
     assert normalized["tab_max_width"] == 260
+

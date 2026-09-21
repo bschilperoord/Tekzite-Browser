@@ -6,7 +6,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert 'BROWSER_VERSION = "10.5.32"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.33"' in MAIN
 
 
 def test_dwm_mapping_uses_live_native_to_css_scale():
@@ -42,3 +42,4 @@ def test_browser_zoom_does_not_get_double_applied():
     end = NET.index("def dispatch_embedded_chromium_mouse", start)
     block = NET[start:end]
     assert "Browser zoom is already represented in devicePixelRatio" in block
+

@@ -8,7 +8,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version_1021():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_standard_browser_toolbar_controls_are_present():
@@ -53,3 +53,4 @@ def test_stop_loading_uses_cdp_page_stop_loading(monkeypatch):
     assert net.stop_embedded_chromium_loading(target_id='tab-1', timeout=1.0) is True
     assert calls[0][0] == 'Page.stopLoading'
     assert calls[0][2]['target_id'] == 'tab-1'
+

@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_closed_target_destruction_is_debounced_away_from_plus_click():
@@ -46,3 +46,4 @@ def test_homepage_new_tab_paints_before_navigation():
     block = MAIN[MAIN.index("def _new_tab(self"):MAIN.index("def _capture_active_tab_state")]
     assert "open_homepage_if_still_current" in block
     assert "self.root.after(16 if self._motion_enabled() else 1" in block
+

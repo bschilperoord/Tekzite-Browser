@@ -13,7 +13,7 @@ EXT = (ROOT / 'chromium_zoom_extension' / 'features.js').read_text(encoding='utf
 
 
 def test_release_is_v1020():
-    assert main.BROWSER_VERSION == '10.5.32'
+    assert main.BROWSER_VERSION == '10.5.33'
 
 
 def test_profile_slug_and_state_root_are_isolated(tmp_path, monkeypatch):
@@ -99,3 +99,4 @@ def test_permission_helper_uses_browser_set_permission(monkeypatch):
     monkeypatch.setattr(net, '_browser_cdp_call', lambda sess, method, params=None, **kw: calls.append((method, params)) or {})
     assert net.set_embedded_chromium_permission('https://example.test', 'geolocation', 'denied') is True
     assert calls == [('Browser.setPermission', {'permission': {'name': 'geolocation'}, 'setting': 'denied', 'origin': 'https://example.test'})]
+

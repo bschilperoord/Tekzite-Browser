@@ -5,7 +5,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_version_84():
-    assert 'BROWSER_VERSION = "10.5.32"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.33"' in MAIN
 
 
 def test_hover_has_separate_executor():
@@ -34,3 +34,4 @@ def test_rich_tab_context_menu_present():
 
 def test_selected_text_search_present():
     assert 'Search Selected Text' in MAIN
+

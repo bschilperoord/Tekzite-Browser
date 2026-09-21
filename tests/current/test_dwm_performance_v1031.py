@@ -6,7 +6,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version_1031():
-    assert 'BROWSER_VERSION = "10.5.32"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.33"' in MAIN
 
 
 def test_steady_state_dwm_resize_has_fast_path_without_flush():
@@ -45,3 +45,4 @@ def test_dwm_move_only_geometry_uses_swp_nosize():
     block = MAIN[MAIN.index("def _sync_dwm_host_geometry"):MAIN.index("def _schedule_dwm_geometry_sync")]
     assert "same_size" in block
     assert "flags |= SWP_NOSIZE" in block
+

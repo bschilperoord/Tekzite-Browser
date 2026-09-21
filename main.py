@@ -454,7 +454,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.32"
+BROWSER_VERSION = "10.5.33"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -9755,3 +9755,4 @@ class BrowserApp(BrowserFeatures):
 
 if __name__ == "__main__":
     BrowserApp().run()
+

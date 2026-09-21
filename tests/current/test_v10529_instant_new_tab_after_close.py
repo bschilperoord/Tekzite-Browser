@@ -8,7 +8,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_new_tab_preempts_pending_tab_switch_before_selection():
@@ -47,3 +47,4 @@ def test_no_pending_switch_is_a_noop():
     app._tab_switch_future = None
     assert app._cancel_pending_tab_switch() is False
     assert app._tab_switch_serial == 7
+

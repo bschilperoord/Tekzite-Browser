@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_animated_popup_menu_replaces_native_popup_primitive():
@@ -44,3 +44,4 @@ def test_menu_bar_buttons_have_pressed_and_selected_feedback():
     popup = MAIN[MAIN.index("def _popup_menu_below"):MAIN.index("def _show_address_context_menu")]
     assert "button.set_selected(True)" in popup
     assert "menu._anchor_button = button" in popup
+

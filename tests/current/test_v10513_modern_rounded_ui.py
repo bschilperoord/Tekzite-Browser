@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_modern_corner_defaults_and_bounds_exist():
@@ -68,3 +68,4 @@ def test_corner_radius_controls_are_exposed_in_customize_dialog():
     assert 'custom["window_corner_radius"] = int_value(window_radius_var, 24)' in MAIN
     assert 'custom["content_corner_radius"] = int_value(content_radius_var, 18)' in MAIN
     assert 'custom["control_corner_radius"] = int_value(control_radius_var, 16)' in MAIN
+

@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_all_animated_toplevels_hide_native_title_bar():
@@ -35,3 +35,4 @@ def test_about_uses_same_frameless_header_controls():
     block = MAIN[MAIN.index("def _show_about"):MAIN.index("def navigate(")]
     assert 'text="×", command=win.destroy' in block
     assert "self._bind_frameless_dialog_drag(" in block
+

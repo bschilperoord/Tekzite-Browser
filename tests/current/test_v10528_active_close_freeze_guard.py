@@ -8,7 +8,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_active_close_keeps_dwm_mounted_during_immediate_ui_selection():
@@ -40,3 +40,4 @@ def test_activation_budget_is_short_and_bounded():
     assert "_start_persistent_chromium_session(timeout=3.0)" in block
     assert "timeout=0.35" in block
     assert "timeout=0.45" in block
+

@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_modern_menu_factory_is_shared():
@@ -36,3 +36,4 @@ def test_theme_refresh_keeps_menu_palette_modern():
     assert 'browser_menu.configure(' in MAIN
     assert 'activebackground=self.ui["field_focus"]' in MAIN
     assert 'button.set_palette(' in MAIN
+

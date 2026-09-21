@@ -9,7 +9,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_active_close_does_not_call_switch_inline():
@@ -56,3 +56,4 @@ def test_closed_target_retirement_waits_while_target_is_visible():
 def test_native_canvas_marks_presentation_target_detached():
     block = MAIN[MAIN.index("def _show_native_canvas"):MAIN.index("def _use_chromium_software_surface_for_url")]
     assert "self._chromium_frame_target_id = None" in block
+

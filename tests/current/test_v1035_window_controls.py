@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version_1035():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_window_controls_are_custom_canvases_with_roles():
@@ -27,3 +27,4 @@ def test_maximize_toggle_refreshes_window_control_icon_state():
     block = MAIN[MAIN.index('def _toggle_maximize'):MAIN.index('def _minimize_window')]
     assert 'self._refresh_window_controls()' in block
     assert 'if self._window_maximized:' in block
+

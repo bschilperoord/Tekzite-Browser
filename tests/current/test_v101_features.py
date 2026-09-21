@@ -12,7 +12,7 @@ NET = (ROOT / 'engine' / 'net.py').read_text(encoding='utf-8')
 
 
 def test_v101_release_number():
-    assert main.BROWSER_VERSION == '10.5.32'
+    assert main.BROWSER_VERSION == '10.5.33'
 
 
 def test_extension_entries_are_normalized_and_deduplicated(tmp_path):
@@ -65,3 +65,4 @@ def test_extension_manager_and_private_window_are_wired_to_ui():
     assert 'Extension Manager' in MAIN
     assert 'Site Info & Privacy' in MAIN
     assert 'Add unpacked…' in FEATURES
+

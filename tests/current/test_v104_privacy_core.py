@@ -13,7 +13,7 @@ HELPER = (ROOT / "tekzite_network.py").read_text(encoding="utf-8")
 
 
 def test_v104_defaults_are_privacy_lockdown():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
     assert main.DEFAULT_PREFERENCES["privacy_lockdown"] is True
     assert main.DEFAULT_PREFERENCES["tracker_blocking_enabled"] is True
     assert main.DEFAULT_PREFERENCES["strip_tracking_parameters"] is True
@@ -101,3 +101,4 @@ def test_lockdown_uses_temporary_chromium_profile_and_disables_user_extensions()
     assert 'tempfile.mkdtemp(prefix=f"Tekzite-Privacy-{os.getpid()}-")' in MAIN
     assert 'user_extension_paths = [] if self.preferences.get("privacy_lockdown", True)' in MAIN
     assert 'or self.preferences.get("privacy_lockdown", True)' in MAIN
+

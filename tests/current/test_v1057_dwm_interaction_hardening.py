@@ -8,7 +8,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_click_count_progresses_and_resets():
@@ -68,3 +68,4 @@ def test_altgr_printable_text_uses_insert_text():
     assert "altgr_text" in block
     assert "control and alt" in block
     assert 'event_type="insertText"' in block
+

@@ -1,3 +1,12 @@
+# Tekzite Browser v10.5.33
+
+## Windows packaged-build HRESULT compatibility
+
+- Fixes the Windows packaged executable failing to load pages with AttributeError: module 'ctypes.wintypes' has no attribute 'HRESULT'.
+- Uses a stable signed 32-bit HRESULT compatibility alias when ctypes.wintypes.HRESULT is unavailable.
+- Applies the alias to DWM thumbnail register/update/unregister/flush calls.
+- Preserves the v10.5.32 close-then-new-tab latency behavior.
+
 # Tekzite Browser v10.5.32
 
 ## Close then new-tab latency fix
@@ -857,3 +866,4 @@ v5.24 makes the first native Chromium tab a true direct-app launch. Chromium sta
 - Reduced DWM destination tracking to roughly 60 Hz while an interactive drag is active, with an immediate exact sync on release.
 - Pure top-level moves continue to avoid Chromium viewport resize work entirely.
 - Added drag-performance regression coverage.
+

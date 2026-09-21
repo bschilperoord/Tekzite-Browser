@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_omnibox_preview_uses_supersampled_canvas():
@@ -26,3 +26,4 @@ def test_omnibox_preview_still_uses_real_entry_photo_swap():
     block = MAIN[MAIN.index("def _render_address_preview"):MAIN.index("def _activate_address_preview")]
     assert 'self._address_preview_photo = photo' in block
     assert 'preview.create_image(0, 0, image=photo, anchor="nw")' in block
+

@@ -1,0 +1,9 @@
+Tekzite Browser v10.5.33 validation
+
+Focus: Windows packaged-build HRESULT compatibility.
+
+Checks
+- engine/net.py no longer references wintypes.HRESULT.
+- HRESULT is represented as signed 32-bit when ctypes.wintypes lacks the alias.
+- DWM register/update/unregister/flush restypes use the compatibility alias.
+- Existing DWM and browser tests continue to pass.

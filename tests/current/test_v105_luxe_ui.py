@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_is_v1050():
-    assert main.BROWSER_VERSION == "10.5.32"
+    assert main.BROWSER_VERSION == "10.5.33"
 
 
 def test_luxe_defaults_enable_soft_tabs_and_traffic_lights():
@@ -49,3 +49,4 @@ def test_luxe_styles_normalize_safely():
     custom = main._normalized_customization({"window_control_style": "bad", "tab_style": "bad"})
     assert custom["window_control_style"] == "traffic_lights"
     assert custom["tab_style"] == "soft"
+

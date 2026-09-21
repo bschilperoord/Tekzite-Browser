@@ -2,7 +2,7 @@
 
 Tekzite Browser is an experimental Windows desktop browser shell built in Python/Tk around a real Chromium renderer. Tekzite keeps its own tabs, omnibox, menus, preferences and interaction layer while Chromium handles web standards, JavaScript, media, cookies, canvas, WebGL and page rendering.
 
-> **Current release:** v10.5.32 UltraSpeed for Windows  
+> **Current release:** v10.5.33 UltraSpeed for Windows  
 > **Platform:** Windows 10/11  
 > **Status:** experimental, actively developed
 
@@ -512,3 +512,4 @@ Restores direct startup at the requested page instead of forcing about:blank fir
 The proxy fallback stays active until extension configuration succeeds. Reload an initially opened exempt site after services initialize to apply its exception to requests blocked during startup. New services remain available after startup; no feature is removed.
 
 Extract into a fresh folder and rebuild with build_windows.ps1. Windows rendering must still be checked on the target PC.
+
