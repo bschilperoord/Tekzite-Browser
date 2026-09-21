@@ -1,0 +1,6 @@
+Tekzite Browser v10.5.38 validation
+
+- DWM destination rectangle is the authoritative Chromium viewport during resize.
+- Root Configure events request resize reconciliation, while pure moves still no-op through viewport comparison.
+- Maximize/restore performs an immediate and delayed final DWM resize pass.
+- Prevents the old-size Chromium thumbnail from occupying only part of an enlarged Tekzite client area.

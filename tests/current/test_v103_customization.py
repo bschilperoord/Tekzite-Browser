@@ -8,7 +8,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_is_v1030():
-    assert main.BROWSER_VERSION == "10.5.33"
+    assert main.BROWSER_VERSION == "10.5.38"
 
 
 def test_customization_defaults_cover_every_palette_role():

@@ -1,0 +1,6 @@
+Tekzite Browser v10.5.37 validation
+
+- Settings uses one authoritative final_geometry string.
+- Settings target height is 88% of Tk screen height, capped at 1120 px.
+- Final geometry is reasserted after map/open animation to prevent first-map size drift.
+- Scrollbar and fixed Save/Cancel footer remain enabled.

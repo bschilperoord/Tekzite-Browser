@@ -1,3 +1,39 @@
+# Tekzite Browser v10.5.38
+
+## Deterministic DWM viewport resizing
+
+- Treats the committed DWM destination rectangle as the authoritative Chromium viewport during window resize.
+- Fixes maximize/restore/snap cases where the DWM popup grew before Tk's `edge_host`, leaving Chromium at the old size and exposing a large white remainder.
+- Root Configure events now request resize reconciliation; pure window moves remain cheap because unchanged viewport sizes are filtered before Chromium is touched.
+- Adds an immediate and delayed maximize/restore reconciliation pass to catch Windows/Tk layout settling without continuous resize spam.
+
+# Tekzite Browser v10.5.37
+
+## Deterministic Settings sizing
+
+- Replaces competing Settings sizing paths with one authoritative Tk-screen-space geometry calculation.
+- Opens Settings at a stable large height (88% of the Tk screen, capped at 1120 px) instead of deriving height from timing-sensitive widget/window measurements.
+- Centers over the browser but clamps the frameless dialog to the visible Tk screen.
+- Re-applies the exact final geometry immediately after mapping and after the opening animation so Windows first-map/DPI negotiation cannot leave the dialog shorter on some opens.
+- Keeps the vertical scrollbar, mouse-wheel scrolling and pinned Save/Cancel footer.
+
+# Tekzite Browser v10.5.36
+
+## Full-height Settings dialog fix
+
+- Sizes Settings in Tk's own coordinate space relative to the main browser window, avoiding mixed-DPI Win32/Tk work-area mismatches that could collapse the dialog to roughly half-height.
+- Raises the preferred Settings height to 1120 px and lets it use nearly the full visible browser height with a small vertical margin.
+- Applies the shared Tekzite dialog header before final sizing and delays the opening animation until the final geometry is locked.
+- Keeps the vertical scrollbar, mouse-wheel scrolling and pinned Save/Cancel footer.
+
+# Tekzite Browser v10.5.35
+
+## Extra-tall Settings dialog
+
+- Raises the preferred Settings height from 860 px to 1000 px.
+- Raises the scrollable Settings canvas height so substantially more controls are visible at once.
+- Keeps monitor work-area clamping, the vertical scrollbar, mouse-wheel scrolling and pinned Save/Cancel footer intact.
+
 # Tekzite Browser v10.5.33
 
 ## Windows packaged-build HRESULT compatibility

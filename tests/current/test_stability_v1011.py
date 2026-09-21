@@ -8,7 +8,7 @@ from engine import net
 
 
 def test_release_is_v1011():
-    assert main.BROWSER_VERSION == '10.5.33'
+    assert main.BROWSER_VERSION == '10.5.38'
 
 
 def test_chromium_bootstrap_is_serialized():
@@ -121,11 +121,11 @@ def test_failed_tab_activation_reloads_instead_of_leaving_dead_tab():
 
 def test_windows_and_extension_version_metadata_match_release():
     root = Path(main.__file__).resolve().parent
-    assert 'version="10.5.33.0"' in (root / 'tekzite_browser.manifest').read_text(encoding='utf-8')
+    assert 'version="10.5.38.0"' in (root / 'tekzite_browser.manifest').read_text(encoding='utf-8')
     import json
     extension = json.loads((root / 'chromium_zoom_extension' / 'manifest.json').read_text(encoding='utf-8'))
-    assert extension['version'] == '10.5.33'
+    assert extension['version'] == '10.5.38'
     info = (root / 'tekzite_version_info.txt').read_text(encoding='utf-8')
-    assert 'filevers=(10, 5, 8, 0)' in info
-    assert "u'ProductVersion', u'10.5.33'" in info
+    assert 'filevers=(10, 5, 38, 0)' in info
+    assert "u'ProductVersion', u'10.5.38'" in info
 

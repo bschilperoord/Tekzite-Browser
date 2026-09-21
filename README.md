@@ -2,7 +2,7 @@
 
 Tekzite Browser is an experimental Windows desktop browser shell built in Python/Tk around a real Chromium renderer. Tekzite keeps its own tabs, omnibox, menus, preferences and interaction layer while Chromium handles web standards, JavaScript, media, cookies, canvas, WebGL and page rendering.
 
-> **Current release:** v10.5.33 UltraSpeed for Windows  
+> **Current release:** v10.5.38 UltraSpeed for Windows  
 > **Platform:** Windows 10/11  
 > **Status:** experimental, actively developed
 
@@ -214,6 +214,17 @@ Bookmarks and session addresses are stored locally alongside preferences, separa
 Build on Windows with `powershell -ExecutionPolicy Bypass -File .\build_windows.ps1`, or run `python main.py` after installing requirements.
 
 
+
+## New in v10.5.38
+
+- Makes the DWM destination rectangle the authoritative Chromium viewport during window resizing.
+- Fixes maximize/restore/snap cases where Chromium could remain at the old size while Tekzite had already grown, leaving a large white area beside or below the page.
+- Reconciles DWM size on every non-drag root Configure event while filtering pure moves through the existing viewport cache.
+- Adds a final delayed resize pass after maximize/restore so Windows and Tk layout settling cannot leave the DWM surface stale.
+
+## New in v10.5.37
+
+- Makes Settings sizing deterministic in Tk coordinate space and keeps its scrollable body with a pinned Save/Cancel footer.
 
 ## New in v10.5.32
 

@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.33"
+    assert main.BROWSER_VERSION == "10.5.38"
 
 
 def test_dwm_host_is_layered_and_alpha_driven():

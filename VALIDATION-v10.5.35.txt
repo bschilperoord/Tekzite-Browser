@@ -1,0 +1,7 @@
+Tekzite Browser v10.5.35 validation
+
+- Settings body uses a vertical scrolling canvas.
+- Mouse-wheel input scrolls the Settings body.
+- Save/Cancel stay fixed outside the scrollable content.
+- Preferred Settings height increased to 1000 px with monitor work-area clamping.
+- Python source compiles and current regression suite passes.

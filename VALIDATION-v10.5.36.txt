@@ -1,0 +1,13 @@
+Tekzite Browser v10.5.36 validation
+
+Change:
+- Fixed Settings height collapsing on mixed/high-DPI Windows layouts.
+- Settings now sizes in Tk coordinates relative to the main Tekzite window.
+- Preferred Settings height increased to 1120 px, clamped to nearly the full browser height.
+- Shared dialog header is applied before final sizing.
+- Settings opening animation waits until final geometry is locked.
+- Vertical scrollbar, mouse-wheel support and fixed Save/Cancel footer retained.
+
+Validation:
+- python -m py_compile main.py browser_features.py: PASS
+- PYTHONPATH=. pytest -q tests/current: PASS (100%)

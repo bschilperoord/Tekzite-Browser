@@ -454,7 +454,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.33"
+BROWSER_VERSION = "10.5.38"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -1502,6 +1502,7 @@ class BrowserApp(BrowserFeatures):
         self._dwm_geometry_after_id = None
         self._dwm_pending_resize = False
         self._dwm_last_chromium_viewport = None
+        self._dwm_last_root_configure_size = None
         # v10.5.4: DWM thumbnails are visual mirrors, not native Chromium input
         # surfaces.  Keep a tiny Win32 pointer watchdog as an insurance layer
         # behind Tk's normal hit-transparent edge_host bindings.  If Windows
@@ -2448,7 +2449,7 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             return False
 
-    def _new_animated_toplevel(self, parent=None, *, duration=165, slide=14, branded=True):
+    def _new_animated_toplevel(self, parent=None, *, duration=165, slide=14, branded=True, auto_animate=True):
         """Create an app-owned Toplevel with automatic open/close motion.
 
         The destroy method is wrapped immediately, before callers wire buttons,
@@ -2489,13 +2490,19 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             pass
         win._tekzite_branded_dialog = bool(branded)
+        win._tekzite_auto_animate = bool(auto_animate)
         def prepare_dialog(w=win):
             try:
                 if not w.winfo_exists():
                     return
                 if getattr(w, "_tekzite_branded_dialog", False):
                     self._apply_about_style_to_dialog(w)
-                self._animate_toplevel_in(w, duration=duration, slide=slide)
+                # Some dialogs, notably Settings, need to finish a custom
+                # monitor/root-relative layout before motion captures geometry.
+                # They opt out here and start the same animation themselves once
+                # their final size is locked.
+                if getattr(w, "_tekzite_auto_animate", True):
+                    self._animate_toplevel_in(w, duration=duration, slide=slide)
             except Exception:
                 pass
         try:
@@ -4703,14 +4710,25 @@ class BrowserApp(BrowserFeatures):
             self._dwm_geometry_after_id = None
             do_resize = bool(self._dwm_pending_resize)
             self._dwm_pending_resize = False
-            self._sync_dwm_host_geometry(show=True, transparent=bool(self._dwm_reveal_pending))
+            # v10.5.38: the DWM popup rectangle is the authoritative visible
+            # viewport.  During maximize/restore Tk can resize content_frame one
+            # layout pass before edge_host, so reading edge_host here could keep
+            # the DWM thumbnail at the old size while its destination HWND had
+            # already grown, exposing a large white remainder.  Resize Chromium
+            # from the exact host rectangle we just committed instead.
+            host_size = self._sync_dwm_host_geometry(
+                show=True, transparent=bool(self._dwm_reveal_pending)
+            )
             if do_resize:
                 try:
-                    w = max(1, int(self.edge_host.winfo_width()))
-                    h = max(1, int(self.edge_host.winfo_height()))
-                    viewport = (w, h)
+                    if host_size is not None:
+                        w, h = map(int, host_size)
+                    else:
+                        w = max(1, int(self.content_frame.winfo_width()))
+                        h = max(1, int(self.content_frame.winfo_height()))
+                    viewport = (max(1, w), max(1, h))
                     if viewport != self._dwm_last_chromium_viewport:
-                        resize_embedded_chromium(w, h)
+                        resize_embedded_chromium(*viewport)
                         self._dwm_last_chromium_viewport = viewport
                 except Exception:
                     pass
@@ -6368,9 +6386,20 @@ class BrowserApp(BrowserFeatures):
                 # resulting Tk Configure notification.
                 if self._window_drag_active and self._native_drag_dwm_offset is not None:
                     return
-                # A pure top-level move does not resize Chromium. Only slide the
-                # transparent DWM destination along with Tekzite.
-                self._schedule_dwm_geometry_sync(resize=False, delay=8)
+                # v10.5.38: distinguish a pure move from a real top-level size
+                # change.  Tk emits <Configure> for both.  Moves keep the cheap
+                # destination-only path; maximize/restore/snap explicitly request
+                # a Chromium/DWM viewport reconciliation.
+                root_size = (
+                    max(1, int(getattr(event, "width", self.root.winfo_width()))),
+                    max(1, int(getattr(event, "height", self.root.winfo_height()))),
+                )
+                size_changed = root_size != self._dwm_last_root_configure_size
+                self._dwm_last_root_configure_size = root_size
+                if size_changed:
+                    self._schedule_dwm_geometry_sync(resize=True, delay=8)
+                else:
+                    self._schedule_dwm_geometry_sync(resize=False, delay=8)
                 return
             self.root.after_idle(
                 lambda: resize_embedded_chromium(
@@ -7423,7 +7452,10 @@ class BrowserApp(BrowserFeatures):
         self._dwm_host_region_signature = None
         self.root.after_idle(self._apply_window_rounding)
         if self._embedded_mode and self._chromium_dwm_mode:
-            self.root.after_idle(lambda: self._schedule_dwm_geometry_sync(resize=False, delay=1))
+            # v10.5.38: maximizing/restoring changes the DWM viewport.  Reconcile
+            # immediately and once more after Tk has finished packing children.
+            self.root.after_idle(lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
+            self.root.after(70, lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
 
     def _minimize_window(self):
         # Tk cannot iconify an override-redirect window directly on Windows.
@@ -7451,7 +7483,10 @@ class BrowserApp(BrowserFeatures):
         self._dwm_host_region_signature = None
         self.root.after_idle(self._apply_window_rounding)
         if self._embedded_mode and self._chromium_dwm_mode:
-            self.root.after_idle(lambda: self._schedule_dwm_geometry_sync(resize=False, delay=1))
+            # v10.5.38: maximizing/restoring changes the DWM viewport.  Reconcile
+            # immediately and once more after Tk has finished packing children.
+            self.root.after_idle(lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
+            self.root.after(70, lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
 
     def _spawn_browser_process(self, *, private=False, profile=None):
         if getattr(sys, "frozen", False):
@@ -8726,7 +8761,11 @@ class BrowserApp(BrowserFeatures):
         return "break"
 
     def show_preferences(self):
-        win = self._new_animated_toplevel(self.root)
+        # Settings owns its final geometry because it intentionally occupies most
+        # of the browser height. Delay automatic motion until that geometry is
+        # established, otherwise the generic dialog animation can capture the
+        # small requested widget size before the tall layout is applied.
+        win = self._new_animated_toplevel(self.root, auto_animate=False)
         win.title(f"Tekzite Browser Settings — v{BROWSER_VERSION}")
         dialog_width = 620
         win.configure(bg=self.ui["bg"])
@@ -8739,10 +8778,70 @@ class BrowserApp(BrowserFeatures):
         # Do not grab/focus the withdrawn shell. v6.8 shows, raises and
         # focuses the completed dialog only after its final geometry is known.
 
-        outer = tk.Frame(win, bg=self.ui["bg"], padx=22, pady=18)
-        outer.pack(fill="both", expand=True)
-        tk.Label(outer, text="Customize Tekzite without editing configuration files.", fg=self.ui["muted"],
-                 bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(0, 18))
+        # v10.5.38: Settings uses a fixed shell with a scrollable body. The
+        # options can grow without forcing the whole dialog off-screen, while
+        # Save/Cancel remain visible at the bottom at all times.
+        shell = tk.Frame(win, bg=self.ui["bg"], padx=22, pady=18)
+        shell.pack(fill="both", expand=True)
+        tk.Label(shell, text="Customize Tekzite without editing configuration files.", fg=self.ui["muted"],
+                 bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(0, 12))
+
+        scroll_host = tk.Frame(shell, bg=self.ui["bg"])
+        scroll_host.pack(fill="both", expand=True)
+        settings_canvas = tk.Canvas(
+            scroll_host, bg=self.ui["bg"], highlightthickness=0, bd=0,
+            width=max(520, dialog_width - 70), height=980,
+        )
+        settings_scrollbar = tk.Scrollbar(
+            scroll_host, orient="vertical", command=settings_canvas.yview,
+            bg=self.ui["chrome_2"], activebackground=self.ui["accent"],
+            troughcolor=self.ui["bg"], relief="flat", bd=0, width=12,
+        )
+        settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
+        settings_scrollbar.pack(side="right", fill="y", padx=(10, 0))
+        settings_canvas.pack(side="left", fill="both", expand=True)
+
+        outer = tk.Frame(settings_canvas, bg=self.ui["bg"])
+        settings_window = settings_canvas.create_window((0, 0), window=outer, anchor="nw")
+
+        def sync_settings_scrollregion(_event=None):
+            try:
+                settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
+            except Exception:
+                pass
+
+        def fit_settings_body(event=None):
+            try:
+                width = int(event.width) if event is not None else int(settings_canvas.winfo_width())
+                settings_canvas.itemconfigure(settings_window, width=max(1, width))
+                settings_canvas.after_idle(sync_settings_scrollregion)
+            except Exception:
+                pass
+
+        def scroll_settings(event):
+            try:
+                bbox = settings_canvas.bbox("all")
+                if not bbox or (bbox[3] - bbox[1]) <= settings_canvas.winfo_height():
+                    return None
+                delta = int(getattr(event, "delta", 0) or 0)
+                if delta:
+                    units = -int(delta / 120)
+                    if units == 0:
+                        units = -1 if delta > 0 else 1
+                    settings_canvas.yview_scroll(units * 3, "units")
+                elif int(getattr(event, "num", 0) or 0) == 4:
+                    settings_canvas.yview_scroll(-3, "units")
+                elif int(getattr(event, "num", 0) or 0) == 5:
+                    settings_canvas.yview_scroll(3, "units")
+                return "break"
+            except Exception:
+                return None
+
+        outer.bind("<Configure>", sync_settings_scrollregion, add="+")
+        settings_canvas.bind("<Configure>", fit_settings_body, add="+")
+        win.bind("<MouseWheel>", scroll_settings, add="+")
+        win.bind("<Button-4>", scroll_settings, add="+")
+        win.bind("<Button-5>", scroll_settings, add="+")
 
         homepage = tk.StringVar(value=getattr(self, "preferences", DEFAULT_PREFERENCES).get("homepage", START_URL))
         startup = tk.StringVar(value=getattr(self, "preferences", DEFAULT_PREFERENCES).get("startup", "homepage"))
@@ -8885,8 +8984,8 @@ class BrowserApp(BrowserFeatures):
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
 
-        buttons = tk.Frame(outer, bg=self.ui["bg"])
-        buttons.pack(side="bottom", fill="x", pady=(18, 0))
+        buttons = tk.Frame(shell, bg=self.ui["bg"])
+        buttons.pack(fill="x", pady=(14, 0))
         def save_and_close():
             selected_zoom = _normalized_zoom_percent(page_zoom.get(), original_zoom)
             self.preferences.update({
@@ -8949,58 +9048,73 @@ class BrowserApp(BrowserFeatures):
         tk.Button(buttons, text="Save", command=save_and_close, bg=self.ui["accent"], fg="#ffffff",
                   relief="flat", padx=20, pady=7).pack(side="right", padx=(0, 8))
         def fit_and_center_preferences():
-            # Always leave this function with a usable visible dialog. Monitor
-            # discovery is optional; sizing the completed content is not.
-            margin = 12
+            # v10.5.38: Settings has one authoritative geometry calculation.
+            # Use Tk screen coordinates for both sizing and placement, then
+            # re-assert the exact same geometry after the frameless window maps.
+            # This avoids size drift from DPI conversion, header insertion and
+            # Windows' first-map negotiation racing each other.
             try:
+                self._apply_about_style_to_dialog(win)
                 win.update_idletasks()
-                requested_w = max(dialog_width, int(outer.winfo_reqwidth()) + 2)
-                requested_h = max(320, int(outer.winfo_reqheight()) + 2)
-            except Exception:
-                requested_w, requested_h = dialog_width, 720
 
-            try:
-                work = self._monitor_work_area_for_window(self.root)
-            except Exception:
-                work = None
+                screen_w = max(1, int(win.winfo_screenwidth()))
+                screen_h = max(1, int(win.winfo_screenheight()))
+                root_x = int(self.root.winfo_rootx())
+                root_y = int(self.root.winfo_rooty())
+                root_w = max(1, int(self.root.winfo_width()))
+                root_h = max(1, int(self.root.winfo_height()))
 
-            if work:
-                left, top, right, bottom = work
-            else:
+                requested_w = max(dialog_width, int(shell.winfo_reqwidth()) + 2)
+                # Keep a predictable large footprint on every open. 88% leaves
+                # breathing room around the frameless shell while 1120 remains
+                # the cap on tall displays.
+                requested_h = min(1120, max(720, int(round(screen_h * 0.88))))
+                dialog_w = min(requested_w, max(560, screen_w - 64))
+                dialog_h = min(requested_h, max(620, screen_h - 64))
+
+                # Prefer centering over the browser, but clamp the final box to
+                # the Tk screen so a partly off-screen browser cannot drag the
+                # Settings dialog outside the visible desktop.
+                if root_w < 320 or root_h < 240:
+                    center_x = screen_w // 2
+                    center_y = screen_h // 2
+                else:
+                    center_x = root_x + root_w // 2
+                    center_y = root_y + root_h // 2
+                x = max(16, min(center_x - dialog_w // 2, screen_w - dialog_w - 16))
+                y = max(16, min(center_y - dialog_h // 2, screen_h - dialog_h - 16))
+            except Exception:
+                dialog_w, dialog_h = dialog_width, 820
+                x, y = 40, 40
+
+            final_geometry = f"{dialog_w}x{dialog_h}+{x}+{y}"
+
+            def enforce_final_geometry():
                 try:
-                    screen_w = int(win.winfo_screenwidth())
-                    screen_h = int(win.winfo_screenheight())
-                except Exception:
-                    screen_w, screen_h = 1280, 800
-                left, top, right, bottom = 0, 0, screen_w, screen_h
-
-            work_w = max(1, int(right - left))
-            work_h = max(1, int(bottom - top))
-            dialog_w = min(requested_w, max(560, work_w - margin * 2))
-            dialog_h = min(requested_h, max(320, work_h - margin * 2))
-            x = int(left + (work_w - dialog_w) // 2)
-            y = int(top + (work_h - dialog_h) // 2)
-
-            try:
-                win.geometry(f"{dialog_w}x{dialog_h}+{x}+{y}")
-                win.minsize(560, min(dialog_h, 320))
-                win.maxsize(max(560, work_w - margin * 2), max(320, work_h - margin * 2))
-                win.resizable(False, False)
-            except Exception:
-                try:
-                    win.geometry(f"{dialog_width}x720+{max(0, x)}+{max(0, y)}")
+                    if win.winfo_exists():
+                        win.geometry(final_geometry)
                 except Exception:
                     pass
 
             try:
+                win.resizable(False, False)
+                win.geometry(final_geometry)
+                win.update_idletasks()
                 win.deiconify()
-                self._animate_toplevel_in(win, 155, slide=14)
+                # Windows can renegotiate an overrideredirect Toplevel on its
+                # first map. Reapply immediately before animation and once after
+                # the animation has settled so every opening lands identically.
+                enforce_final_geometry()
                 win.lift()
                 win.attributes("-topmost", True)
-                win.after(150, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+                self._animate_toplevel_in(win, 155, slide=14)
+                win.after(190, enforce_final_geometry)
+                win.after(360, enforce_final_geometry)
+                win.after(390, lambda: win.winfo_exists() and win.attributes("-topmost", False))
             except Exception:
                 try:
                     win.deiconify()
+                    enforce_final_geometry()
                     win.lift()
                 except Exception:
                     pass

@@ -10,7 +10,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.33"
+    assert main.BROWSER_VERSION == "10.5.38"
 
 
 def test_soft_tab_close_runs_on_mouse_release_not_press():

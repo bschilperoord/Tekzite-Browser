@@ -8,7 +8,7 @@ FEATURES = (ROOT / 'browser_features.py').read_text(encoding='utf-8')
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == '10.5.33'
+    assert main.BROWSER_VERSION == '10.5.38'
 
 
 def test_app_owned_toplevels_use_shared_motion_factory():
