@@ -60,11 +60,57 @@ jobs:
             $input.Dispose()
           }
 
-          git apply --check --ignore-space-change --ignore-whitespace $patchPath
-          if ($LASTEXITCODE -ne 0) { throw "v10.5.42 source patch does not apply cleanly" }
-          git apply --ignore-space-change --ignore-whitespace $patchPath
-          if ($LASTEXITCODE -ne 0) { throw "v10.5.42 source patch failed" }
+          # The published v10.5.38 tree has four metadata-only files that
+          # differ from the local v10.5.38 source ZIP used to create this patch.
+          # Apply all clean hunks, then repair only those known metadata rejects.
+          git apply --reject --ignore-space-change --ignore-whitespace $patchPath
+          $rejects = @(Get-ChildItem -Path . -Recurse -Filter "*.rej" -ErrorAction SilentlyContinue)
+          $allowedRejects = @(
+            "installer/README.txt.rej",
+            "tekzite_version_info.txt.rej",
+            "tests/current/test_stability_v1011.py.rej",
+            "tests/current/test_startup_input_v86.py.rej"
+          )
+          foreach ($reject in $rejects) {
+            $relative = [IO.Path]::GetRelativePath((Get-Location).Path, $reject.FullName).Replace("\", "/")
+            if ($allowedRejects -notcontains $relative) {
+              throw "Unexpected v10.5.42 patch reject: $relative"
+            }
+          }
+          $rejects | Remove-Item -Force
           Remove-Item ".release" -Recurse -Force
+
+          @'
+          from pathlib import Path
+          import re
+
+          installer = Path("installer/README.txt")
+          body = installer.read_text(encoding="utf-8").replace(
+              "Tekzite-Browser-Setup-10.5.38.exe",
+              "Tekzite-Browser-Setup-10.5.42.exe",
+          )
+          installer.write_text(body, encoding="utf-8")
+
+          info_path = Path("tekzite_version_info.txt")
+          info = info_path.read_text(encoding="utf-8")
+          info = re.sub(r"filevers=\(10,\s*5,\s*\d+,\s*0\)", "filevers=(10, 5, 42, 0)", info)
+          info = re.sub(r"prodvers=\(10,\s*5,\s*\d+,\s*0\)", "prodvers=(10, 5, 42, 0)", info)
+          info = re.sub(r"u'10\.5\.\d+'", "u'10.5.42'", info)
+          info_path.write_text(info, encoding="utf-8")
+
+          startup = Path("tests/current/test_startup_input_v86.py")
+          body = startup.read_text(encoding="utf-8").replace(
+              'BROWSER_VERSION = "10.5.38"',
+              'BROWSER_VERSION = "10.5.42"',
+          )
+          startup.write_text(body, encoding="utf-8")
+
+          stability = Path("tests/current/test_stability_v1011.py")
+          body = stability.read_text(encoding="utf-8")
+          body = body.replace("10.5.38", "10.5.42")
+          body = body.replace("filevers=(10, 5, 38, 0)", "filevers=(10, 5, 42, 0)")
+          stability.write_text(body, encoding="utf-8")
+          '@ | python -
 
           $versionLine = Select-String -Path "main.py" -Pattern 'BROWSER_VERSION = "10\.5\.42"' -SimpleMatch:$false
           if (-not $versionLine) { throw "main.py was not updated to v10.5.42" }
