@@ -1,0 +1,246 @@
+name: Publish Windows release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  TARGET_VERSION: "10.5.38"
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout release seed
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Check whether release already exists
+        id: release_check
+        shell: pwsh
+        run: |
+          $tag = "v$env:TARGET_VERSION"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            "exists=true" >> $env:GITHUB_OUTPUT
+            Write-Host "Release $tag already exists; nothing to publish."
+          } else {
+            "exists=false" >> $env:GITHUB_OUTPUT
+          }
+          exit 0
+
+      - name: Apply v10.5.38 source update
+        if: steps.release_check.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gzipPath = ".release\v10.5.38.logic.patch.gz"
+          $patchPath = ".release\v10.5.38.logic.patch"
+          if (-not (Test-Path $gzipPath)) { throw "Release patch payload is missing: $gzipPath" }
+
+          $input = [System.IO.File]::OpenRead($gzipPath)
+          $output = [System.IO.File]::Create($patchPath)
+          try {
+            $gzip = [System.IO.Compression.GzipStream]::new($input, [System.IO.Compression.CompressionMode]::Decompress)
+            try { $gzip.CopyTo($output) } finally { $gzip.Dispose() }
+          } finally {
+            $output.Dispose()
+            $input.Dispose()
+          }
+
+          git apply --check -p2 --ignore-space-change --ignore-whitespace $patchPath
+          if ($LASTEXITCODE -ne 0) { throw "v10.5.38 source patch does not apply cleanly" }
+          git apply -p2 --ignore-space-change --ignore-whitespace $patchPath
+          if ($LASTEXITCODE -ne 0) { throw "v10.5.38 source patch failed" }
+          Remove-Item ".release" -Recurse -Force
+
+          @'
+          from pathlib import Path
+          import re
+
+          readme_path = Path("README.md")
+          readme = readme_path.read_text(encoding="utf-8")
+          readme = re.sub(
+              r"> \*\*Current release:\*\* v[0-9.]+ UltraSpeed for Windows",
+              "> **Current release:** v10.5.38 UltraSpeed for Windows",
+              readme,
+              count=1,
+          )
+          readme_section = """## New in v10.5.38
+
+          - Makes the DWM destination rectangle the authoritative Chromium viewport during window resizing.
+          - Fixes maximize/restore/snap cases where Chromium could remain at the old size while Tekzite had already grown, leaving a large white area beside or below the page.
+          - Reconciles DWM size on every non-drag root Configure event while filtering pure moves through the existing viewport cache.
+          - Adds a final delayed resize pass after maximize/restore so Windows and Tk layout settling cannot leave the DWM surface stale.
+
+          ## New in v10.5.37
+
+          - Makes Settings sizing deterministic in Tk coordinate space and keeps its scrollable body with a pinned Save/Cancel footer.
+
+          """
+          if "## New in v10.5.38" not in readme:
+              anchor = "## New in v10.5.32"
+              if anchor not in readme:
+                  raise SystemExit("README release anchor not found")
+              readme = readme.replace(anchor, readme_section + anchor, 1)
+          readme_path.write_text(readme, encoding="utf-8")
+
+          changelog_path = Path("CHANGELOG.md")
+          changelog = changelog_path.read_text(encoding="utf-8")
+          changelog_header = """# Tekzite Browser v10.5.38
+
+          ## Deterministic DWM viewport resizing
+
+          - Treats the committed DWM destination rectangle as the authoritative Chromium viewport during window resize.
+          - Fixes maximize/restore/snap cases where the DWM popup grew before Tk's `edge_host`, leaving Chromium at the old size and exposing a large white remainder.
+          - Root Configure events now request resize reconciliation; pure window moves remain cheap because unchanged viewport sizes are filtered before Chromium is touched.
+          - Adds an immediate and delayed maximize/restore reconciliation pass to catch Windows/Tk layout settling without continuous resize spam.
+
+          # Tekzite Browser v10.5.37
+
+          ## Deterministic Settings sizing
+
+          - Replaces competing Settings sizing paths with one authoritative Tk-screen-space geometry calculation.
+          - Opens Settings at a stable large height (88% of the Tk screen, capped at 1120 px) instead of deriving height from timing-sensitive widget/window measurements.
+          - Centers over the browser but clamps the frameless dialog to the visible Tk screen.
+          - Re-applies the exact final geometry immediately after mapping and after the opening animation so Windows first-map/DPI negotiation cannot leave the dialog shorter on some opens.
+          - Keeps the vertical scrollbar, mouse-wheel scrolling and pinned Save/Cancel footer.
+
+          # Tekzite Browser v10.5.36
+
+          ## Full-height Settings dialog fix
+
+          - Sizes Settings in Tk's own coordinate space relative to the main browser window, avoiding mixed-DPI Win32/Tk work-area mismatches that could collapse the dialog to roughly half-height.
+          - Raises the preferred Settings height to 1120 px and lets it use nearly the full visible browser height with a small vertical margin.
+          - Applies the shared Tekzite dialog header before final sizing and delays the opening animation until the final geometry is locked.
+          - Keeps the vertical scrollbar, mouse-wheel scrolling and pinned Save/Cancel footer.
+
+          # Tekzite Browser v10.5.35
+
+          ## Extra-tall Settings dialog
+
+          - Raises the preferred Settings height from 860 px to 1000 px.
+          - Raises the scrollable Settings canvas height so substantially more controls are visible at once.
+          - Keeps monitor work-area clamping, the vertical scrollbar, mouse-wheel scrolling and pinned Save/Cancel footer intact.
+
+          """
+          if not changelog.startswith("# Tekzite Browser v10.5.38"):
+              changelog = changelog_header + changelog
+          changelog_path.write_text(changelog, encoding="utf-8")
+          '@ | python -
+
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw "git diff --check failed" }
+
+          $versionLine = Select-String -Path "main.py" -Pattern 'BROWSER_VERSION = "10\.5\.38"' -SimpleMatch:$false
+          if (-not $versionLine) { throw "main.py was not updated to v10.5.38" }
+
+      - name: Set up Python
+        if: steps.release_check.outputs.exists != 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install test dependencies
+        if: steps.release_check.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
+          python -m pip install --only-binary=:all: -r requirements-dev.txt
+
+      - name: Run regression suite
+        if: steps.release_check.outputs.exists != 'true'
+        run: python -m pytest
+
+      - name: Set up Node
+        if: steps.release_check.outputs.exists != 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Test extension services
+        if: steps.release_check.outputs.exists != 'true'
+        run: node tests/current/test_extension_features.cjs
+
+      - name: Commit v10.5.38 source to main
+        if: steps.release_check.outputs.exists != 'true'
+        id: source_commit
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Release Tekzite Browser v10.5.38 [skip ci]"
+          if ($LASTEXITCODE -ne 0) { throw "Could not create v10.5.38 source commit" }
+          $sha = (git rev-parse HEAD).Trim()
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          git push origin HEAD:main
+          if ($LASTEXITCODE -ne 0) { throw "Could not push v10.5.38 source commit to main" }
+
+      - name: Build Windows x64 binary
+        if: steps.release_check.outputs.exists != 'true'
+        shell: pwsh
+        run: .\build_windows.ps1
+
+      - name: Package Windows release assets
+        if: steps.release_check.outputs.exists != 'true'
+        id: assets
+        shell: pwsh
+        run: |
+          $version = $env:TARGET_VERSION
+          $exeName = "Tekzite-Browser-v$version-Windows-x64.exe"
+          $zipName = "Tekzite-Browser-v$version-Windows-x64.zip"
+          Copy-Item ".\dist\TekziteBrowser.exe" ".\$exeName" -Force
+          if (Test-Path ".\$zipName") { Remove-Item ".\$zipName" -Force }
+          Compress-Archive -Path ".\$exeName" -DestinationPath ".\$zipName" -CompressionLevel Optimal
+          $exeHash = (Get-FileHash ".\$exeName" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zipHash = (Get-FileHash ".\$zipName" -Algorithm SHA256).Hash.ToLowerInvariant()
+          @(
+            "$exeHash  $exeName",
+            "$zipHash  $zipName"
+          ) | Set-Content ".\SHA256SUMS.txt" -Encoding ascii
+          "exe=$exeName" >> $env:GITHUB_OUTPUT
+          "zip=$zipName" >> $env:GITHUB_OUTPUT
+
+      - name: Tag and publish GitHub release
+        if: steps.release_check.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          $version = $env:TARGET_VERSION
+          $tag = "v$version"
+          $sha = "${{ steps.source_commit.outputs.sha }}"
+          git fetch --tags --force
+          git rev-parse "refs/tags/$tag" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            git tag -a $tag $sha -m "Tekzite Browser v$version"
+            git push origin $tag
+            if ($LASTEXITCODE -ne 0) { throw "Could not push release tag $tag" }
+          }
+
+          $notes = @"
+          Windows x64 release of Tekzite Browser v$version.
+
+          Highlights:
+          - Fixes inconsistent DWM/Chromium viewport resizing during maximize, restore, snap and live window resize.
+          - Keeps the DWM destination rectangle authoritative so the webpage fills the browser viewport instead of leaving a white remainder.
+          - Includes the Settings scrolling and deterministic sizing work from v10.5.35-v10.5.37.
+
+          The Windows executable is built natively on GitHub's windows-latest runner using the repository's hash-locked PyInstaller toolchain.
+          "@
+
+          gh release create $tag `
+            ".\${{ steps.assets.outputs.exe }}" `
+            ".\${{ steps.assets.outputs.zip }}" `
+            ".\SHA256SUMS.txt" `
+            --title "Tekzite Browser v$version" `
+            --notes $notes `
+            --target $sha
