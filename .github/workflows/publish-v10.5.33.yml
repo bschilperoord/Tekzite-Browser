@@ -74,61 +74,65 @@ jobs:
 
           $changelog = Get-Content "CHANGELOG.md" -Raw
           if (-not $changelog.StartsWith("# Tekzite Browser v10.5.33")) {
-            $entry = @"
-# Tekzite Browser v10.5.33
-
-## Windows packaged-build HRESULT compatibility
-
-- Fixes the Windows packaged executable failing to load pages with ``AttributeError: module 'ctypes.wintypes' has no attribute 'HRESULT'``.
-- Uses a stable signed 32-bit HRESULT compatibility alias when ``ctypes.wintypes.HRESULT`` is unavailable.
-- Applies the alias to DWM thumbnail register/update/unregister/flush calls.
-- Preserves the v10.5.32 close-then-new-tab latency behavior.
-
-"@
+            $entryLines = @(
+              "# Tekzite Browser v10.5.33",
+              "",
+              "## Windows packaged-build HRESULT compatibility",
+              "",
+              "- Fixes the Windows packaged executable failing to load pages with AttributeError: module 'ctypes.wintypes' has no attribute 'HRESULT'.",
+              "- Uses a stable signed 32-bit HRESULT compatibility alias when ctypes.wintypes.HRESULT is unavailable.",
+              "- Applies the alias to DWM thumbnail register/update/unregister/flush calls.",
+              "- Preserves the v10.5.32 close-then-new-tab latency behavior.",
+              "",
+              ""
+            )
+            $entry = $entryLines -join "`n"
             Set-Content "CHANGELOG.md" ($entry + $changelog) -Encoding UTF8
           }
 
-          @"
-Tekzite Browser v10.5.33 validation
+          $validationLines = @(
+            "Tekzite Browser v10.5.33 validation",
+            "",
+            "Focus: Windows packaged-build HRESULT compatibility.",
+            "",
+            "Checks",
+            "- engine/net.py no longer references wintypes.HRESULT.",
+            "- HRESULT is represented as signed 32-bit when ctypes.wintypes lacks the alias.",
+            "- DWM register/update/unregister/flush restypes use the compatibility alias.",
+            "- Existing DWM and browser tests continue to pass."
+          )
+          Set-Content "VALIDATION-v10.5.33.txt" ($validationLines -join "`n") -Encoding UTF8
 
-Focus: Windows packaged-build HRESULT compatibility.
-
-Checks
-- engine/net.py no longer references wintypes.HRESULT.
-- HRESULT is represented as signed 32-bit when ctypes.wintypes lacks the alias.
-- DWM register/update/unregister/flush restypes use the compatibility alias.
-- Existing DWM and browser tests continue to pass.
-"@ | Set-Content "VALIDATION-v10.5.33.txt" -Encoding UTF8
-
-          @'
-from pathlib import Path
-import ctypes
-
-import main
-import engine.net as net
-
-ROOT = Path(__file__).resolve().parents[2]
-NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
-
-
-def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.33"
-
-
-def test_hresult_compat_type_is_always_32_bit():
-    assert ctypes.sizeof(net.HRESULT) == 4
-
-
-def test_no_direct_wintypes_hresult_dependency_remains():
-    assert "wintypes.HRESULT" not in NET
-
-
-def test_dwm_calls_use_compat_hresult_alias():
-    assert "DwmRegisterThumbnail.restype = HRESULT" in NET
-    assert "DwmUpdateThumbnailProperties.restype = HRESULT" in NET
-    assert "DwmUnregisterThumbnail.restype = HRESULT" in NET
-    assert "DwmFlush.restype = HRESULT" in NET
-'@ | Set-Content "tests/current/test_v10533_hresult_compat.py" -Encoding UTF8
+          $testLines = @(
+            "from pathlib import Path",
+            "import ctypes",
+            "",
+            "import main",
+            "import engine.net as net",
+            "",
+            "ROOT = Path(__file__).resolve().parents[2]",
+            "NET = (ROOT / `"engine`" / `"net.py`").read_text(encoding=`"utf-8`")",
+            "",
+            "",
+            "def test_release_version():",
+            "    assert main.BROWSER_VERSION == `"10.5.33`"",
+            "",
+            "",
+            "def test_hresult_compat_type_is_always_32_bit():",
+            "    assert ctypes.sizeof(net.HRESULT) == 4",
+            "",
+            "",
+            "def test_no_direct_wintypes_hresult_dependency_remains():",
+            "    assert `"wintypes.HRESULT`" not in NET",
+            "",
+            "",
+            "def test_dwm_calls_use_compat_hresult_alias():",
+            "    assert `"DwmRegisterThumbnail.restype = HRESULT`" in NET",
+            "    assert `"DwmUpdateThumbnailProperties.restype = HRESULT`" in NET",
+            "    assert `"DwmUnregisterThumbnail.restype = HRESULT`" in NET",
+            "    assert `"DwmFlush.restype = HRESULT`" in NET"
+          )
+          Set-Content "tests/current/test_v10533_hresult_compat.py" ($testLines -join "`n") -Encoding UTF8
 
       - name: Install test dependencies
         shell: pwsh
@@ -186,19 +190,20 @@ def test_dwm_calls_use_compat_hresult_alias():
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = @"
-Tekzite Browser v10.5.33 for Windows x64.
-
-This release fixes the packaged Windows error:
-AttributeError: module 'ctypes.wintypes' has no attribute 'HRESULT'
-
-The DWM integration now uses a portable signed 32-bit HRESULT alias when ctypes.wintypes does not provide one. The v10.5.32 close/new-tab latency fix is preserved.
-
-Windows executable SHA-256:
-9d617048c755025c342b2546030b1c193deb6e6f38c946d83aa2ae1e3c89ecbf
-
-The executable is currently unsigned.
-"@
+          $noteLines = @(
+            "Tekzite Browser v10.5.33 for Windows x64.",
+            "",
+            "This release fixes the packaged Windows error:",
+            "AttributeError: module 'ctypes.wintypes' has no attribute 'HRESULT'",
+            "",
+            "The DWM integration now uses a portable signed 32-bit HRESULT alias when ctypes.wintypes does not provide one. The v10.5.32 close/new-tab latency fix is preserved.",
+            "",
+            "Windows executable SHA-256:",
+            "9d617048c755025c342b2546030b1c193deb6e6f38c946d83aa2ae1e3c89ecbf",
+            "",
+            "The executable is currently unsigned."
+          )
+          $notes = $noteLines -join "`n"
           gh release create v10.5.33 `
             "release-assets\Tekzite-Browser-v10.5.33-Windows-x64.exe" `
             "release-assets\SHA256SUMS.txt" `
