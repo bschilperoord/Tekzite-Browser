@@ -25,9 +25,11 @@ def site_host(url):
 
 
 def record_visit(rows, url, title, now=None):
+    url = str(url or '')[:32768]
+    title = str(title or url)[:1024]
     if not valid_url(url):
         return rows
-    return [{'url': url, 'title': title or url, 'visited': now or time.time()}] + [r for r in rows if r.get('url') != url][:4999]
+    return [{'url': url, 'title': title, 'visited': now or time.time()}] + [r for r in rows if r.get('url') != url][:4999]
 
 
 def download_progress(item):
@@ -217,7 +219,7 @@ class BrowserFeatures:
                 result = future.result()
             except Exception as exc:
                 self.status_var.set(str(exc))
-                messagebox.showerror('Tekzite', str(exc), parent=parent or self.root)
+                self._show_message("error", 'Tekzite', str(exc), parent=parent or self.root)
             else:
                 success(result)
         self.root.after(50, finish)
@@ -228,6 +230,8 @@ class BrowserFeatures:
         exempt = any(host == s or host.endswith('.' + s) for s in sites)
         enabled = self.preferences.get('adblock_enabled', True)
         label = ('Enable' if exempt else 'Disable') + ' Ad Blocking for ' + (host or 'This Site')
+        if hasattr(self, '_menu_item_text'):
+            label = self._menu_item_text(label, '◇')
         menu.entryconfigure(1, label=label, state='normal' if host and enabled else 'disabled')
 
     def _toggle_site_adblock(self):
@@ -257,7 +261,7 @@ class BrowserFeatures:
             try:
                 self._persist_preferences()
             except OSError as exc:
-                messagebox.showerror('Site exception', f'Applied for this session, but could not save: {exc}', parent=self.root)
+                self._show_message("error", 'Site exception', f'Applied for this session, but could not save: {exc}', parent=self.root)
             self.status_var.set(f'Ad blocking {"on" if enabling else "off"} for {host}')
             # Reload the intended site only; the user may have switched tabs meanwhile.
             if site_host((self._active_tab() or {}).get('url', '')) == host:
@@ -265,13 +269,13 @@ class BrowserFeatures:
         self._feature_async(apply, saved)
 
     def _feature_window(self, title, columns, widths):
-        win = tk.Toplevel(self.root)
+        win = self._new_animated_toplevel(self.root)
         win.title('Tekzite ' + title)
         win.geometry('850x460')
         win.transient(self.root)
         win.configure(bg=self.ui['bg'])
         controls = tk.Frame(win, bg=self.ui['bg'])
-        controls.pack(side='bottom', fill='x', padx=12, pady=12)
+        controls.pack(side='bottom', fill='x', padx=18, pady=(10, 16))
         tree = ttk.Treeview(win, columns=columns, show='headings', selectmode='browse')
         for col, width in zip(columns, widths):
             tree.heading(col, text=col)
@@ -279,12 +283,14 @@ class BrowserFeatures:
         scrollbar = ttk.Scrollbar(win, command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side='right', fill='y')
-        tree.pack(fill='both', expand=True, padx=12, pady=12)
+        tree.pack(fill='both', expand=True, padx=18, pady=(8, 12))
         win.bind('<Escape>', lambda event: win.destroy())
         return win, tree, controls
 
     def _feature_button(self, controls, text, command):
-        button = tk.Button(controls, text=text, command=command, bg=self.ui['chrome_2'], fg=self.ui['text'], relief='flat')
+        button = tk.Button(controls, text=text, command=command, bg=self.ui['chrome_2'], fg=self.ui['text'],
+                           activebackground=self.ui['chrome_hover'], activeforeground=self.ui['text'],
+                           relief='flat', bd=0, padx=14, pady=7, cursor='hand2')
         button.pack(side='left', padx=4)
         return button
 
@@ -312,7 +318,7 @@ class BrowserFeatures:
         if previous is not None and previous.winfo_exists():
             previous.destroy()
 
-        win = tk.Toplevel(self.root)
+        win = self._new_animated_toplevel(self.root)
         self._site_info_window = win
         win.title('Tekzite Site Info & Privacy')
         win.geometry('650x560')
@@ -431,7 +437,7 @@ class BrowserFeatures:
         def clear_site_data():
             info = state.get('info') or {}
             origin = info.get('origin') or site_host(url)
-            if not messagebox.askyesno(
+            if not self._ask_yes_no(
                 'Clear site data',
                 f'Clear cookies, local storage, IndexedDB, caches and other Chromium data for\n{origin}?',
                 parent=win,
@@ -518,7 +524,7 @@ class BrowserFeatures:
             try:
                 self._persist_preferences()
             except OSError as exc:
-                messagebox.showerror('Extension Manager', f'Could not save extensions:\n{exc}', parent=win)
+                self._show_message("error", 'Extension Manager', f'Could not save extensions:\n{exc}', parent=win)
                 return False
             selected_paths = [row.get('path') for row in entries if row.get('enabled') and row.get('path')]
             os.environ['TEKZITE_USER_EXTENSIONS'] = json.dumps([] if self.preferences.get('privacy_lockdown', True) else selected_paths)
@@ -574,12 +580,12 @@ class BrowserFeatures:
                 return
             path = str(Path(folder).resolve())
             if ',' in path:
-                messagebox.showerror('Extension Manager', 'Chromium cannot safely load an extension from a folder containing a comma.', parent=win)
+                self._show_message("error", 'Extension Manager', 'Chromium cannot safely load an extension from a folder containing a comma.', parent=win)
                 return
             try:
                 meta = self._extension_metadata(path)
             except Exception as exc:
-                messagebox.showerror('Extension Manager', f'This folder is not a valid unpacked Chromium extension:\n{exc}', parent=win)
+                self._show_message("error", 'Extension Manager', f'This folder is not a valid unpacked Chromium extension:\n{exc}', parent=win)
                 return
             entries = list(self.preferences.get('extensions', []))
             for row in entries:
@@ -613,7 +619,7 @@ class BrowserFeatures:
                 return
             entries = list(self.preferences.get('extensions', []))
             row = entries[item['index']]
-            if not messagebox.askyesno('Remove extension', f'Remove this extension from Tekzite?\n\n{row.get("path")}', parent=win):
+            if not self._ask_yes_no('Remove extension', f'Remove this extension from Tekzite?\n\n{row.get("path")}', parent=win):
                 return
             del entries[item['index']]
             if persist(entries):
@@ -650,7 +656,7 @@ class BrowserFeatures:
             )
             if meta.get('error'):
                 message += f'\n\nValidation error:\n{meta["error"]}'
-            messagebox.showinfo('Extension details', message, parent=win)
+            self._show_message("info", 'Extension details', message, parent=win)
 
         tree.bind('<Double-1>', show_details)
         tree.bind('<Return>', show_details)
@@ -667,7 +673,7 @@ class BrowserFeatures:
 
     def _show_history(self):
         if getattr(self, '_private_mode', False):
-            messagebox.showinfo(
+            self._show_message("info", 
                 'Private Window',
                 'Browsing history is not recorded in this private window.',
                 parent=self.root,
@@ -697,7 +703,7 @@ class BrowserFeatures:
             try:
                 write_json(self._state_directory / 'history.json', [])
             except OSError as exc:
-                messagebox.showerror('History', str(exc), parent=win)
+                self._show_message("error", 'History', str(exc), parent=win)
                 return
             self.visits = []
             self._history_dirty = False
@@ -764,6 +770,15 @@ class BrowserFeatures:
                 return
             item = state['items'].get(rows[0])
             if item:
+                if name == 'open':
+                    danger = str(item.get('danger') or '')
+                    if item.get('state') != 'complete' or danger not in {'safe', 'accepted', 'deepScannedSafe'}:
+                        self._show_message("warning", 
+                            'Tekzite Download Protection',
+                            f'Tekzite will not open this file because Chromium reports its danger status as "{danger or "unknown"}".\n\nUse Open folder if you need to inspect it manually.',
+                            parent=win,
+                        )
+                        return
                 self._feature_async(lambda: features.call(name, {'id': item['id']}), lambda _: note.set('Download updated'), win)
         for label, name in [('Pause', 'pause'), ('Resume', 'resume'), ('Cancel', 'cancel'), ('Retry', 'retry'), ('Open file', 'open'), ('Open folder', 'show'), ('Remove from list', 'erase')]:
             self._feature_button(controls, label, lambda n=name: action(n))
@@ -825,9 +840,9 @@ class BrowserFeatures:
         tab = self._active_tab() or {}
         origin = self._origin_for_url(tab.get('url') or self.url_var.get())
         if not origin:
-            messagebox.showinfo('Permissions', 'Open a normal http/https page first.', parent=self.root)
+            self._show_message("info", 'Permissions', 'Open a normal http/https page first.', parent=self.root)
             return 'break'
-        win = tk.Toplevel(self.root)
+        win = self._new_animated_toplevel(self.root)
         win.title('Tekzite Permissions Manager')
         win.geometry('560x500')
         win.transient(self.root)
@@ -858,7 +873,7 @@ class BrowserFeatures:
             try:
                 self._persist_preferences()
             except Exception as exc:
-                messagebox.showerror('Permissions', f'Could not save permissions:\n{exc}', parent=win)
+                self._show_message("error", 'Permissions', f'Could not save permissions:\n{exc}', parent=win)
                 return
             tab['_permissions_origin_applied'] = None
             self._apply_permissions_for_tab(tab)
@@ -889,7 +904,7 @@ class BrowserFeatures:
         repo = re.sub(r'^https?://github\.com/', '', repo, flags=re.I).strip('/ ')
         if repo.endswith('.git'): repo = repo[:-4]
         if repo.count('/') != 1:
-            messagebox.showinfo(
+            self._show_message("info", 
                 'Tekzite Update',
                 'Set your GitHub repository in Preferences first, for example: owner/tekzite-browser',
                 parent=self.root,
@@ -918,7 +933,7 @@ class BrowserFeatures:
             else: lines.append('Your installed build is newer than the latest published release.')
             if win_asset and win_asset.get('digest'):
                 lines.append(f'Published digest: {win_asset.get("digest")}')
-            win = tk.Toplevel(self.root); win.title('Tekzite Update'); win.geometry('620x300'); win.transient(self.root); win.configure(bg=self.ui['bg'])
+            win = self._new_animated_toplevel(self.root); win.title('Tekzite Update'); win.geometry('620x300'); win.transient(self.root); win.configure(bg=self.ui['bg'])
             tk.Label(win, text='Update Checker', bg=self.ui['bg'], fg=self.ui['text'], font=(self._ui_display_font_family, 17, 'bold')).pack(anchor='w', padx=18, pady=(18, 8))
             tk.Label(win, text='\n'.join(lines), bg=self.ui['bg'], fg=self.ui['text'], justify='left', wraplength=570).pack(anchor='w', padx=18)
             bar = tk.Frame(win, bg=self.ui['bg']); bar.pack(side='bottom', fill='x', padx=18, pady=18)
@@ -957,7 +972,7 @@ class BrowserFeatures:
                             raise
                     def saved(result):
                         path, digest, verified = result
-                        messagebox.showinfo('Tekzite Update', f'Downloaded to:\n{path}\n\nSHA-256: {digest}\n' + ('Verified against GitHub digest.' if verified else 'GitHub did not publish a SHA-256 digest for this asset.'), parent=win)
+                        self._show_message("info", 'Tekzite Update', f'Downloaded to:\n{path}\n\nSHA-256: {digest}\n' + ('Verified against GitHub digest.' if verified else 'GitHub did not publish a SHA-256 digest for this asset.'), parent=win)
                     self._feature_async(work, saved, win)
                 self._feature_button(bar, 'Download update', download_asset)
             release_url = str(data.get('html_url') or '')
@@ -969,7 +984,7 @@ class BrowserFeatures:
         return 'break'
 
     def _show_diagnostics(self):
-        win = tk.Toplevel(self.root); win.title('Tekzite Diagnostics'); win.geometry('820x620'); win.transient(self.root); win.configure(bg=self.ui['bg'])
+        win = self._new_animated_toplevel(self.root); win.title('Tekzite Diagnostics'); win.geometry('820x620'); win.transient(self.root); win.configure(bg=self.ui['bg'])
         text = tk.Text(win, bg=self.ui['field'], fg=self.ui['text'], insertbackground=self.ui['text'], wrap='word', relief='flat')
         text.pack(fill='both', expand=True, padx=12, pady=12)
         state = []
@@ -1012,7 +1027,7 @@ class BrowserFeatures:
         return 'break'
 
     def _show_local_ports(self):
-        win = tk.Toplevel(self.root)
+        win = self._new_animated_toplevel(self.root)
         win.title('Tekzite Local Ports & Loopback')
         win.geometry('900x660')
         win.transient(self.root)
@@ -1205,7 +1220,7 @@ class BrowserFeatures:
 
     def _show_profile_manager(self):
         if getattr(self, '_private_mode', False):
-            messagebox.showinfo('Profiles','Profile switching is unavailable inside a private window.',parent=self.root); return 'break'
+            self._show_message("info", 'Profiles','Profile switching is unavailable inside a private window.',parent=self.root); return 'break'
         base=Path(os.environ.get('LOCALAPPDATA') or Path.home())/'Tekzite Browser'; profiles_dir=base/'Profiles'; profiles_dir.mkdir(parents=True,exist_ok=True)
         win,tree,controls=self._feature_window('Profiles',('Profile','Current','Storage'),(320,120,300))
         def sanitize(name):
@@ -1221,7 +1236,7 @@ class BrowserFeatures:
             if not sel:return
             name=str(tree.item(sel[0],'values')[0]); self._spawn_browser_process(profile=name)
         def create():
-            name=simpledialog.askstring('New Profile','Profile name:',parent=win); slug=sanitize(name)
+            name=self._ask_string_animated('New Profile','Profile name:',parent=win); slug=sanitize(name)
             if not slug or slug=='Default': return
             (profiles_dir/slug).mkdir(parents=True,exist_ok=True); refresh()
         def delete():
@@ -1229,9 +1244,18 @@ class BrowserFeatures:
             if not sel:return
             name=str(tree.item(sel[0],'values')[0])
             if name=='Default' or name==getattr(self,'_profile_name','Default'):
-                messagebox.showinfo('Profiles','Default or the currently running profile cannot be deleted here.',parent=win); return
+                self._show_message("info", 'Profiles','Default or the currently running profile cannot be deleted here.',parent=win); return
             path=profiles_dir/name
-            if messagebox.askyesno('Delete Profile',f'Delete profile {name} and its local browser data?',parent=win):
-                import shutil; shutil.rmtree(path,ignore_errors=True); refresh()
+            if self._ask_yes_no('Delete Profile',f'Delete profile {name} and its local browser data?',parent=win):
+                try:
+                    root_resolved=profiles_dir.resolve()
+                    path_resolved=path.resolve()
+                    if path.is_symlink() or path_resolved.parent != root_resolved:
+                        raise ValueError('Refusing to delete a profile path outside the Profiles directory.')
+                    if not features.net.remove_profile_tree(path):
+                        raise OSError('Profile directory remained after retry cleanup.')
+                except Exception as exc:
+                    self._show_message("error", 'Delete Profile',f'Could not safely delete {name}: {exc}',parent=win)
+                refresh()
         self._feature_button(controls,'Open',open_selected); self._feature_button(controls,'New',create); self._feature_button(controls,'Delete',delete); self._feature_button(controls,'Close',win.destroy)
         refresh(); return 'break'

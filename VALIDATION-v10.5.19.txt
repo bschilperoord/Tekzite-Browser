@@ -1,0 +1,11 @@
+Tekzite Browser v10.5.24 validation
+
+Focus: whole-GUI motion system.
+
+Checks
+- All BrowserApp and BrowserFeatures-owned Toplevels are created through _new_animated_toplevel.
+- Toplevel open and close animations honor Animations and Quiet Mode.
+- App-owned info/error/warning/yes-no/string dialogs are Tekzite-rendered and animated.
+- Customize notebook pages receive a settle animation.
+- Standard Tk buttons and entries receive shared hover/press/focus motion.
+- Chromium/DWM presentation code is not modified by the motion layer.

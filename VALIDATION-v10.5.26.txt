@@ -1,0 +1,10 @@
+Tekzite Browser v10.5.32 validation
+
+Focus: frameless Tekzite-owned dialog windows.
+
+Checks
+- _new_animated_toplevel applies overrideredirect(True) to every app-owned secondary window.
+- Shared branded dialog headers provide an in-window close control.
+- Shared header/logo/title widgets are drag handles for moving frameless windows.
+- About Tekzite has the same in-window close control and drag behavior.
+- Animated destroy/close and DWM z-order handling are preserved.

@@ -1,0 +1,17 @@
+Tekzite Browser v10.5.7 validation
+=================================
+
+DWM interaction hardening release.
+
+Automated coverage verifies:
+- single/double/triple clickCount progression and reset after timeout/distance;
+- mouseMoved packets use clickCount=0;
+- held-left drag motion is coalesced and the final pending move is queued before release;
+- both DWM and software surfaces bind middle-click link handling;
+- non-link middle clicks are replayed as CDP middle press/release;
+- right-click focuses the pointed editable before resolving menu metadata;
+- Shift+wheel maps to horizontal delta and forwards CDP modifier bits;
+- printable AltGr characters use Input.insertText;
+- v10.5.6 DPI/CSS pointer alignment remains covered by the existing regression suite.
+
+Windows-only compositor behavior still requires a real Windows/DWM smoke test.

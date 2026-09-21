@@ -1,0 +1,11 @@
+Tekzite Browser v10.5.32 validation
+
+Focus: prevent the entire Tk application from freezing after closing the active Chromium tab.
+
+Design checks
+- Active close keeps the existing DWM/native presentation mounted during replacement activation.
+- Tekzite chrome selects the replacement immediately without waiting for Chromium.
+- GUI-thread presentation state updates perform zero CDP/session-start I/O.
+- Device-metric cleanup is queued on the Chromium worker.
+- Closed Chromium target retirement waits until that target is no longer the visible presentation source.
+- Native blank canvas explicitly clears _chromium_frame_target_id.

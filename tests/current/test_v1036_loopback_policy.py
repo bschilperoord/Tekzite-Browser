@@ -12,7 +12,7 @@ FEATURES = (ROOT / "browser_features.py").read_text(encoding="utf-8")
 
 
 def test_release_version_1036():
-    assert main.BROWSER_VERSION == "10.5.2"
+    assert main.BROWSER_VERSION == "10.5.32"
 
 
 def test_strict_python_loopback_is_on_by_default():

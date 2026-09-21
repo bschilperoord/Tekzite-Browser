@@ -37,7 +37,10 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '../../chromium_zoom_extens
   assert.equal((await run('downloads', {}))[0].id, 5);
   await run('cancel', {id: 5}); assert.equal(calls.at(-1)[0], 'cancel');
   await run('show', {id: 5}); assert.equal(calls.at(-1)[0], 'show');
+  download.state = 'complete'; download.danger = 'safe';
   await run('open', {id: 5}); assert.equal(calls.at(-1)[0], 'open');
+  download.danger = 'dangerous'; await assert.rejects(run('open', {id: 5}), /blocked opening/);
+  download.danger = 'safe'; download.state = 'interrupted';
   await run('pause', {id: 5}); assert.equal(calls.at(-1)[0], 'pause');
   await run('erase', {id: 5}); assert.equal(calls.at(-1)[0], 'erase');
   await run('retry', {id: 5}); assert.equal(calls.at(-1)[1].conflictAction, 'uniquify');

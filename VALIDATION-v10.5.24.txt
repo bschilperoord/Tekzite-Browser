@@ -1,0 +1,9 @@
+Tekzite Browser v10.5.24 validation
+
+Focus: About Tekzite visibility above DWM and animated-Toplevel layout race.
+
+Checks
+- Animated Toplevel open scheduling uses after(1), not after_idle.
+- About is withdrawn during construction and receives final centered geometry before reveal.
+- About uses _raise_toplevel_above_dwm with native SetWindowPos HWND_TOPMOST/NOTOPMOST on Windows.
+- Reopening About raises the existing window rather than creating a duplicate.

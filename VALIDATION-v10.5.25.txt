@@ -1,0 +1,12 @@
+Tekzite Browser v10.5.32 validation
+
+Focus: unified About-style dialog shell for all Tekzite-owned menu windows.
+
+Checks
+- _new_animated_toplevel defaults to branded=True.
+- Shared dialog shell inserts Tekzite T tile, title, version line and separator before existing packed content.
+- Shared dialogs are raised above the DWM page presenter.
+- Shared header expands the window when possible so existing dialog body space is preserved.
+- About uses branded=False because it keeps its larger custom header.
+- Generic message, yes/no and text-input dialogs no longer duplicate their title below the shared header.
+- Shared BrowserFeatures manager windows use roomier button/spacing treatment.

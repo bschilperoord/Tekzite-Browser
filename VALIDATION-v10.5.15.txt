@@ -1,0 +1,10 @@
+Tekzite Browser v10.5.16 validation
+
+Focus: spacious default layout without overriding user-customized layouts.
+
+Checks
+- Spacious density is the default.
+- Chrome heights, typography, tab widths and browser window defaults are increased.
+- Primary chrome uses larger padding/gaps.
+- Untouched v10.5.14 layout values migrate once to v10.5.16 spacing.
+- User-adjusted legacy layout values remain unchanged.

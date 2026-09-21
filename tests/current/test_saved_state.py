@@ -103,7 +103,7 @@ class SavedStateTests(unittest.TestCase):
         app = self.app()
         app.bookmarks = []
         app.root = Mock()
-        with patch('main.write_json', side_effect=OSError('locked')), patch('main.messagebox.showerror'):
+        with patch('main.write_json', side_effect=OSError('locked')), patch.object(app, '_show_message'):
             self.assertFalse(app._store_bookmarks([{'url': 'https://example.com'}]))
         self.assertEqual(app.bookmarks, [])
 

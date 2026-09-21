@@ -1,0 +1,17 @@
+Tekzite Browser v10.5.32 validation
+
+Focus: eliminate whole-application stalls when closing an active tab.
+
+Architecture checks
+- Soft-tab close fires on ButtonRelease-1, not ButtonPress-1.
+- _close_tab performs only logical/Tk selection for the active replacement.
+- Chromium handoff starts through root.after_idle after the close callback returns.
+- Pending handoff is cancelable by a new user tab action.
+- Target activation uses the loopback /json/activate endpoint and does not use _browser_cdp_call.
+- Target close uses the loopback /json/close endpoint and does not use _browser_cdp_call.
+- Target retirement remains executor-backed.
+
+Validation commands
+- python -m py_compile main.py browser_features.py engine/net.py
+- PYTHONPATH=. pytest -q tests/current
+- node tests/current/test_extension_features.cjs

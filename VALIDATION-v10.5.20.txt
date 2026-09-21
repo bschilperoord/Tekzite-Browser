@@ -1,0 +1,9 @@
+Tekzite Browser v10.5.24 validation
+
+Focus: sharpen the unfocused omnibox URL preview after GUI animation/styling updates.
+
+Checks
+- Omnibox preview renders via Pillow on a supersampled RGB canvas.
+- Oversample factor is at least 2 and scales with Tk scaling.
+- Preview is downsampled with LANCZOS before it is displayed in Tk.
+- Real Entry remains in place beneath the preview for editing/focus behavior.

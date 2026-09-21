@@ -1,0 +1,19 @@
+Tekzite Browser v10.5.6 validation
+
+Focus: DWM native-pixel to CSS-pixel pointer alignment.
+
+The DWM thumbnail and RenderWidgetHost geometry use native Windows pixels, while
+CDP Input.dispatchMouseEvent uses CSS viewport pixels. v10.5.6 measures the live
+renderer/CSS scale before the native surface is revealed and applies:
+
+    cssX = (dwmX + cropOffsetX) / scaleX
+    cssY = (dwmY + cropOffsetY) / scaleY
+
+The live RenderWidgetHost-size / innerWidth/innerHeight ratio is preferred;
+window.devicePixelRatio is the fallback. Chromium page zoom is already represented
+in the effective scale and is not multiplied a second time.
+
+Expected Windows behavior:
+- clicking directly in Startpage's "Privé zoeken" field places the caret there;
+- no aiming above the field is required;
+- hover, cursor, drag, wheel and context-menu coordinates remain on the same plane.

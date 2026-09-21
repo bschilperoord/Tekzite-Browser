@@ -1,0 +1,18 @@
+Tekzite Browser v10.5.14 validation
+
+Focus: modern rounded Windows/browser chrome.
+
+Checks
+- Frameless root uses DWM corner preference plus a round Win32 region.
+- Maximized/fullscreen state removes the outer round region.
+- DWM Chromium host receives an independent rounded content region.
+- Toolbar buttons use the rounded Canvas control while retaining configure(text/state/font).
+- Omnibox uses a Canvas-drawn rounded backdrop with focus border.
+- Soft Tabs and the inline new-tab button use the shared modern corner radius.
+- Corner radii normalize and are editable in Customize Tekzite.
+
+Automated validation
+- Current Python suite: 247 tests PASS.
+- Mocked Chromium extension checks: PASS.
+- Python compile check for main.py: PASS.
+- Windows-only DWM/window-region visuals still require the normal Windows smoke test.

@@ -10,10 +10,11 @@ import shutil
 import traceback
 from pathlib import Path
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, messagebox, simpledialog, filedialog, colorchooser
 from browser_features import BrowserFeatures
 from browser_state import load_bookmarks, load_session, read_json, session_snapshot, write_json, valid_url
-from PIL import Image, ImageTk, ImageGrab
+from PIL import Image, ImageTk, ImageGrab, ImageDraw, ImageFont
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote_plus, urlsplit, urlunsplit, parse_qsl, urlencode
@@ -30,12 +31,13 @@ from engine.net import (
     close_embedded_chromium_target,
     capture_embedded_chromium_frame, dispatch_embedded_chromium_mouse,
     dispatch_embedded_chromium_key, get_embedded_chromium_context, get_embedded_chromium_cursor, focus_embedded_chromium_point,
-    get_embedded_chromium_dwm_input_offset, get_embedded_chromium_input_zoom_factor,
+    get_embedded_chromium_dwm_input_offset, get_embedded_chromium_input_scale, get_embedded_chromium_input_zoom_factor,
     get_embedded_chromium_page_state, find_embedded_chromium_text,
     set_embedded_chromium_presentation, set_embedded_chromium_zoom, check_embedded_chromium_zoom,
     validate_and_recover_embedded_chromium_frame, record_embedded_surface_probe, record_embedded_native_recovery, sync_embedded_chromium_native_geometry,
     warm_embedded_chromium_io_channels, stop_embedded_chromium_loading,
     request_embedded_chromium_dwm_recrop, network_engine_debug, privacy_stats,
+    cleanup_abandoned_temporary_profiles, remove_profile_tree,
 )
 
 
@@ -117,12 +119,13 @@ DEFAULT_CUSTOMIZATION = {
     "font_family": "",
     "display_font_family": "",
     "monospace_font_family": "",
-    "font_size": 10,
+    "font_size": 11,
     "menu_font_size": 10,
-    "tab_font_size": 9,
-    "toolbar_font_size": 10,
+    "tab_font_size": 10,
+    "toolbar_font_size": 11,
     "ui_scale": 1.0,
-    "density": "comfortable",
+    "density": "spacious",
+    "spacing_generation": 2,
     "animations": True,
     "window_control_style": "traffic_lights",
     "tab_style": "soft",
@@ -140,7 +143,12 @@ DEFAULT_CUSTOMIZATION = {
     "show_tab_close_buttons": True,
     "show_tab_group_chips": True,
     "show_tab_active_indicator": True,
-    "tab_title_chars": 24,
+    "tab_title_chars": 28,
+    "tab_min_width": 175,
+    "tab_max_width": 330,
+    "window_corner_radius": 24,
+    "content_corner_radius": 18,
+    "control_corner_radius": 16,
     "tab_position": "above_toolbar",
     "toolbar_order": list(TOOLBAR_ITEM_IDS),
     "toolbar_visible": {item: True for item in TOOLBAR_ITEM_IDS},
@@ -151,15 +159,15 @@ DEFAULT_CUSTOMIZATION = {
     "show_chrome_separator": True,
     "show_status_activity_dot": True,
     "show_status_version": True,
-    "app_bar_height": 38,
-    "tab_bar_height": 44,
-    "toolbar_height": 62,
-    "status_bar_height": 26,
-    "find_bar_height": 40,
-    "window_width": 1360,
-    "window_height": 860,
-    "window_min_width": 900,
-    "window_min_height": 600,
+    "app_bar_height": 44,
+    "tab_bar_height": 52,
+    "toolbar_height": 72,
+    "status_bar_height": 30,
+    "find_bar_height": 46,
+    "window_width": 1440,
+    "window_height": 900,
+    "window_min_width": 960,
+    "window_min_height": 640,
     "start_maximized": False,
 }
 
@@ -169,6 +177,25 @@ def _valid_hex_color(value, fallback):
 
 def _normalized_customization(value):
     src = value if isinstance(value, dict) else {}
+    # v10.5.15: migrate only an untouched v10.5.14 layout to the new spacious
+    # defaults. Any user-adjusted spacing/size value opts out automatically.
+    legacy_layout = {
+        "font_size": 10, "tab_font_size": 9, "toolbar_font_size": 10,
+        "ui_scale": 1.0, "density": "comfortable", "tab_title_chars": 24,
+        "tab_min_width": 150, "tab_max_width": 290,
+        "window_corner_radius": 22, "content_corner_radius": 16, "control_corner_radius": 14,
+        "app_bar_height": 38, "tab_bar_height": 44, "toolbar_height": 62,
+        "status_bar_height": 26, "find_bar_height": 40,
+        "window_width": 1360, "window_height": 860,
+        "window_min_width": 900, "window_min_height": 600,
+    }
+    if src and int(src.get("spacing_generation", 1) or 1) < 2:
+        untouched = all(src.get(key, expected) == expected for key, expected in legacy_layout.items())
+        if untouched:
+            src = dict(src)
+            for key in legacy_layout:
+                src[key] = DEFAULT_CUSTOMIZATION[key]
+            src["spacing_generation"] = 2
     out = dict(DEFAULT_CUSTOMIZATION)
     default_colors = dict(DEFAULT_CUSTOMIZATION.get("colors") or UI_COLOR_DEFAULTS)
     raw_colors = src.get("colors") if isinstance(src.get("colors"), dict) else {}
@@ -189,6 +216,8 @@ def _normalized_customization(value):
         out[key] = bool(out.get(key, DEFAULT_CUSTOMIZATION[key]))
     for key, low, high in (("font_size", 7, 22), ("menu_font_size", 7, 20), ("tab_font_size", 7, 20),
                            ("toolbar_font_size", 7, 22), ("tab_title_chars", 6, 80),
+                           ("tab_min_width", 90, 420), ("tab_max_width", 120, 600),
+                           ("window_corner_radius", 0, 48), ("content_corner_radius", 0, 40), ("control_corner_radius", 4, 28),
                            ("app_bar_height", 24, 80), ("tab_bar_height", 28, 90), ("toolbar_height", 38, 100),
                            ("status_bar_height", 18, 60), ("find_bar_height", 28, 80),
                            ("window_width", 720, 7680), ("window_height", 480, 4320),
@@ -201,12 +230,15 @@ def _normalized_customization(value):
         out["ui_scale"] = max(0.70, min(1.60, float(out.get("ui_scale", 1.0))))
     except Exception:
         out["ui_scale"] = 1.0
-    out["density"] = str(out.get("density") or "comfortable") if str(out.get("density") or "comfortable") in ("compact", "comfortable", "spacious") else "comfortable"
+    out["density"] = str(out.get("density") or "spacious") if str(out.get("density") or "spacious") in ("compact", "comfortable", "spacious") else "spacious"
+    out["spacing_generation"] = 2
     out["window_control_style"] = str(out.get("window_control_style") or "traffic_lights") if str(out.get("window_control_style") or "traffic_lights") in ("tekzite", "traffic_lights") else "traffic_lights"
     out["tab_style"] = str(out.get("tab_style") or "soft") if str(out.get("tab_style") or "soft") in ("soft", "classic") else "soft"
     out["toolbar_label_style"] = str(out.get("toolbar_label_style") or "icons") if str(out.get("toolbar_label_style") or "icons") in ("icons", "text", "both") else "icons"
     out["tab_position"] = str(out.get("tab_position") or "above_toolbar") if str(out.get("tab_position") or "above_toolbar") in ("above_toolbar", "below_toolbar") else "above_toolbar"
     out["new_tab_button_position"] = str(out.get("new_tab_button_position") or "right") if str(out.get("new_tab_button_position") or "right") in ("left", "right") else "right"
+    if int(out.get("tab_max_width", 330)) < int(out.get("tab_min_width", 175)):
+        out["tab_max_width"] = int(out.get("tab_min_width", 175))
     order = []
     for item in src.get("toolbar_order", DEFAULT_CUSTOMIZATION["toolbar_order"]):
         item = str(item)
@@ -302,6 +334,26 @@ def _normalized_zoom_percent(value, default=100):
         value = int(default)
     return max(50, min(300, value))
 
+
+def _next_pointer_click_count(last_release_at, last_point, last_count, now, point, *, max_delay=0.50, max_distance=6.0):
+    """Return Chromium clickCount for a press at *point*.
+
+    Tk's DWM input plane does not reliably emit a distinct double-click event,
+    while Chromium relies on clickCount=2/3 for native word/paragraph selection
+    and double-click handlers. Count consecutive clicks by release time and
+    page-space distance so the same path works at every Windows DPI scale.
+    """
+    try:
+        px, py = float(point[0]), float(point[1])
+        lx, ly = float(last_point[0]), float(last_point[1])
+        dt = float(now) - float(last_release_at)
+        distance2 = (px - lx) ** 2 + (py - ly) ** 2
+        if 0.0 <= dt <= float(max_delay) and distance2 <= float(max_distance) ** 2:
+            return min(3, max(1, int(last_count) + 1))
+    except Exception:
+        pass
+    return 1
+
 def _normalized_extension_entries(value):
     """Normalize persisted Extension Manager entries without touching disk."""
     result = []
@@ -361,6 +413,7 @@ def load_preferences():
     if not isinstance(prefs.get("site_permissions"), dict):
         prefs["site_permissions"] = {}
     prefs["update_repository"] = str(prefs.get("update_repository") or "").strip()[:160]
+    prefs["homepage"] = str(prefs.get("homepage") or START_URL).strip()[:32768] or START_URL
     template = str(prefs.get("search_url_template") or "https://www.startpage.com/sp/search?query={query}").strip()[:500]
     prefs["search_url_template"] = template if "{query}" in template else "https://www.startpage.com/sp/search?query={query}"
     prefs["customization"] = _normalized_customization(prefs.get("customization"))
@@ -379,6 +432,10 @@ def save_preferences(prefs):
         payload.get("page_zoom_percent", 100)
     )
     payload["extensions"] = _normalized_extension_entries(payload.get("extensions", []))
+    payload["homepage"] = str(payload.get("homepage") or START_URL).strip()[:32768] or START_URL
+    payload["search_url_template"] = str(payload.get("search_url_template") or "https://www.startpage.com/sp/search?query={query}").strip()[:500]
+    if "{query}" not in payload["search_url_template"]:
+        payload["search_url_template"] = "https://www.startpage.com/sp/search?query={query}"
     payload["customization"] = _normalized_customization(payload.get("customization"))
     last_error = None
     for attempt in range(3):
@@ -397,7 +454,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.2"
+BROWSER_VERSION = "10.5.32"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -443,6 +500,718 @@ def _enable_per_monitor_dpi_awareness():
 
 
 
+
+
+
+class _RoundedChromeButton(tk.Canvas):
+    """Small rounded browser-chrome button backed by a Canvas.
+
+    It intentionally mimics the tiny subset of ``tk.Button`` used by Tekzite
+    (``configure(text=..., state=..., font=...)``, ``pack`` and ``winfo_*``),
+    while drawing a modern pill/circle surface with true rounded corners.
+    """
+
+    def __init__(self, parent, text, command, *, surface_bg, hover_bg, fg,
+                 hover_fg, border, hover_border, canvas_bg, font, padx=12,
+                 pady=7, width=None, radius=12, disabled_fg=None):
+        self._text = str(text or "")
+        self._command = command
+        self._surface_bg = surface_bg
+        self._hover_bg = hover_bg
+        self._fg = fg
+        self._hover_fg = hover_fg
+        self._border = border
+        self._hover_border = hover_border
+        self._canvas_bg = canvas_bg
+        self._font = font
+        self._padx = int(padx)
+        self._pady = int(pady)
+        self._radius = int(radius)
+        self._state = "normal"
+        self._hovered = False
+        self._pressed = False
+        self._focused = False
+        self._selected = False
+        self._disabled_fg = disabled_fg or fg
+        self._explicit_width_chars = width
+        pixel_w, pixel_h = self._measure()
+        super().__init__(
+            parent, width=pixel_w, height=pixel_h, bg=canvas_bg,
+            highlightthickness=0, bd=0, relief="flat", cursor="hand2",
+            takefocus=1,
+        )
+        self.bind("<Configure>", lambda _e: self._redraw(), add="+")
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<ButtonRelease-1>", self._release)
+        self.bind("<FocusIn>", lambda _e: self._set_focus(True))
+        self.bind("<FocusOut>", lambda _e: self._set_focus(False))
+        self.bind("<Return>", self._keyboard_invoke)
+        self.bind("<space>", self._keyboard_invoke)
+        self._redraw()
+
+    @staticmethod
+    def _round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+        radius = max(2, min(int(radius), int((x2-x1)/2), int((y2-y1)/2)))
+        points = [
+            x1+radius,y1, x2-radius,y1, x2,y1, x2,y1+radius,
+            x2,y2-radius, x2,y2, x2-radius,y2, x1+radius,y2,
+            x1,y2, x1,y2-radius, x1,y1+radius, x1,y1,
+        ]
+        return canvas.create_polygon(points, smooth=True, splinesteps=24, **kwargs)
+
+    def _measure(self):
+        try:
+            f = tkfont.Font(font=self._font)
+            text_w = max(8, int(f.measure(self._text)))
+            text_h = max(14, int(f.metrics("linespace")))
+        except Exception:
+            text_w, text_h = max(8, len(self._text) * 8), 16
+        if self._explicit_width_chars:
+            text_w = max(text_w, int(self._explicit_width_chars) * 8)
+        return max(34, text_w + self._padx * 2), max(30, text_h + self._pady * 2)
+
+    def _resize_to_text(self):
+        w, h = self._measure()
+        try:
+            super().configure(width=w, height=h)
+        except Exception:
+            pass
+
+    def _redraw(self):
+        try:
+            self.delete("all")
+            w = max(2, int(self.winfo_width() or self.cget("width")))
+            h = max(2, int(self.winfo_height() or self.cget("height")))
+            disabled = self._state == "disabled"
+            engaged = bool((self._hovered or self._selected) and not disabled)
+            fill = self._hover_bg if engaged else self._surface_bg
+            if self._pressed and not disabled:
+                fill = self._hover_bg
+            outline = self._hover_border if ((engaged or self._focused) and not disabled) else self._border
+            text_color = self._disabled_fg if disabled else (self._hover_fg if engaged else self._fg)
+            press_inset = 2 if (self._pressed and not disabled) else 0
+            self._round_rect(self, 1+press_inset, 1+press_inset, w-1-press_inset, h-1-press_inset,
+                             min(self._radius, h//2), fill=fill, outline=outline, width=1.1)
+            self.create_text(w/2, h/2 + (1 if press_inset else 0), text=self._text,
+                             fill=text_color, font=self._font)
+            self.configure(cursor="arrow" if disabled else "hand2")
+        except Exception:
+            pass
+
+    def set_selected(self, selected):
+        self._selected = bool(selected)
+        self._redraw()
+
+    def _set_focus(self, focused):
+        self._focused = bool(focused)
+        self._redraw()
+
+    def _keyboard_invoke(self, _event=None):
+        if self._state != "disabled" and callable(self._command):
+            self._command()
+        return "break"
+
+    def _enter(self, _event=None):
+        self._hovered = True
+        self._redraw()
+
+    def _leave(self, _event=None):
+        self._hovered = False
+        self._pressed = False
+        self._redraw()
+
+    def _press(self, _event=None):
+        if self._state != "disabled":
+            self._pressed = True
+            self._redraw()
+
+    def _release(self, event=None):
+        if self._state == "disabled":
+            return "break"
+        inside = True
+        try:
+            inside = 0 <= int(event.x) <= self.winfo_width() and 0 <= int(event.y) <= self.winfo_height()
+        except Exception:
+            pass
+        self._pressed = False
+        self._redraw()
+        if inside and callable(self._command):
+            self._command()
+        return "break"
+
+    def set_palette(self, *, surface_bg=None, hover_bg=None, fg=None,
+                    hover_fg=None, border=None, hover_border=None,
+                    canvas_bg=None, radius=None, disabled_fg=None):
+        if surface_bg is not None: self._surface_bg = surface_bg
+        if hover_bg is not None: self._hover_bg = hover_bg
+        if fg is not None: self._fg = fg
+        if hover_fg is not None: self._hover_fg = hover_fg
+        if border is not None: self._border = border
+        if hover_border is not None: self._hover_border = hover_border
+        if canvas_bg is not None:
+            self._canvas_bg = canvas_bg
+            try: super().configure(bg=canvas_bg)
+            except Exception: pass
+        if radius is not None: self._radius = int(radius)
+        if disabled_fg is not None: self._disabled_fg = disabled_fg
+        self._redraw()
+
+    def configure(self, cnf=None, **kwargs):
+        if cnf is None and not kwargs:
+            return super().configure()
+        if isinstance(cnf, dict):
+            kwargs = {**cnf, **kwargs}
+        elif cnf not in (None, {}):
+            return super().configure(cnf, **kwargs)
+        redraw = False
+        resize = False
+        if "text" in kwargs:
+            self._text = str(kwargs.pop("text") or "")
+            redraw = resize = True
+        if "state" in kwargs:
+            self._state = str(kwargs.pop("state") or "normal")
+            redraw = True
+        if "font" in kwargs:
+            self._font = kwargs.pop("font")
+            redraw = resize = True
+        if "fg" in kwargs: self._fg = kwargs.pop("fg"); redraw = True
+        if "foreground" in kwargs: self._fg = kwargs.pop("foreground"); redraw = True
+        if "activeforeground" in kwargs: self._hover_fg = kwargs.pop("activeforeground"); redraw = True
+        if "activebackground" in kwargs: self._hover_bg = kwargs.pop("activebackground"); redraw = True
+        if "highlightbackground" in kwargs: self._border = kwargs.pop("highlightbackground"); redraw = True
+        # ``bg`` on a button means its rounded surface, not the square Canvas.
+        if "bg" in kwargs: self._surface_bg = kwargs.pop("bg"); redraw = True
+        if "background" in kwargs: self._surface_bg = kwargs.pop("background"); redraw = True
+        result = super().configure(**kwargs) if kwargs else None
+        if resize: self._resize_to_text()
+        if redraw: self._redraw()
+        return result
+
+    config = configure
+
+    def cget(self, key):
+        key = str(key)
+        if key in {"bg", "background"}: return self._surface_bg
+        if key in {"fg", "foreground"}: return self._fg
+        if key == "activebackground": return self._hover_bg
+        if key == "activeforeground": return self._hover_fg
+        if key == "highlightbackground": return self._border
+        if key == "text": return self._text
+        if key == "state": return self._state
+        if key == "font": return self._font
+        return super().cget(key)
+
+
+class _AnimatedPopupMenu:
+    """Rounded Tekzite popup menu with real hover/click feedback and reveal motion.
+
+    This deliberately implements only the Menu API Tekzite uses.  Keeping the
+    popup in Tk instead of delegating to a platform menu gives us predictable
+    animation, pressed states and palette control without touching Chromium/DWM.
+    """
+
+    def __init__(self, app, parent=None, *, font_size=None):
+        self.app = app
+        self.parent = parent or app.root
+        self.items = []
+        self._postcommand = None
+        self._window = None
+        self._canvas = None
+        self._rows = []
+        self._hover_index = None
+        self._pressed_index = None
+        self._keyboard_index = None
+        self._submenu_after_id = None
+        self._open_submenu = None
+        self._parent_menu = None
+        self._anchor_button = None
+        self._outside_bind_id = None
+        self._outside_bind_previous = None
+        self._animation_jobs = []
+        self._font = (app._ui_font_family, int(font_size or app._font_size(10)))
+        self._surface = app.ui["chrome_2"]
+        self._text = app.ui["text"]
+        self._muted = app.ui["muted"]
+        self._disabled = app.ui.get("muted_dim", app.ui["muted"])
+        self._hover = app.ui["field_focus"]
+        self._accent = app.ui["accent"]
+        self._border = app.ui.get("border_soft", app.ui["border"])
+        self._width = 240
+        self._height = 1
+        self._outer_pad = max(6, app._ui_padding(7))
+        self._row_h = max(34, app._ui_padding(36))
+        self._separator_h = max(8, app._ui_padding(9))
+
+    def add_command(self, *, label="", command=None, accelerator="", state="normal", **_kwargs):
+        self.items.append({"type": "command", "label": str(label), "command": command,
+                           "accelerator": str(accelerator or ""), "state": str(state or "normal")})
+
+    def add_separator(self, **_kwargs):
+        self.items.append({"type": "separator"})
+
+    def add_cascade(self, *, label="", menu=None, state="normal", accelerator="", **_kwargs):
+        self.items.append({"type": "cascade", "label": str(label), "menu": menu,
+                           "accelerator": str(accelerator or ""), "state": str(state or "normal")})
+        if isinstance(menu, _AnimatedPopupMenu):
+            menu._parent_menu = self
+
+    def insert_command(self, index, **kwargs):
+        self.items.insert(self._normalize_insert_index(index), {
+            "type": "command", "label": str(kwargs.get("label", "")),
+            "command": kwargs.get("command"), "accelerator": str(kwargs.get("accelerator", "") or ""),
+            "state": str(kwargs.get("state", "normal") or "normal"),
+        })
+
+    def insert_separator(self, index, **_kwargs):
+        self.items.insert(self._normalize_insert_index(index), {"type": "separator"})
+
+    def _normalize_insert_index(self, index):
+        if index in ("end", tk.END):
+            return len(self.items)
+        try:
+            return max(0, min(len(self.items), int(index)))
+        except Exception:
+            return len(self.items)
+
+    def entryconfigure(self, index, **kwargs):
+        try:
+            item = self.items[int(index)]
+        except Exception:
+            return
+        for key in ("label", "state", "accelerator", "command"):
+            if key in kwargs:
+                item[key] = str(kwargs[key]) if key in {"label", "state", "accelerator"} else kwargs[key]
+        if self._window is not None:
+            self._rebuild_visible_menu()
+
+    entryconfig = entryconfigure
+
+    def configure(self, cnf=None, **kwargs):
+        if isinstance(cnf, dict):
+            kwargs = {**cnf, **kwargs}
+        if "postcommand" in kwargs:
+            self._postcommand = kwargs.pop("postcommand")
+        if "font" in kwargs:
+            self._font = kwargs.pop("font")
+        if "bg" in kwargs: self._surface = kwargs.pop("bg")
+        if "background" in kwargs: self._surface = kwargs.pop("background")
+        if "fg" in kwargs: self._text = kwargs.pop("fg")
+        if "foreground" in kwargs: self._text = kwargs.pop("foreground")
+        if "activebackground" in kwargs: self._hover = kwargs.pop("activebackground")
+        if "disabledforeground" in kwargs: self._disabled = kwargs.pop("disabledforeground")
+        if "selectcolor" in kwargs: self._accent = kwargs.pop("selectcolor")
+        # Native-menu compatibility options intentionally accepted and ignored.
+        for key in ("activeforeground", "borderwidth", "activeborderwidth", "bd", "relief", "cursor"):
+            kwargs.pop(key, None)
+        if self._window is not None:
+            self._rebuild_visible_menu()
+        return None
+
+    config = configure
+
+    def is_posted(self):
+        try:
+            return self._window is not None and bool(self._window.winfo_exists())
+        except Exception:
+            return False
+
+    def _measure(self):
+        try:
+            font = tkfont.Font(font=self._font)
+            label_widths = [font.measure(str(i.get("label", ""))) for i in self.items if i.get("type") != "separator"]
+            accel_widths = [font.measure(str(i.get("accelerator", ""))) for i in self.items if i.get("type") != "separator"]
+            label_w = max(label_widths or [120])
+            accel_w = max(accel_widths or [0])
+        except Exception:
+            label_w, accel_w = 180, 80
+        self._width = max(230, min(620, int(label_w + accel_w + self.app._ui_padding(58))))
+        y = self._outer_pad
+        rows = []
+        for index, item in enumerate(self.items):
+            h = self._separator_h if item.get("type") == "separator" else self._row_h
+            rows.append((index, y, y + h))
+            y += h
+        self._rows = rows
+        self._height = max(20, y + self._outer_pad)
+        return self._width, self._height
+
+    @staticmethod
+    def _round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+        return _RoundedChromeButton._round_rect(canvas, x1, y1, x2, y2, radius, **kwargs)
+
+    def _draw(self):
+        canvas = self._canvas
+        if canvas is None:
+            return
+        try:
+            canvas.delete("all")
+            w, h = self._width, self._height
+            self._round_rect(canvas, 1, 1, w-1, h-1, min(16, h//2),
+                             fill=self._surface, outline=self._border, width=1)
+            font = self._font
+            left = self._outer_pad + self.app._ui_padding(7)
+            right = w - self._outer_pad - self.app._ui_padding(9)
+            for index, y1, y2 in self._rows:
+                item = self.items[index]
+                typ = item.get("type")
+                if typ == "separator":
+                    cy = (y1 + y2) / 2
+                    canvas.create_line(left, cy, right, cy, fill=self._border, width=1)
+                    continue
+                disabled = item.get("state") == "disabled"
+                active = index in {self._hover_index, self._keyboard_index} and not disabled
+                pressed = index == self._pressed_index and not disabled
+                if active or pressed:
+                    inset = self.app._ui_padding(4)
+                    fill = self._accent if pressed else self._hover
+                    self._round_rect(canvas, inset, y1+1, w-inset, y2-1,
+                                     min(11, int((y2-y1)/2)), fill=fill, outline=fill)
+                    if active and not pressed:
+                        canvas.create_rectangle(inset, y1+8, inset+2, y2-8,
+                                                fill=self._accent, outline="")
+                color = self._disabled if disabled else self._text
+                y_text = (y1 + y2) / 2 + (1 if pressed else 0)
+                canvas.create_text(left + (1 if pressed else 0), y_text,
+                                   text=item.get("label", ""), fill=color,
+                                   font=font, anchor="w")
+                accelerator = item.get("accelerator", "")
+                if accelerator:
+                    canvas.create_text(right - (14 if typ == "cascade" else 0), y_text,
+                                       text=accelerator, fill=(self._disabled if disabled else self._muted),
+                                       font=font, anchor="e")
+                if typ == "cascade":
+                    canvas.create_text(right, y_text, text="›", fill=color, font=font, anchor="e")
+        except Exception:
+            pass
+
+    def _hit_index(self, y):
+        try:
+            y = int(y)
+        except Exception:
+            return None
+        for index, y1, y2 in self._rows:
+            if y1 <= y < y2 and self.items[index].get("type") != "separator":
+                return index
+        return None
+
+    def _on_motion(self, event):
+        index = self._hit_index(getattr(event, "y", -1))
+        if index != self._hover_index:
+            self._hover_index = index
+            self._keyboard_index = None
+            self._draw()
+            self._schedule_cascade(index)
+
+    def _on_leave(self, _event=None):
+        # Keep the cascade parent highlighted while the pointer crosses the
+        # tiny gap between parent and child popup.
+        if self._open_submenu is None:
+            self._hover_index = None
+            self._draw()
+
+    def _schedule_cascade(self, index):
+        if self._submenu_after_id is not None:
+            try: self.app.root.after_cancel(self._submenu_after_id)
+            except Exception: pass
+            self._submenu_after_id = None
+        if index is None or self.items[index].get("type") != "cascade" or self.items[index].get("state") == "disabled":
+            self._close_submenu()
+            return
+        try:
+            self._submenu_after_id = self.app.root.after(140, lambda i=index: self._open_cascade(i))
+        except Exception:
+            pass
+
+    def _open_cascade(self, index):
+        self._submenu_after_id = None
+        try:
+            item = self.items[index]
+        except Exception:
+            return
+        submenu = item.get("menu")
+        if not isinstance(submenu, _AnimatedPopupMenu) or item.get("state") == "disabled":
+            return
+        if self._open_submenu is submenu and submenu.is_posted():
+            return
+        self._close_submenu()
+        self._open_submenu = submenu
+        submenu._parent_menu = self
+        if not self._window:
+            return
+        try:
+            x = int(self._window.winfo_rootx()) + self._width - 5
+            row = next((r for r in self._rows if r[0] == index), None)
+            y = int(self._window.winfo_rooty()) + (row[1] if row else self._outer_pad)
+            submenu._post(x, y, root_binding=False)
+        except Exception:
+            self._open_submenu = None
+
+    def _close_submenu(self):
+        submenu = self._open_submenu
+        self._open_submenu = None
+        if isinstance(submenu, _AnimatedPopupMenu):
+            submenu.dismiss(include_parent=False)
+
+    def _on_press(self, event):
+        index = self._hit_index(getattr(event, "y", -1))
+        if index is None or self.items[index].get("state") == "disabled":
+            self._pressed_index = None
+            return
+        self._pressed_index = index
+        self._hover_index = index
+        self._draw()
+
+    def _on_release(self, event):
+        index = self._hit_index(getattr(event, "y", -1))
+        pressed = self._pressed_index
+        self._pressed_index = None
+        if index is None or index != pressed:
+            self._draw()
+            return "break"
+        item = self.items[index]
+        if item.get("state") == "disabled":
+            self._draw()
+            return "break"
+        if item.get("type") == "cascade":
+            self._open_cascade(index)
+            self._draw()
+            return "break"
+        # Keep the pressed glow visible for a tiny beat. It makes the click
+        # tactile without making the command itself feel delayed.
+        self._pressed_index = index
+        self._draw()
+        try:
+            self.app.root.after(45, lambda i=index: self._invoke(i))
+        except Exception:
+            self._invoke(index)
+        return "break"
+
+    def _invoke(self, index):
+        try:
+            item = self.items[index]
+        except Exception:
+            return
+        self._pressed_index = None
+        command = item.get("command")
+        root = self._root_menu()
+        root.dismiss(include_parent=False)
+        if callable(command):
+            try:
+                self.app.root.after_idle(command)
+            except Exception:
+                command()
+
+    def _root_menu(self):
+        menu = self
+        seen = set()
+        while isinstance(menu._parent_menu, _AnimatedPopupMenu) and id(menu) not in seen:
+            seen.add(id(menu))
+            menu = menu._parent_menu
+        return menu
+
+    def _all_open_windows(self):
+        windows = []
+        menu = self._root_menu()
+        while isinstance(menu, _AnimatedPopupMenu):
+            if menu.is_posted(): windows.append(menu._window)
+            menu = menu._open_submenu
+        return windows
+
+    def _outside_press(self, event):
+        try:
+            x, y = int(event.x_root), int(event.y_root)
+            for win in self._all_open_windows():
+                wx, wy = int(win.winfo_rootx()), int(win.winfo_rooty())
+                ww, wh = int(win.winfo_width()), int(win.winfo_height())
+                if wx <= x < wx + ww and wy <= y < wy + wh:
+                    return
+            root = self._root_menu()
+            anchor = getattr(root, "_anchor_button", None)
+            if anchor is not None:
+                ax, ay = int(anchor.winfo_rootx()), int(anchor.winfo_rooty())
+                aw, ah = int(anchor.winfo_width()), int(anchor.winfo_height())
+                if ax <= x < ax + aw and ay <= y < ay + ah:
+                    return
+        except Exception:
+            return
+        self.dismiss(include_parent=False)
+
+    def _keyboard_candidates(self):
+        return [i for i, item in enumerate(self.items)
+                if item.get("type") != "separator" and item.get("state") != "disabled"]
+
+    def _on_key(self, event):
+        key = str(getattr(event, "keysym", ""))
+        if key == "Escape":
+            self._root_menu().dismiss(include_parent=False)
+            return "break"
+        candidates = self._keyboard_candidates()
+        if not candidates:
+            return "break"
+        if key in {"Down", "Up"}:
+            current = self._keyboard_index if self._keyboard_index in candidates else None
+            pos = candidates.index(current) if current in candidates else (-1 if key == "Down" else 0)
+            pos = (pos + (1 if key == "Down" else -1)) % len(candidates)
+            self._keyboard_index = candidates[pos]
+            self._hover_index = self._keyboard_index
+            self._draw()
+            self._schedule_cascade(self._keyboard_index)
+            return "break"
+        if key in {"Return", "space"} and self._keyboard_index in candidates:
+            index = self._keyboard_index
+            if self.items[index].get("type") == "cascade": self._open_cascade(index)
+            else: self._invoke(index)
+            return "break"
+        if key == "Right" and self._keyboard_index in candidates:
+            self._open_cascade(self._keyboard_index)
+            return "break"
+        if key == "Left" and self._parent_menu is not None:
+            self.dismiss(include_parent=False)
+            try: self._parent_menu._window.focus_force()
+            except Exception: pass
+            return "break"
+        return None
+
+    def _animate_open(self, x, y):
+        if not self._window:
+            return
+        self._animation_jobs.clear()
+        steps = 7
+        for step in range(steps + 1):
+            def frame(s=step):
+                if not self.is_posted():
+                    return
+                t = s / steps
+                eased = 1.0 - (1.0 - t) ** 3
+                yy = int(y - (1.0 - eased) * 9)
+                try:
+                    self._window.geometry(f"{self._width}x{self._height}+{int(x)}+{yy}")
+                    self._window.attributes("-alpha", max(0.06, min(1.0, eased)))
+                except Exception:
+                    pass
+            try:
+                job = self.app.root.after(step * 12, frame)
+                self._animation_jobs.append(job)
+            except Exception:
+                pass
+
+    def _post(self, x, y, *, root_binding=True):
+        if callable(self._postcommand):
+            try: self._postcommand()
+            except Exception: pass
+        self.dismiss(include_parent=False)
+        self._measure()
+        try:
+            screen_w = int(self.app.root.winfo_screenwidth())
+            screen_h = int(self.app.root.winfo_screenheight())
+            x = max(4, min(int(x), screen_w - self._width - 4))
+            y = max(4, min(int(y), screen_h - self._height - 4))
+        except Exception:
+            x, y = int(x), int(y)
+        win = tk.Toplevel(self.app.root)
+        self._window = win
+        win.overrideredirect(True)
+        try: win.transient(self.app.root)
+        except Exception: pass
+        try: win.attributes("-topmost", True)
+        except Exception: pass
+        try: win.attributes("-alpha", 0.06)
+        except Exception: pass
+        win.configure(bg=self._surface, bd=0, highlightthickness=0)
+        canvas = tk.Canvas(win, width=self._width, height=self._height,
+                           bg=self._surface, highlightthickness=0, bd=0,
+                           relief="flat", cursor="hand2", takefocus=1)
+        self._canvas = canvas
+        canvas.pack(fill="both", expand=True)
+        canvas.bind("<Motion>", self._on_motion)
+        canvas.bind("<Leave>", self._on_leave)
+        canvas.bind("<ButtonPress-1>", self._on_press)
+        canvas.bind("<ButtonRelease-1>", self._on_release)
+        win.bind("<KeyPress>", self._on_key)
+        self._draw()
+        self._animate_open(x, y)
+        try:
+            win.lift()
+            win.focus_force()
+        except Exception:
+            pass
+        if root_binding:
+            try:
+                self._outside_bind_previous = self.app.root.bind_all("<ButtonPress-1>")
+            except Exception:
+                self._outside_bind_previous = ""
+            self._outside_bind_id = self.app.root.bind_all("<ButtonPress-1>", self._outside_press, add="+")
+            self.app._active_popup_menu = self
+        return self
+
+    def tk_popup(self, x, y, entry=None):
+        root = self._root_menu()
+        current = getattr(self.app, "_active_popup_menu", None)
+        if current is root and root.is_posted():
+            root.dismiss(include_parent=False)
+            return
+        if isinstance(current, _AnimatedPopupMenu) and current is not root:
+            current.dismiss(include_parent=False)
+        root._post(x, y, root_binding=True)
+
+    def dismiss(self, include_parent=False):
+        if include_parent and self._parent_menu is not None:
+            return self._parent_menu.dismiss(include_parent=True)
+        if self._submenu_after_id is not None:
+            try: self.app.root.after_cancel(self._submenu_after_id)
+            except Exception: pass
+            self._submenu_after_id = None
+        self._close_submenu()
+        for job in tuple(self._animation_jobs):
+            try: self.app.root.after_cancel(job)
+            except Exception: pass
+        self._animation_jobs.clear()
+        if self._outside_bind_id is not None:
+            try:
+                self.app.root.tk.call("bind", "all", "<ButtonPress-1>", self._outside_bind_previous or "")
+            except Exception:
+                pass
+            try:
+                self.app.root.deletecommand(self._outside_bind_id)
+            except Exception:
+                pass
+            self._outside_bind_id = None
+            self._outside_bind_previous = None
+        win = self._window
+        self._window = None
+        self._canvas = None
+        self._hover_index = self._pressed_index = self._keyboard_index = None
+        if win is not None:
+            try: win.destroy()
+            except Exception: pass
+        if self._anchor_button is not None and hasattr(self._anchor_button, "set_selected"):
+            try: self._anchor_button.set_selected(False)
+            except Exception: pass
+        if getattr(self.app, "_active_popup_menu", None) is self:
+            self.app._active_popup_menu = None
+
+    def grab_release(self):
+        # Kept for tkinter.Menu compatibility.  Animated menus do not use a Tk
+        # grab, so callers' traditional try/finally grab_release() is harmless.
+        return None
+
+    def _rebuild_visible_menu(self):
+        if not self.is_posted():
+            return
+        try:
+            x, y = int(self._window.winfo_rootx()), int(self._window.winfo_rooty())
+        except Exception:
+            return
+        self._measure()
+        try:
+            self._window.configure(bg=self._surface)
+            self._canvas.configure(width=self._width, height=self._height, bg=self._surface)
+            self._window.geometry(f"{self._width}x{self._height}+{x}+{y}")
+        except Exception:
+            pass
+        self._draw()
 
 
 class BrowserApp(BrowserFeatures):
@@ -499,10 +1268,18 @@ class BrowserApp(BrowserFeatures):
         self._private_mode = "--private" in sys.argv[1:]
         self._private_profile_dir = None
         self._privacy_profile_dir = None
+        # Clean abandoned private/lockdown trees from crashed prior sessions.
+        # Live owner PIDs and newly-created markerless directories are protected.
+        try:
+            cleanup_abandoned_temporary_profiles()
+        except Exception:
+            pass
         if self._private_mode:
             # Always create a fresh profile, even when this process was spawned
-            # by another private window and inherited its environment.
-            self._private_profile_dir = tempfile.mkdtemp(prefix="Tekzite-Private-")
+            # by another private window and inherited its environment. Embed the
+            # UI PID in the directory name so crash scavenging can prove liveness
+            # even before Chromium writes its own owner marker.
+            self._private_profile_dir = tempfile.mkdtemp(prefix=f"Tekzite-Private-{os.getpid()}-")
             os.environ["TEKZITE_CHROMIUM_PROFILE"] = self._private_profile_dir
             os.environ["TEKZITE_PRIVATE_MODE"] = "1"
         else:
@@ -539,6 +1316,16 @@ class BrowserApp(BrowserFeatures):
         loopback_policy.install(strict_python_loopback)
         self.customization = _normalized_customization(self.preferences.get("customization"))
         self.preferences["customization"] = self.customization
+        # v10.5.19: the app-owned motion system starts before the first map so
+        # the main shell can fade in rather than appearing as a single hard cut.
+        self._startup_motion_enabled = bool(
+            self.customization.get("animations", True)
+            and not self.preferences.get("quiet_mode", False)
+        )
+        try:
+            self.root.attributes("-alpha", 0.0 if self._startup_motion_enabled else 1.0)
+        except Exception:
+            pass
         # v7.3: prefer Windows' variable UI font for Tekzite chrome.  This keeps
         # the shell visually closer to modern native Windows/Firefox typography
         # without touching web-page CSS or changing site layout.
@@ -577,10 +1364,18 @@ class BrowserApp(BrowserFeatures):
         self._window_maximized = False
         self._window_drag_offset = (0, 0)
         self._fullscreen = False
+        self._window_rounding_signature = None
+        self._dwm_host_region_signature = None
+        self._address_focused = False
         # v8.1: lightweight Tk-side animation state. Animations are intentionally
         # confined to Tekzite chrome; Chromium/DWM remains completely untouched.
         self._ui_animation_serial = 0
         self._ui_animation_jobs = {}
+        # v10.5.22: opening tabs animate from a compact pill into their full
+        # width. Store start times by tab id so a tab-strip rebuild during
+        # navigation can resume the same animation instead of snapping.
+        self._tab_open_animation_started = {}
+        self._tab_open_animation_duration = 0.20
         self._loading_spinner_frames = ("◐", "◓", "◑", "◒")
         user_extension_paths = [] if self.preferences.get("privacy_lockdown", True) else _enabled_extension_paths(self.preferences)
         os.environ["TEKZITE_USER_EXTENSIONS"] = json.dumps(user_extension_paths)
@@ -645,6 +1440,7 @@ class BrowserApp(BrowserFeatures):
                         arrowcolor=self.ui["muted"], bordercolor=self.ui["border"], font=(self._ui_font_family, self._font_size(9)))
         style.map("TCombobox", fieldbackground=[("readonly", self.ui["field"])], foreground=[("readonly", self.ui["text"])],
                   selectbackground=[("readonly", self.ui["accent"])], selectforeground=[("readonly", "#ffffff")])
+        self._install_global_motion_bindings()
 
         self.history = []
         # v4.40: Tekzite-owned browser tabs. Each tab keeps its own history,
@@ -673,6 +1469,16 @@ class BrowserApp(BrowserFeatures):
         self._tab_switch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tekzite-tab-switch")
         self._tab_switch_serial = 0
         self._tab_switch_pending_id = None
+        self._tab_switch_future = None
+        # v10.5.32: closing a Chromium target can make Chromium/DWM churn even
+        # when the close itself runs on a worker. Keep closed targets parked for
+        # a short grace period so an immediate + click never competes with target
+        # destruction. The queue is drained only after the user has had time to
+        # start the next action.
+        self._closed_target_retire_queue = set()
+        self._closed_target_retire_after_id = None
+        self._closed_tab_handoff_after_id = None
+        self._closed_tab_handoff_retire_target = None
         self.font_manager = None
         self.js_runtime = None
         self.css_diagnostics = None
@@ -689,10 +1495,25 @@ class BrowserApp(BrowserFeatures):
         # the Tekzite window.
         self._dwm_surface_ready = False
         self._dwm_host_visible = False
+        self._dwm_host_alpha = None
+        self._dwm_reveal_pending = False
+        self._dwm_reveal_after_id = None
         self._dwm_host_rect = None
         self._dwm_geometry_after_id = None
         self._dwm_pending_resize = False
         self._dwm_last_chromium_viewport = None
+        # v10.5.4: DWM thumbnails are visual mirrors, not native Chromium input
+        # surfaces.  Keep a tiny Win32 pointer watchdog as an insurance layer
+        # behind Tk's normal hit-transparent edge_host bindings.  If Windows
+        # ever leaves the popup itself on top of hit testing, physical pointer
+        # motion and left-button transitions are still forwarded to Chromium
+        # over the same CDP path.  State matching prevents duplicate clicks when
+        # Tk is already receiving the events normally.
+        self._dwm_pointer_after_id = None
+        self._dwm_pointer_inside = False
+        self._dwm_pointer_last_screen_xy = None
+        self._dwm_pointer_last_page_xy = None
+        self._dwm_tk_pointer_event_at = 0.0
         # v9.7: live window dragging is latest-value-only. Tk geometry and DWM
         # destination updates are both coalesced so raw mouse-motion bursts do
         # not become CPU/compositor bursts. Chromium is never resized for a
@@ -752,7 +1573,7 @@ class BrowserApp(BrowserFeatures):
 
         # ── Frameless application bar + full browser menus ───────────────────
         self.app_bar = tk.Frame(
-            self.root, bg=self.ui["bg"], height=self._ui_metric("app_bar_height", 34), highlightthickness=0,
+            self.root, bg=self.ui["bg"], height=self._ui_metric("app_bar_height", 44), highlightthickness=0,
         )
         self.app_bar.pack(fill="x")
         self.app_bar.pack_propagate(False)
@@ -762,7 +1583,7 @@ class BrowserApp(BrowserFeatures):
         self.app_bar.bind("<Double-Button-1>", lambda event: self._toggle_maximize())
 
         self.app_brand = tk.Frame(self.app_bar, bg=self.ui["bg"])
-        self.app_brand.pack(side="left", padx=(self._ui_padding(12), self._ui_padding(10)), fill="y")
+        self.app_brand.pack(side="left", padx=(self._ui_padding(16), self._ui_padding(14)), fill="y")
         self.app_brand.bind("<ButtonPress-1>", self._start_window_drag)
         self.app_brand.bind("<B1-Motion>", self._drag_window)
         self.app_brand.bind("<ButtonRelease-1>", self._end_window_drag)
@@ -790,7 +1611,7 @@ class BrowserApp(BrowserFeatures):
         self._build_browser_menus(self.menu_strip)
 
         self.window_controls = tk.Frame(self.app_bar, bg=self.ui["bg"])
-        self.window_controls.pack(side="right", fill="y", padx=(self._ui_padding(6), self._ui_padding(10)), pady=self._ui_padding(5))
+        self.window_controls.pack(side="right", fill="y", padx=(self._ui_padding(8), self._ui_padding(14)), pady=self._ui_padding(7))
         self.window_control_buttons = [
             self._make_window_control(self.window_controls, "minimize", self._minimize_window),
             self._make_window_control(self.window_controls, "maximize", self._toggle_maximize),
@@ -807,35 +1628,31 @@ class BrowserApp(BrowserFeatures):
         if self._custom("window_control_style", "traffic_lights") == "traffic_lights":
             try:
                 self.window_controls.pack_forget()
-                self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(10), self._ui_padding(4)), pady=self._ui_padding(5), before=self.app_brand)
+                self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(14), self._ui_padding(6)), pady=self._ui_padding(7), before=self.app_brand)
             except Exception:
                 pass
 
         # ── Browser tab strip ───────────────────────────────────────────────
-        self.tab_bar = tk.Frame(self.root, bg=self.ui["chrome"], height=self._ui_metric("tab_bar_height", 44), highlightthickness=0)
+        self.tab_bar = tk.Frame(self.root, bg=self.ui["chrome"], height=self._ui_metric("tab_bar_height", 52), highlightthickness=0)
         self.tab_bar.pack(fill="x")
         self.tab_bar.pack_propagate(False)
         self.tab_items = tk.Frame(self.tab_bar, bg=self.ui["chrome"])
-        self.tab_items.pack(side="left", fill="both", expand=True, padx=(self._ui_padding(12), self._ui_padding(6)), pady=(self._ui_padding(6), self._ui_padding(5)))
-        self.new_tab_button = tk.Button(
-            self.tab_bar, text="+", command=self._new_tab, bg=self.ui["chrome"],
-            fg=self.ui["muted"], activebackground=self.ui["chrome_hover"],
-            activeforeground="#ffffff", relief="flat", bd=0, highlightthickness=0,
-            font=(self._ui_font_family, max(10, int(self._custom("tab_font_size", 9)) + 4)), cursor="hand2", width=3,
+        self.tab_items.pack(side="left", fill="both", expand=True, padx=(self._ui_padding(16), self._ui_padding(10)), pady=(self._ui_padding(8), self._ui_padding(7)))
+        # Keep + in the same row as the tabs so "right" means immediately
+        # after the open tabs, not the far-right edge of the whole strip.
+        self.new_tab_button = _RoundedChromeButton(
+            self.tab_items, "+", self._new_tab, surface_bg=self.ui["chrome_2"],
+            hover_bg=self.ui["field_focus"], fg=self.ui["muted"], hover_fg=self.ui["text"],
+            border=self.ui["border_soft"], hover_border=self.ui["border_focus"],
+            canvas_bg=self.ui["chrome"],
+            font=(self._ui_font_family, max(10, int(self._custom("tab_font_size", 9)) + 4)),
+            padx=self._ui_padding(12), pady=self._ui_padding(6), width=None,
+            radius=self._ui_metric("control_corner_radius", 16), disabled_fg=self.ui["muted_dim"],
         )
-        self.new_tab_button.pack(side=str(self._custom("new_tab_button_position", "right")), padx=(self._ui_padding(2), self._ui_padding(10)), pady=(self._ui_padding(5), self._ui_padding(4)))
-        self.new_tab_button.bind("<Enter>", lambda e: (
-            self._animate_widget_color(self.new_tab_button, "bg", self.ui["chrome_hover"], 110),
-            self._animate_widget_color(self.new_tab_button, "fg", self.ui["text"], 110),
-        ))
-        self.new_tab_button.bind("<Leave>", lambda e: (
-            self._animate_widget_color(self.new_tab_button, "bg", self.ui["chrome"], 130),
-            self._animate_widget_color(self.new_tab_button, "fg", self.ui["muted"], 130),
-        ))
 
         # ── Tekzite browser chrome ──────────────────────────────────────────
         self.toolbar = tk.Frame(
-            self.root, bg=self.ui["chrome"], height=self._ui_metric("toolbar_height", 62), highlightthickness=0,
+            self.root, bg=self.ui["chrome"], height=self._ui_metric("toolbar_height", 72), highlightthickness=0,
         )
         self.toolbar.pack(fill="x")
         self.toolbar.pack_propagate(False)
@@ -844,24 +1661,16 @@ class BrowserApp(BrowserFeatures):
             bg = self.ui["accent"] if accent else self.ui["field"]
             hover = self.ui["accent_hover"] if accent else self.ui["field_focus"]
             fg = "#ffffff" if accent else self.ui["muted"]
-            button = tk.Button(
-                parent, text=text, command=command, bg=bg, fg=fg,
-                activebackground=hover, activeforeground="#ffffff", relief="flat", bd=0,
-                highlightthickness=1, highlightbackground=self.ui["border_soft"], highlightcolor=self.ui["border_focus"],
+            return _RoundedChromeButton(
+                parent, text, command, surface_bg=bg, hover_bg=hover, fg=fg,
+                hover_fg="#ffffff", border=self.ui["border_soft"],
+                hover_border=self.ui["accent_hover"] if accent else self.ui["border_focus"],
+                canvas_bg=self.ui["chrome"],
                 font=(self._ui_font_family, max(7, int(self._custom("toolbar_font_size", 10))), "bold" if accent else "normal"),
-                cursor="hand2", padx=self._ui_padding(12), pady=self._ui_padding(7), width=width,
+                padx=self._ui_padding(14), pady=self._ui_padding(9), width=width,
+                radius=self._ui_metric("control_corner_radius", 16),
+                disabled_fg=self.ui["muted_dim"],
             )
-            button.bind("<Enter>", lambda e, b=button: (
-                self._animate_widget_color(b, "bg", self.ui["accent_hover"] if accent else self.ui["field_focus"], 105),
-                self._animate_widget_color(b, "fg", "#ffffff", 105),
-                self._animate_widget_color(b, "highlightbackground", self.ui["border_focus"] if not accent else self.ui["accent_hover"], 105),
-            ))
-            button.bind("<Leave>", lambda e, b=button: (
-                self._animate_widget_color(b, "bg", self.ui["accent"] if accent else self.ui["field"], 135),
-                self._animate_widget_color(b, "fg", "#ffffff" if accent else self.ui["muted"], 135),
-                self._animate_widget_color(b, "highlightbackground", self.ui["border_soft"], 135),
-            ))
-            return button
 
         self.back_button = chrome_button(self.toolbar, self._toolbar_text("back"), self.go_back, width=None)
         self.forward_button = chrome_button(self.toolbar, self._toolbar_text("forward"), self.go_forward, width=None)
@@ -870,49 +1679,64 @@ class BrowserApp(BrowserFeatures):
 
         self.url_var = tk.StringVar(value=self._homepage_url())
         self.address_shell = tk.Frame(
-            self.toolbar, bg=self.ui["field"], highlightbackground=self.ui["border"],
-            highlightcolor=self.ui["border_focus"], highlightthickness=1,
+            self.toolbar, bg=self.ui["chrome"], highlightthickness=0, bd=0,
         )
+        self.address_backdrop = tk.Canvas(
+            self.address_shell, bg=self.ui["chrome"], highlightthickness=0, bd=0, takefocus=0,
+        )
+        self.address_backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.address_inner = tk.Frame(self.address_shell, bg=self.ui["field"], bd=0, highlightthickness=0)
+        self.address_inner.pack(fill="both", expand=True, padx=self._ui_padding(9), pady=self._ui_padding(6))
+        self.address_inner.lift()
+        self.address_shell.bind("<Configure>", lambda _e: self._redraw_address_shell(), add="+")
         self.site_info_button = tk.Button(
-            self.address_shell, text="◈", command=self._show_site_info, fg=self.ui["accent_hover"], bg=self.ui["field"],
+            self.address_inner, text="◈", command=self._show_site_info, fg=self.ui["accent_hover"], bg=self.ui["field"],
             activeforeground=self.ui["text"], activebackground=self.ui["field_focus"], relief="flat", bd=0,
             highlightthickness=0, cursor="hand2", font=("Segoe UI Symbol", max(8, int(self._custom("toolbar_font_size", 10)) + 1)),
             padx=self._ui_padding(5), pady=1,
         )
         self.site_info_button.pack(side="left", padx=(self._ui_padding(8), self._ui_padding(2)))
 
+        # Keep the editable Entry for real keyboard/caret/selection behavior, but
+        # cover it with a Pillow-rendered preview while unfocused.  Tk's Win32
+        # ClearType path can produce colored/black-looking subpixel halves on
+        # very dark omnibox surfaces; the preview uses grayscale antialiasing
+        # instead, so the resting URL stays clean and uniformly colored.
+        self.address_text_host = tk.Frame(self.address_inner, bg=self.ui["field"], bd=0, highlightthickness=0)
+        # v10.5.21: do not squeeze the editable/preview layer into a thin
+        # horizontal strip. The address shell already provides the vertical
+        # breathing room; a second large pady here left only a few pixels for
+        # the actual URL surface on the spacious layout.
+        self.address_text_host.pack(side="left", fill="both", expand=True,
+                                    padx=(self._ui_padding(3), self._ui_padding(6)), pady=self._ui_padding(1))
         self.address = tk.Entry(
-            self.address_shell, textvariable=self.url_var, bg=self.ui["field"], fg=self.ui["text"],
+            self.address_text_host, textvariable=self.url_var, bg=self.ui["field"], fg=self.ui["text"],
             insertbackground=self.ui["text"], selectbackground=self.ui["accent"], selectforeground="#ffffff",
             relief="flat", bd=0, highlightthickness=0,
-            font=(self._ui_font_family, max(7, int(self._custom("font_size", 10)))),
+            font=("Segoe UI", max(10, int(self._custom("font_size", 10)) + 1)),
         )
-        self.address.pack(side="left", fill="both", expand=True, padx=(self._ui_padding(2), self._ui_padding(4)), pady=self._ui_padding(7))
+        self.address.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.address_preview = tk.Canvas(
+            self.address_text_host, bg=self.ui["field"], highlightthickness=0, bd=0, takefocus=0,
+        )
+        self.address_preview.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._address_preview_photo = None
+        self._address_preview_after_id = None
+        self.address_text_host.bind("<Configure>", lambda _e: self._schedule_address_preview_render(), add="+")
+        self.address_preview.bind("<Button-1>", self._activate_address_preview)
+        self.address_preview.bind("<Button-3>", self._show_address_preview_context_menu)
+        self.url_var.trace_add("write", lambda *_args: self._schedule_address_preview_render())
 
         self.bookmark_button = tk.Button(
-            self.address_shell, text="☆", command=self._toggle_current_bookmark, fg=self.ui["muted"], bg=self.ui["field"],
+            self.address_inner, text="☆", command=self._toggle_current_bookmark, fg=self.ui["muted"], bg=self.ui["field"],
             activeforeground=self.ui["accent_hover"], activebackground=self.ui["field_focus"], relief="flat", bd=0,
             highlightthickness=0, cursor="hand2", font=("Segoe UI Symbol", max(10, int(self._custom("toolbar_font_size", 10)) + 3)),
             padx=self._ui_padding(7), pady=1,
         )
         self.bookmark_button.pack(side="right", padx=(0, self._ui_padding(4)))
         self.address.bind("<Return>", lambda event: self.navigate())
-        self.address.bind(
-            "<FocusIn>",
-            lambda event: (
-                self._animate_widget_color(self.address_shell, "highlightbackground", self.ui["border_focus"], 135),
-                self._animate_widget_color(self.address, "bg", self.ui["field_focus"], 135),
-                self._animate_widget_color(self.address_shell, "bg", self.ui["field_focus"], 135),
-            ),
-        )
-        self.address.bind(
-            "<FocusOut>",
-            lambda event: (
-                self._animate_widget_color(self.address_shell, "highlightbackground", self.ui["border"], 150),
-                self._animate_widget_color(self.address, "bg", self.ui["field"], 150),
-                self._animate_widget_color(self.address_shell, "bg", self.ui["field"], 150),
-            ),
-        )
+        self.address.bind("<FocusIn>", lambda event: self._set_address_shell_focus(True))
+        self.address.bind("<FocusOut>", lambda event: self._set_address_shell_focus(False))
         self.address.bind("<Button-1>", self._on_address_pointer_down, add="+")
         self.address.bind("<FocusIn>", self._on_address_focus_in, add="+")
         self.address.bind("<FocusOut>", self._on_address_focus_out, add="+")
@@ -943,7 +1767,7 @@ class BrowserApp(BrowserFeatures):
             relief="flat", bd=0, highlightthickness=1, highlightbackground=self.ui["border"],
             font=(self._ui_font_family, self._font_size(9)),
         )
-        self.find_entry.pack(side="left", fill="x", expand=True, padx=(12, 6), pady=6)
+        self.find_entry.pack(side="left", fill="x", expand=True, padx=(16, 8), pady=8)
         self.find_entry.bind("<Return>", lambda event: self._find_in_page(False))
         self.find_entry.bind("<Shift-Return>", lambda event: self._find_in_page(True))
         self.find_entry.bind("<Escape>", lambda event: self._hide_find_bar())
@@ -983,6 +1807,7 @@ class BrowserApp(BrowserFeatures):
         self.edge_host.bind("<Leave>", self._on_chromium_surface_leave)
         self.edge_host.bind("<MouseWheel>", self._on_chromium_surface_wheel)
         self.edge_host.bind("<KeyPress>", self._on_chromium_surface_key)
+        self.edge_host.bind("<ButtonRelease-2>", self._on_chromium_surface_middle_click)
         self.edge_host.bind("<Button-3>", self._on_chromium_surface_context_menu)
         self.root.bind("<KeyPress>", self._on_root_chromium_key, add="+")
 
@@ -1037,6 +1862,17 @@ class BrowserApp(BrowserFeatures):
         self._chromium_left_button_down = False
         self._chromium_drag_selecting = False
         self._chromium_press_point = None
+        # v10.5.7: preserve real browser gesture semantics over the DWM mirror.
+        # Chromium needs clickCount=2/3 for double/triple click selection, while
+        # drag moves are coalesced so sliders/scrollbars cannot flood the input
+        # FIFO and delay the matching release.
+        self._chromium_press_click_count = 1
+        self._chromium_last_click_release_at = 0.0
+        self._chromium_last_click_point = None
+        self._chromium_last_click_count = 0
+        self._chromium_pending_drag = None
+        self._chromium_drag_after_id = None
+        self._chromium_drag_future = None
         # v5.08: software presentation can sustain a noticeably smoother
         # interaction cadence now that the viewport contract and Tk image are
         # reused between frames. 33 ms targets ~30 FPS without queueing captures.
@@ -1073,6 +1909,7 @@ class BrowserApp(BrowserFeatures):
         self.chromium_surface.bind("<Leave>", self._on_chromium_surface_leave)
         self.chromium_surface.bind("<MouseWheel>", self._on_chromium_surface_wheel)
         self.chromium_surface.bind("<KeyPress>", self._on_chromium_surface_key)
+        self.chromium_surface.bind("<ButtonRelease-2>", self._on_chromium_surface_middle_click)
         self.chromium_surface.bind("<Button-3>", self._on_chromium_surface_context_menu)
 
         self.canvas = tk.Canvas(
@@ -1103,7 +1940,7 @@ class BrowserApp(BrowserFeatures):
 
         self.status_var = tk.StringVar(value="Ready")
         self.status_bar = tk.Frame(
-            self.root, bg=self.ui["chrome"], height=self._ui_metric("status_bar_height", 25),
+            self.root, bg=self.ui["chrome"], height=self._ui_metric("status_bar_height", 30),
             highlightbackground=self.ui["border"], highlightthickness=1,
         )
         self.status_bar.pack(fill="x")
@@ -1114,7 +1951,7 @@ class BrowserApp(BrowserFeatures):
             self.status_bar, text="●", fg=self.ui.get("success", "#45d483"), bg=self.ui["chrome"],
             font=(self._ui_font_family, self._font_size(7)),
         )
-        self.status_activity_dot.pack(side="left", padx=(self._ui_padding(12), self._ui_padding(6)))
+        self.status_activity_dot.pack(side="left", padx=(self._ui_padding(16), self._ui_padding(8)))
         self.status_text_label = tk.Label(
             self.status_bar, textvariable=self.status_var, anchor="w", fg=self.ui["muted"], bg=self.ui["chrome"],
             font=(self._ui_font_family, max(7, int(self._custom("menu_font_size", 9)))),
@@ -1125,7 +1962,7 @@ class BrowserApp(BrowserFeatures):
             fg=self.ui["muted"], bg=self.ui["chrome"],
             font=(self._ui_font_family, max(7, int(self._custom("menu_font_size", 9)) - 1)),
         )
-        self.status_version_label.pack(side="right", padx=(self._ui_padding(8), self._ui_padding(12)))
+        self.status_version_label.pack(side="right", padx=(self._ui_padding(10), self._ui_padding(16)))
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<Control-l>", lambda event: self._focus_address())
@@ -1192,7 +2029,7 @@ class BrowserApp(BrowserFeatures):
             fallback()
             return
         if session.get("clean_exit") is False:
-            restore = messagebox.askyesno(
+            restore = self._ask_yes_no(
                 "Restore Tekzite Tabs",
                 "Tekzite did not finish its previous shutdown cleanly. Restore the previous tabs?",
                 parent=self.root,
@@ -1239,7 +2076,7 @@ class BrowserApp(BrowserFeatures):
         try:
             write_json(self._state_directory / "bookmarks.json", updated)
         except OSError as exc:
-            messagebox.showerror("Bookmarks", f"Could not save bookmarks:\n{exc}", parent=parent or self.root)
+            self._show_message("error", "Bookmarks", f"Could not save bookmarks:\n{exc}", parent=parent or self.root)
             return False
         self.bookmarks = updated
         self._refresh_standard_toolbar_state()
@@ -1280,7 +2117,7 @@ class BrowserApp(BrowserFeatures):
         if previous is not None and previous.winfo_exists():
             previous.lift()
             return "break"
-        win = tk.Toplevel(self.root)
+        win = self._new_animated_toplevel(self.root)
         self._bookmarks_window = win
         win.title("Tekzite Bookmarks")
         win.geometry("680x400")
@@ -1318,7 +2155,7 @@ class BrowserApp(BrowserFeatures):
             index = selected()
             if index is None:
                 return
-            title = simpledialog.askstring("Rename bookmark", "Name:", initialvalue=self.bookmarks[index]["title"], parent=win)
+            title = self._ask_string_animated("Rename bookmark", "Name:", initialvalue=self.bookmarks[index]["title"], parent=win)
             if title and title.strip():
                 updated = [dict(item) for item in self.bookmarks]
                 updated[index]["title"] = title.strip()
@@ -1447,29 +2284,546 @@ class BrowserApp(BrowserFeatures):
 
         frame()
 
-    def _animate_toplevel_in(self, win, duration=140):
-        """Small native fade for dialogs; silently degrades if unsupported."""
+    def _motion_enabled(self):
+        return bool(
+            not self.preferences.get("quiet_mode", False)
+            and self._custom("animations", True)
+        )
+
+    @staticmethod
+    def _ease_out_cubic(t):
+        t = max(0.0, min(1.0, float(t)))
+        return 1.0 - (1.0 - t) ** 3
+
+    def _dialog_display_title(self, win):
+        """Return a clean in-window title for a Tekzite-owned dialog."""
         try:
-            win.attributes("-alpha", 0.0)
+            title = str(win.title() or "Tekzite")
+        except Exception:
+            title = "Tekzite"
+        if title.startswith("Tekzite "):
+            title = title[len("Tekzite "):]
+        title = re.sub(r"\s*[—-]\s*v\d+(?:\.\d+){1,3}\s*$", "", title).strip()
+        return title or "Tekzite"
+
+    def _bind_frameless_dialog_drag(self, win, *handles):
+        """Let Tekzite-owned frameless dialogs move from their in-window header.
+
+        Native title bars are intentionally disabled for every app-owned Toplevel.
+        Keep the familiar drag behavior by treating the branded header/logo/title
+        area as the window's move handle instead. Buttons are not registered as
+        handles, so clicking Close or another header control never starts a drag.
+        """
+        if win is None:
+            return False
+
+        def start_drag(event):
+            try:
+                win._tekzite_dialog_drag_anchor = (
+                    int(event.x_root) - int(win.winfo_x()),
+                    int(event.y_root) - int(win.winfo_y()),
+                )
+            except Exception:
+                win._tekzite_dialog_drag_anchor = None
+
+        def move_drag(event):
+            anchor = getattr(win, "_tekzite_dialog_drag_anchor", None)
+            if not anchor:
+                return
+            try:
+                x = int(event.x_root) - int(anchor[0])
+                y = int(event.y_root) - int(anchor[1])
+                win.geometry(f"+{x}+{y}")
+            except Exception:
+                pass
+
+        def end_drag(_event=None):
+            win._tekzite_dialog_drag_anchor = None
+
+        bound = False
+        for widget in handles:
+            if widget is None:
+                continue
+            try:
+                widget.configure(cursor="fleur")
+            except Exception:
+                pass
+            try:
+                widget.bind("<ButtonPress-1>", start_drag, add="+")
+                widget.bind("<B1-Motion>", move_drag, add="+")
+                widget.bind("<ButtonRelease-1>", end_drag, add="+")
+                bound = True
+            except Exception:
+                pass
+        return bound
+
+    def _apply_about_style_to_dialog(self, win):
+        """Give every Tekzite-owned dialog the same visual shell as About.
+
+        The dialog body remains owned by the individual feature, but the shared
+        top area always uses Tekzite's logo tile, display title, version line,
+        generous spacing and separator.  The header is inserted *before* the
+        first packed child so existing feature windows do not need to be rebuilt.
+        """
+        try:
+            if not win.winfo_exists() or getattr(win, "_tekzite_about_style_applied", False):
+                return False
+            win._tekzite_about_style_applied = True
+            win.configure(bg=self.ui["bg"])
+
+            shell = tk.Frame(win, bg=self.ui["bg"], padx=24, pady=18)
+            header = tk.Frame(shell, bg=self.ui["bg"])
+            header.pack(fill="x")
+
+            logo = tk.Canvas(header, width=46, height=46, bg=self.ui["bg"],
+                             highlightthickness=0, bd=0)
+            logo.pack(side="left", padx=(0, 14))
+            logo.create_rectangle(3, 3, 43, 43, fill=self.ui["accent"],
+                                  outline=self.ui["accent_hover"], width=1)
+            logo.create_text(23, 23, text="T", fill="#ffffff",
+                             font=(self._ui_display_font_family, self._font_size(17), "bold"))
+
+            title_col = tk.Frame(header, bg=self.ui["bg"])
+            title_col.pack(side="left", fill="x", expand=True)
+            title_label = tk.Label(title_col, text=self._dialog_display_title(win), bg=self.ui["bg"],
+                                   fg=self.ui["text"],
+                                   font=(self._ui_display_font_family, self._font_size(15), "bold"),
+                                   anchor="w")
+            title_label.pack(fill="x")
+            version_label = tk.Label(title_col, text=f"Tekzite Browser  •  v{BROWSER_VERSION}",
+                                     bg=self.ui["bg"], fg=self.ui["accent_hover"],
+                                     font=(self._ui_font_family, self._font_size(9)),
+                                     anchor="w")
+            version_label.pack(fill="x", pady=(2, 0))
+            close_button = tk.Button(
+                header, text="×", command=win.destroy,
+                bg=self.ui["bg"], fg=self.ui["muted"],
+                activebackground=self.ui["chrome_hover"], activeforeground=self.ui["text"],
+                relief="flat", bd=0, highlightthickness=0, cursor="hand2",
+                font=(self._ui_display_font_family, self._font_size(14)),
+                padx=9, pady=3,
+            )
+            close_button.pack(side="right", padx=(12, 0))
+            self._bind_frameless_dialog_drag(
+                win, shell, header, logo, title_col, title_label, version_label
+            )
+
+            tk.Frame(shell, bg=self.ui["border_soft"], height=1).pack(
+                fill="x", pady=(15, 0)
+            )
+
+            slaves = [child for child in win.pack_slaves() if child is not shell]
+            if slaves:
+                shell.pack(fill="x", before=slaves[0])
+            else:
+                shell.pack(fill="x")
+            win._tekzite_dialog_header = shell
+
+            # Preserve the content space callers requested before the shared
+            # header existed. Small confirmations in particular used to be
+            # sized only for their body, so simply inserting a header would
+            # squeeze their buttons/message. Grow the window by the header's
+            # requested height when the monitor has room, never shrink it.
+            try:
+                win.update_idletasks()
+                current_w = max(1, int(win.winfo_width()))
+                current_h = max(1, int(win.winfo_height()))
+                header_h = max(1, int(shell.winfo_reqheight()))
+                screen_h = max(current_h, int(win.winfo_screenheight()))
+                target_h = max(current_h, min(current_h + header_h, max(current_h, screen_h - 72)))
+                if target_h > current_h:
+                    x, y = int(win.winfo_x()), int(win.winfo_y())
+                    win.geometry(f"{current_w}x{target_h}+{x}+{y}")
+            except Exception:
+                pass
+
+            # All Tekzite dialogs must win the z-order race against the separate
+            # native DWM webpage presenter just like About does.
+            try:
+                win.after(20, lambda w=win: self._raise_toplevel_above_dwm(w, hold_ms=360)
+                          if w.winfo_exists() else None)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    def _new_animated_toplevel(self, parent=None, *, duration=165, slide=14, branded=True):
+        """Create an app-owned Toplevel with automatic open/close motion.
+
+        The destroy method is wrapped immediately, before callers wire buttons,
+        so Close/Escape actions across Settings, managers, inspectors and tools
+        all receive the same fade/slide exit animation without per-dialog code.
+        """
+        win = tk.Toplevel(parent or self.root)
+        # v10.5.27: every Tekzite-owned secondary window is frameless. The
+        # branded in-window header is the title surface; native Windows title
+        # bars would duplicate it and visually break the unified shell.
+        try:
+            win.overrideredirect(True)
+        except Exception:
+            pass
+        original_destroy = win.destroy
+        win._tekzite_original_destroy = original_destroy
+        win._tekzite_motion_closing = False
+        win._tekzite_motion_duration = int(duration)
+        win._tekzite_motion_slide = int(slide)
+        try:
+            win.attributes("-alpha", 0.0 if self._motion_enabled() else 1.0)
+        except Exception:
+            pass
+
+        def animated_destroy():
+            if getattr(win, "_tekzite_motion_closing", False):
+                return
+            if not self._motion_enabled():
+                try: original_destroy()
+                except Exception: pass
+                return
+            self._animate_toplevel_out(win, original_destroy,
+                                       duration=max(90, int(duration * 0.72)),
+                                       slide=max(6, int(slide * 0.72)))
+        win.destroy = animated_destroy
+        try:
+            win.protocol("WM_DELETE_WINDOW", animated_destroy)
+        except Exception:
+            pass
+        win._tekzite_branded_dialog = bool(branded)
+        def prepare_dialog(w=win):
+            try:
+                if not w.winfo_exists():
+                    return
+                if getattr(w, "_tekzite_branded_dialog", False):
+                    self._apply_about_style_to_dialog(w)
+                self._animate_toplevel_in(w, duration=duration, slide=slide)
+            except Exception:
+                pass
+        try:
+            # Do not use after_idle here. Dialog builders commonly call
+            # update_idletasks() while measuring their requested size; that also
+            # drains idle callbacks and could start the animation before the
+            # caller has assigned the final geometry. The timer runs after the
+            # builder returns, applies the shared About-style shell, then animates.
+            win.after(1, prepare_dialog)
+        except Exception:
+            pass
+        return win
+
+    def _animate_toplevel_in(self, win, duration=165, slide=14):
+        """Fade and gently lift an app-owned window into place."""
+        try:
+            if not win.winfo_exists():
+                return
+            win.update_idletasks()
+            final_x, final_y = int(win.winfo_x()), int(win.winfo_y())
+            width, height = max(1, int(win.winfo_width())), max(1, int(win.winfo_height()))
         except Exception:
             return
-        if self.preferences.get("quiet_mode", False) or not self._custom("animations", True):
-            win.attributes("-alpha", 1.0)
+        if not self._motion_enabled():
+            try: win.attributes("-alpha", 1.0)
+            except Exception: pass
             return
-        steps = 9
-        interval = max(10, duration // steps)
+        token = time.monotonic_ns()
+        win._tekzite_motion_token = token
+        steps = max(7, min(15, int(duration // 12)))
+        interval = max(8, int(duration) // steps)
+        try:
+            win.geometry(f"{width}x{height}+{final_x}+{final_y + int(slide)}")
+            win.attributes("-alpha", 0.02)
+        except Exception:
+            pass
+
         def frame(i=1):
             try:
-                if not win.winfo_exists():
+                if not win.winfo_exists() or getattr(win, "_tekzite_motion_token", None) != token:
                     return
-                t = min(1.0, i / float(steps))
-                eased = 1.0 - (1.0 - t) ** 3
-                win.attributes("-alpha", eased)
+                t = self._ease_out_cubic(i / float(steps))
+                y = int(round(final_y + (1.0 - t) * int(slide)))
+                win.geometry(f"{width}x{height}+{final_x}+{y}")
+                win.attributes("-alpha", max(0.02, min(1.0, t)))
                 if i < steps:
                     win.after(interval, lambda: frame(i + 1))
+                else:
+                    win.attributes("-alpha", 1.0)
+                    win.geometry(f"{width}x{height}+{final_x}+{final_y}")
             except Exception:
                 pass
         frame()
+
+    def _animate_toplevel_out(self, win, on_done=None, duration=115, slide=10):
+        """Fade/settle an app-owned window out, then destroy it safely."""
+        try:
+            if not win.winfo_exists():
+                if on_done: on_done()
+                return
+            win._tekzite_motion_closing = True
+            win.update_idletasks()
+            x, y = int(win.winfo_x()), int(win.winfo_y())
+            width, height = max(1, int(win.winfo_width())), max(1, int(win.winfo_height()))
+            try: start_alpha = float(win.attributes("-alpha"))
+            except Exception: start_alpha = 1.0
+        except Exception:
+            if on_done:
+                try: on_done()
+                except Exception: pass
+            return
+        if not self._motion_enabled():
+            if on_done:
+                try: on_done()
+                except Exception: pass
+            return
+        token = time.monotonic_ns()
+        win._tekzite_motion_token = token
+        steps = max(6, min(12, int(duration // 11)))
+        interval = max(8, int(duration) // steps)
+
+        def finish():
+            if on_done:
+                try: on_done()
+                except Exception: pass
+
+        def frame(i=1):
+            try:
+                if not win.winfo_exists() or getattr(win, "_tekzite_motion_token", None) != token:
+                    return
+                t = self._ease_out_cubic(i / float(steps))
+                alpha = max(0.0, start_alpha * (1.0 - t))
+                yy = int(round(y + t * int(slide)))
+                win.geometry(f"{width}x{height}+{x}+{yy}")
+                win.attributes("-alpha", alpha)
+                if i < steps:
+                    win.after(interval, lambda: frame(i + 1))
+                else:
+                    finish()
+            except Exception:
+                finish()
+        frame()
+
+    def _animate_main_window_in(self, duration=190):
+        if not getattr(self, "_startup_motion_enabled", False):
+            try: self.root.attributes("-alpha", 1.0)
+            except Exception: pass
+            return
+        steps = 13
+        interval = max(9, int(duration) // steps)
+        def frame(i=1):
+            try:
+                if not self.root.winfo_exists():
+                    return
+                t = self._ease_out_cubic(i / float(steps))
+                self.root.attributes("-alpha", max(0.02, min(1.0, t)))
+                if i < steps:
+                    self.root.after(interval, lambda: frame(i + 1))
+                else:
+                    self.root.attributes("-alpha", 1.0)
+            except Exception:
+                pass
+        frame()
+
+    def _animate_notebook_page(self, notebook, duration=145):
+        """Give Settings/Customize page changes a small horizontal settle."""
+        if not self._motion_enabled():
+            return
+        try:
+            selected = notebook.select()
+            if not selected:
+                return
+            page = notebook.nametowidget(selected)
+            base_padx = int(getattr(page, "_tekzite_base_padx", int(page.cget("padx") or 0)))
+            page._tekzite_base_padx = base_padx
+        except Exception:
+            return
+        steps = 8
+        interval = max(9, int(duration) // steps)
+        token = time.monotonic_ns()
+        page._tekzite_page_motion_token = token
+        def frame(i=1):
+            try:
+                if not page.winfo_exists() or getattr(page, "_tekzite_page_motion_token", None) != token:
+                    return
+                t = self._ease_out_cubic(i / float(steps))
+                page.configure(padx=base_padx + int(round((1.0 - t) * 10)))
+                if i < steps:
+                    page.after(interval, lambda: frame(i + 1))
+                else:
+                    page.configure(padx=base_padx)
+            except Exception:
+                pass
+        frame()
+
+    def _show_message(self, kind, title, message, *, parent=None):
+        """Animated Tekzite-owned replacement for app message boxes."""
+        parent = parent or self.root
+        win = self._new_animated_toplevel(parent, duration=150, slide=12)
+        win.title(str(title or "Tekzite"))
+        win.transient(parent)
+        win.resizable(False, False)
+        win.configure(bg=self.ui["bg"])
+        result = {"value": "ok"}
+        accent = {"info": self.ui["accent"], "warning": "#f3b85b", "error": self.ui["danger"]}.get(kind, self.ui["accent"])
+        outer = tk.Frame(win, bg=self.ui["bg"], padx=24, pady=18)
+        outer.pack(fill="both", expand=True)
+        message_row = tk.Frame(outer, bg=self.ui["bg"]); message_row.pack(fill="x")
+        badge = tk.Canvas(message_row, width=34, height=34, bg=self.ui["bg"], highlightthickness=0, bd=0)
+        badge.pack(side="left", anchor="n", padx=(0, 12))
+        badge.create_oval(2, 2, 32, 32, fill=self.ui["chrome_2"], outline=accent, width=2)
+        badge.create_text(17, 17, text={"info":"i","warning":"!","error":"×"}.get(kind,"i"), fill=accent,
+                          font=(self._ui_display_font_family, self._font_size(11), "bold"))
+        tk.Label(message_row, text=str(message or ""), bg=self.ui["bg"], fg=self.ui["text"],
+                 font=(self._ui_font_family, self._font_size(10)), justify="left", anchor="w",
+                 wraplength=500).pack(side="left", fill="x", expand=True, pady=(3, 0))
+        buttons = tk.Frame(outer, bg=self.ui["bg"]); buttons.pack(fill="x")
+        ok = tk.Button(buttons, text="OK", command=win.destroy, bg=self.ui["accent"], fg="#ffffff",
+                       activebackground=self.ui["accent_hover"], activeforeground="#ffffff",
+                       relief="flat", bd=0, padx=22, pady=8, cursor="hand2")
+        ok.pack(side="right")
+        win.bind("<Return>", lambda _e: win.destroy())
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.update_idletasks()
+        width = max(390, min(600, int(outer.winfo_reqwidth()) + 12))
+        height = max(180, int(outer.winfo_reqheight()) + 8)
+        try:
+            px, py = int(parent.winfo_rootx()), int(parent.winfo_rooty())
+            pw, ph = int(parent.winfo_width()), int(parent.winfo_height())
+            win.geometry(f"{width}x{height}+{px + max(0,(pw-width)//2)}+{py + max(0,(ph-height)//2)}")
+        except Exception:
+            win.geometry(f"{width}x{height}")
+        try: win.grab_set()
+        except Exception: pass
+        ok.focus_set()
+        win.wait_window()
+        return result["value"]
+
+    def _ask_yes_no(self, title, message, *, parent=None):
+        parent = parent or self.root
+        win = self._new_animated_toplevel(parent, duration=150, slide=12)
+        win.title(str(title or "Tekzite")); win.transient(parent); win.resizable(False, False); win.configure(bg=self.ui["bg"])
+        result = {"value": False}
+        outer = tk.Frame(win, bg=self.ui["bg"], padx=22, pady=18); outer.pack(fill="both", expand=True)
+        tk.Label(outer, text=str(message or ""), bg=self.ui["bg"], fg=self.ui["text"],
+                 font=(self._ui_font_family, self._font_size(10)), justify="left", anchor="w", wraplength=520).pack(fill="x", pady=(2, 20))
+        row = tk.Frame(outer, bg=self.ui["bg"]); row.pack(fill="x")
+        def choose(value):
+            result["value"] = bool(value); win.destroy()
+        no = tk.Button(row, text="No", command=lambda: choose(False), bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat", bd=0, padx=18, pady=8, cursor="hand2")
+        yes = tk.Button(row, text="Yes", command=lambda: choose(True), bg=self.ui["accent"], fg="#ffffff", relief="flat", bd=0, padx=20, pady=8, cursor="hand2")
+        yes.pack(side="right"); no.pack(side="right", padx=(0, 8))
+        win.bind("<Escape>", lambda _e: choose(False)); win.bind("<Return>", lambda _e: choose(True))
+        win.update_idletasks(); width=max(400,min(610,int(outer.winfo_reqwidth())+12)); height=max(180,int(outer.winfo_reqheight())+8)
+        try:
+            px,py=int(parent.winfo_rootx()),int(parent.winfo_rooty()); pw,ph=int(parent.winfo_width()),int(parent.winfo_height())
+            win.geometry(f"{width}x{height}+{px+max(0,(pw-width)//2)}+{py+max(0,(ph-height)//2)}")
+        except Exception: win.geometry(f"{width}x{height}")
+        try: win.grab_set()
+        except Exception: pass
+        yes.focus_set(); win.wait_window(); return bool(result["value"])
+
+    def _ask_string_animated(self, title, prompt, *, initialvalue="", parent=None):
+        parent = parent or self.root
+        win = self._new_animated_toplevel(parent, duration=150, slide=12)
+        win.title(str(title or "Tekzite")); win.transient(parent); win.resizable(False, False); win.configure(bg=self.ui["bg"])
+        result = {"value": None}; value = tk.StringVar(value=str(initialvalue or ""))
+        outer=tk.Frame(win,bg=self.ui["bg"],padx=22,pady=18); outer.pack(fill="both",expand=True)
+        tk.Label(outer,text=str(prompt or ""),bg=self.ui["bg"],fg=self.ui["muted"],font=(self._ui_font_family,self._font_size(10)),anchor="w").pack(fill="x",pady=(2,7))
+        entry=tk.Entry(outer,textvariable=value,bg=self.ui["field"],fg=self.ui["text"],insertbackground=self.ui["text"],selectbackground=self.ui["accent"],selectforeground="#ffffff",relief="flat",bd=0,highlightthickness=1,highlightbackground=self.ui["border"],highlightcolor=self.ui["border_focus"],font=(self._ui_font_family,self._font_size(10)))
+        entry.pack(fill="x",ipady=8)
+        row=tk.Frame(outer,bg=self.ui["bg"]); row.pack(fill="x",pady=(18,0))
+        def accept(): result["value"]=value.get(); win.destroy()
+        tk.Button(row,text="Cancel",command=win.destroy,bg=self.ui["chrome_2"],fg=self.ui["text"],relief="flat",bd=0,padx=18,pady=8,cursor="hand2").pack(side="right")
+        tk.Button(row,text="OK",command=accept,bg=self.ui["accent"],fg="#ffffff",relief="flat",bd=0,padx=20,pady=8,cursor="hand2").pack(side="right",padx=(0,8))
+        win.bind("<Escape>",lambda _e: win.destroy()); win.bind("<Return>",lambda _e: accept())
+        win.update_idletasks(); width=470; height=max(190,int(outer.winfo_reqheight())+8)
+        try:
+            px,py=int(parent.winfo_rootx()),int(parent.winfo_rooty()); pw,ph=int(parent.winfo_width()),int(parent.winfo_height())
+            win.geometry(f"{width}x{height}+{px+max(0,(pw-width)//2)}+{py+max(0,(ph-height)//2)}")
+        except Exception: win.geometry(f"{width}x{height}")
+        try: win.grab_set()
+        except Exception: pass
+        entry.focus_set(); entry.selection_range(0,"end"); win.wait_window(); return result["value"]
+
+    def _install_global_motion_bindings(self):
+        """Animate ordinary Tk controls that are not custom Canvas widgets."""
+        def button_enter(event):
+            w = event.widget
+            if not self._motion_enabled():
+                return
+            try:
+                if str(w.cget("state")) == "disabled":
+                    return
+                if not hasattr(w, "_tekzite_motion_base_bg"):
+                    w._tekzite_motion_base_bg = w.cget("bg")
+                    w._tekzite_motion_base_relief = w.cget("relief")
+                base = str(w._tekzite_motion_base_bg or "").lower()
+                if base == str(self.ui.get("accent") or "").lower():
+                    target = self.ui["accent_hover"]
+                elif base == str(self.ui.get("danger") or "").lower():
+                    target = self.ui["danger"]
+                else:
+                    target = self.ui["chrome_hover"]
+                self._animate_widget_color(w, "bg", target, duration=95, steps=7)
+            except Exception:
+                pass
+
+        def button_leave(event):
+            w = event.widget
+            try:
+                base = getattr(w, "_tekzite_motion_base_bg", None)
+                if base:
+                    self._animate_widget_color(w, "bg", base, duration=125, steps=8)
+                relief = getattr(w, "_tekzite_motion_base_relief", None)
+                if relief is not None:
+                    w.configure(relief=relief)
+            except Exception:
+                pass
+
+        def button_press(event):
+            w = event.widget
+            if not self._motion_enabled():
+                return
+            try:
+                if str(w.cget("state")) != "disabled":
+                    if not hasattr(w, "_tekzite_motion_base_relief"):
+                        w._tekzite_motion_base_relief = w.cget("relief")
+                    w.configure(relief="sunken")
+            except Exception:
+                pass
+
+        def button_release(event):
+            w = event.widget
+            try:
+                relief = getattr(w, "_tekzite_motion_base_relief", "flat")
+                w.configure(relief=relief)
+            except Exception:
+                pass
+
+        def entry_focus(event, focused):
+            w = event.widget
+            if not self._motion_enabled():
+                return
+            # The omnibox has its own rounded-shell focus state plus an
+            # unfocused Pillow preview. Animating the hidden Entry background
+            # independently can leak a field_focus-colored band through the
+            # preview during focus transitions, so leave this one to the
+            # dedicated omnibox renderer.
+            if w is getattr(self, "address", None):
+                return
+            try:
+                if not hasattr(w, "_tekzite_motion_base_bg"):
+                    w._tekzite_motion_base_bg = w.cget("bg")
+                target = self.ui.get("field_focus") if focused else w._tekzite_motion_base_bg
+                self._animate_widget_color(w, "bg", target, duration=110 if focused else 145, steps=8)
+            except Exception:
+                pass
+
+        try:
+            self.root.bind_class("Button", "<Enter>", button_enter, add="+")
+            self.root.bind_class("Button", "<Leave>", button_leave, add="+")
+            self.root.bind_class("Button", "<ButtonPress-1>", button_press, add="+")
+            self.root.bind_class("Button", "<ButtonRelease-1>", button_release, add="+")
+            self.root.bind_class("Entry", "<FocusIn>", lambda e: entry_focus(e, True), add="+")
+            self.root.bind_class("Entry", "<FocusOut>", lambda e: entry_focus(e, False), add="+")
+        except Exception:
+            pass
 
     def _animate_loading_icon(self, label, tab_id, frame_index=0):
         if self.preferences.get("quiet_mode", False) or not self._custom("animations", True):
@@ -1522,6 +2876,149 @@ class BrowserApp(BrowserFeatures):
             pass
         return "New Tab"
 
+    def _redraw_address_shell(self):
+        """Paint the omnibox as one rounded modern surface."""
+        canvas = getattr(self, "address_backdrop", None)
+        if canvas is None:
+            return
+        try:
+            canvas.delete("all")
+            w = max(12, int(self.address_shell.winfo_width()))
+            h = max(12, int(self.address_shell.winfo_height()))
+            fill = self.ui["field_focus"] if self._address_focused else self.ui["field"]
+            outline = self.ui["border_focus"] if self._address_focused else self.ui["border"]
+            radius = min(self._ui_metric("control_corner_radius", 16), max(6, h // 2))
+            self._rounded_canvas_rect(canvas, 1, 1, w - 1, h - 1, radius,
+                                      fill=fill, outline=outline, width=1.25)
+            self.address_inner.configure(bg=fill)
+            self.address_text_host.configure(bg=fill)
+            self.address.configure(bg=fill)
+            self.address_preview.configure(bg=fill)
+            self.site_info_button.configure(bg=fill, activebackground=fill)
+            self.bookmark_button.configure(bg=fill, activebackground=fill)
+            self._schedule_address_preview_render()
+        except Exception:
+            pass
+
+    def _set_address_shell_focus(self, focused):
+        self._address_focused = bool(focused)
+        self._redraw_address_shell()
+        if focused:
+            self._set_address_preview_visible(False)
+        else:
+            self._schedule_address_preview_render()
+            try:
+                self.root.after_idle(lambda: self._set_address_preview_visible(
+                    not bool(self.root.focus_get() is self.address)
+                ))
+            except Exception:
+                self._set_address_preview_visible(True)
+
+    def _set_address_preview_visible(self, visible):
+        preview = getattr(self, "address_preview", None)
+        if preview is None:
+            return
+        try:
+            if visible:
+                self._render_address_preview()
+                preview.lift()
+            else:
+                self.address.lift()
+        except Exception:
+            pass
+
+    def _schedule_address_preview_render(self):
+        if not hasattr(self, "address_preview"):
+            return
+        try:
+            if self._address_preview_after_id is not None:
+                self.root.after_cancel(self._address_preview_after_id)
+        except Exception:
+            pass
+        try:
+            self._address_preview_after_id = self.root.after_idle(self._render_address_preview)
+        except Exception:
+            self._address_preview_after_id = None
+
+    def _address_preview_font(self, pixel_size):
+        """Return a Windows Segoe font for grayscale FreeType rendering."""
+        candidates = []
+        if os.name == "nt":
+            windir = Path(os.environ.get("WINDIR") or r"C:\Windows")
+            candidates.extend([
+                windir / "Fonts" / "segoeui.ttf",
+                windir / "Fonts" / "segoeuivariable.ttf",
+            ])
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return ImageFont.truetype(str(candidate), max(8, int(pixel_size)))
+            except Exception:
+                pass
+        try:
+            return ImageFont.truetype("DejaVuSans.ttf", max(8, int(pixel_size)))
+        except Exception:
+            return ImageFont.load_default()
+
+    def _render_address_preview(self):
+        self._address_preview_after_id = None
+        preview = getattr(self, "address_preview", None)
+        host = getattr(self, "address_text_host", None)
+        if preview is None or host is None:
+            return False
+        try:
+            w = max(1, int(host.winfo_width()))
+            h = max(1, int(host.winfo_height()))
+            if w < 4 or h < 4:
+                return False
+            # The preview is visible only while the real Entry is not being
+            # edited. Match the canvas' *actual* current background rather than
+            # relying on focus state that can briefly lag during focus animation.
+            fill = str(preview.cget("bg") or self.ui["field"])
+            try:
+                scaling = float(self.root.tk.call("tk", "scaling"))
+            except Exception:
+                scaling = 1.333333333
+            # v10.5.20: render the resting URL at a higher internal resolution
+            # and downsample it back into the omnibox. The previous 1x Pillow
+            # path could look jagged or uneven again after the broader GUI
+            # animation/styling changes, especially on Windows DPI scaling.
+            oversample = max(2, int(round(max(1.0, scaling))))
+            image = Image.new("RGB", (w * oversample, h * oversample), fill)
+            draw = ImageDraw.Draw(image)
+            point_size = max(10, int(self._custom("font_size", 10)) + 1)
+            font = self._address_preview_font(round(point_size * max(1.0, scaling) * oversample))
+            value = str(self.url_var.get() or "")
+            # Draw once, clipped by the image, so extremely long URLs cannot
+            # force a huge off-screen bitmap or expensive measurement loop.
+            bbox = draw.textbbox((0, 0), value, font=font)
+            text_h = max(1, int(bbox[3] - bbox[1]))
+            y = max(0, int((h * oversample - text_h) / 2 - bbox[1]))
+            draw.text((0, y), value, font=font, fill=self.ui["text"])
+            if oversample > 1:
+                image = image.resize((w, h), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+            self._address_preview_photo = photo
+            preview.delete("all")
+            preview.create_image(0, 0, image=photo, anchor="nw")
+            return True
+        except Exception:
+            return False
+
+    def _activate_address_preview(self, event=None):
+        self._on_address_pointer_down(event)
+        self._set_address_preview_visible(False)
+        try:
+            self.address.focus_set()
+            self.address.icursor(f"@{max(0, int(getattr(event, 'x', 0)))}")
+        except Exception:
+            pass
+        return "break"
+
+    def _show_address_preview_context_menu(self, event):
+        self._activate_address_preview(event)
+        return self._show_address_context_menu(event)
+
     def _rounded_canvas_rect(self, canvas, x1, y1, x2, y2, radius, **kwargs):
         radius = max(2, min(int(radius), int((x2 - x1) / 2), int((y2 - y1) / 2)))
         points = [
@@ -1531,6 +3028,67 @@ class BrowserApp(BrowserFeatures):
         ]
         return canvas.create_polygon(points, smooth=True, splinesteps=24, **kwargs)
 
+    def _tab_open_width(self, tab_id, target_width):
+        """Return the current width for an opening-tab expansion animation."""
+        target_width = max(1, int(target_width))
+        started = self._tab_open_animation_started.get(tab_id)
+        if started is None or not self._motion_enabled():
+            return target_width, True
+        duration = max(0.08, float(self._tab_open_animation_duration))
+        elapsed = max(0.0, time.monotonic() - float(started))
+        t = min(1.0, elapsed / duration)
+        eased = self._ease_out_cubic(t)
+        start_width = min(target_width, max(28, self._ui_padding(34)))
+        width = int(round(start_width + (target_width - start_width) * eased))
+        return max(1, width), t >= 1.0
+
+    def _animate_opening_tab_widget(self, tab_id, widget, target_width, redraw=None):
+        """Expand a newly-created tab and naturally slide the inline + button."""
+        if tab_id not in self._tab_open_animation_started:
+            return False
+        if not self._motion_enabled():
+            self._tab_open_animation_started.pop(tab_id, None)
+            try:
+                widget.configure(width=max(1, int(target_width)))
+                if redraw:
+                    redraw()
+            except Exception:
+                pass
+            return False
+
+        def frame():
+            try:
+                if not widget.winfo_exists():
+                    return
+            except Exception:
+                return
+            width, done = self._tab_open_width(tab_id, target_width)
+            try:
+                widget.configure(width=width)
+                if redraw:
+                    redraw()
+            except Exception:
+                return
+            if done:
+                self._tab_open_animation_started.pop(tab_id, None)
+                try:
+                    widget.configure(width=max(1, int(target_width)))
+                    if redraw:
+                        redraw()
+                except Exception:
+                    pass
+                return
+            try:
+                self.root.after(12, frame)
+            except Exception:
+                pass
+
+        try:
+            self.root.after_idle(frame)
+        except Exception:
+            frame()
+        return True
+
     def _draw_soft_tab(self, canvas, tab, active, hovered=False):
         try:
             canvas.delete("all")
@@ -1538,7 +3096,8 @@ class BrowserApp(BrowserFeatures):
             height = max(28, int(canvas.cget("height")))
             fill = self.ui["field"] if active else (self.ui["field_focus"] if hovered else self.ui["chrome"])
             outline = self.ui["border_focus"] if active else (self.ui["border"] if hovered else self.ui["border_soft"])
-            self._rounded_canvas_rect(canvas, 1, 1, width - 1, height - 1, max(8, int(height * 0.30)), fill=fill, outline=outline, width=1.2)
+            tab_radius = min(self._ui_metric("control_corner_radius", 16), max(8, int(height * 0.48)))
+            self._rounded_canvas_rect(canvas, 1, 1, width - 1, height - 1, tab_radius, fill=fill, outline=outline, width=1.2)
             if active and self._custom("show_tab_active_indicator", True):
                 pill_w = max(24, min(64, int(width * 0.30)))
                 x1 = int((width - pill_w) / 2)
@@ -1551,7 +3110,7 @@ class BrowserApp(BrowserFeatures):
                 glyph = "☾" if tab.get("sleeping") else ("◌" if tab.get("loading") else "◇")
                 canvas.create_text(icon_x, height / 2, text=glyph, fill=self.ui["accent_hover"] if tab.get("loading") else self.ui["muted_dim"], font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))))
             title = str(tab.get("title") or "New Tab")
-            title_chars = max(6, int(self._custom("tab_title_chars", 24)))
+            title_chars = max(6, int(self._custom("tab_title_chars", 28)))
             if tab.get("pinned"):
                 title = ""
             else:
@@ -1568,16 +3127,24 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             pass
 
+    def _tab_pixel_width(self, title, pinned=False):
+        """Return the shared tab width for soft and classic tab styles."""
+        scale = max(0.75, float(self._custom("ui_scale", 1.0)))
+        if pinned:
+            return max(44, int(48 * scale))
+        title = str(title or "New Tab")
+        title_chars = min(len(title), max(6, int(self._custom("tab_title_chars", 28))))
+        min_width = max(90, int(self._custom("tab_min_width", 175)))
+        max_width = max(min_width, int(self._custom("tab_max_width", 330)))
+        natural = int(78 + title_chars * 8.2)
+        return max(int(min_width * scale), min(int(max_width * scale), int(natural * scale)))
+
     def _create_soft_tab(self, tab, active):
         title = str(tab.get("title") or "New Tab")
-        scale = max(0.75, float(self._custom("ui_scale", 1.0)))
-        if tab.get("pinned"):
-            width = max(44, int(48 * scale))
-        else:
-            title_chars = min(len(title), max(6, int(self._custom("tab_title_chars", 24))))
-            width = max(int(112 * scale), min(int(230 * scale), int((62 + title_chars * 7.1) * scale)))
-        height = max(30, self._ui_metric("tab_bar_height", 44) - self._ui_padding(12))
-        canvas = tk.Canvas(self.tab_items, width=width, height=height, bg=self.ui["chrome"], highlightthickness=0, bd=0, cursor="hand2")
+        width = self._tab_pixel_width(title, pinned=bool(tab.get("pinned")))
+        initial_width, _opening_done = self._tab_open_width(tab.get("id"), width)
+        height = max(30, self._ui_metric("tab_bar_height", 52) - self._ui_padding(12))
+        canvas = tk.Canvas(self.tab_items, width=initial_width, height=height, bg=self.ui["chrome"], highlightthickness=0, bd=0, cursor="hand2")
         canvas.pack(side="left", padx=(0, self._ui_padding(5)), pady=(self._ui_padding(1), self._ui_padding(1)))
         self._draw_soft_tab(canvas, tab, active, hovered=False)
 
@@ -1591,16 +3158,51 @@ class BrowserApp(BrowserFeatures):
                 self._close_tab(tid)
             else:
                 self._switch_tab(tid)
-        canvas.bind("<Button-1>", left_click)
-        canvas.bind("<Button-2>", lambda event=None, tid=tab["id"]: self._close_tab(tid))
+        canvas.bind("<ButtonRelease-1>", left_click)
+        canvas.bind("<ButtonRelease-2>", lambda event=None, tid=tab["id"]: self._close_tab(tid))
         canvas.bind("<Button-3>", lambda event=None, tid=tab["id"]: self._show_tab_context_menu(event, tid))
+        self._animate_opening_tab_widget(tab.get("id"), canvas, width, redraw=lambda: redraw(False))
         return canvas
+
+    def _place_new_tab_button_inline(self):
+        """Place + immediately beside the visible tab run."""
+        button = getattr(self, "new_tab_button", None)
+        items = getattr(self, "tab_items", None)
+        if button is None or items is None:
+            return
+        try:
+            button.pack_forget()
+            if not self._custom("show_new_tab_button", True):
+                return
+            siblings = [child for child in items.winfo_children() if child is not button]
+            opts = {
+                "side": "left",
+                "fill": "y",
+                "pady": (self._ui_padding(1), self._ui_padding(1)),
+            }
+            if self._custom("new_tab_button_position", "right") == "left":
+                opts["padx"] = (0, self._ui_padding(5))
+                if siblings:
+                    opts["before"] = siblings[0]
+            else:
+                opts["padx"] = (self._ui_padding(1), 0)
+                if siblings:
+                    opts["after"] = siblings[-1]
+            button.pack(**opts)
+        except Exception:
+            pass
 
     def _refresh_tab_strip(self):
         if self.tab_items is None:
             return
+        # Preserve the inline + button while rebuilding dynamic tab widgets.
+        try:
+            self.new_tab_button.pack_forget()
+        except Exception:
+            pass
         for child in self.tab_items.winfo_children():
-            child.destroy()
+            if child is not getattr(self, "new_tab_button", None):
+                child.destroy()
 
         groups = self._normalized_tab_groups()
         group_rows = groups.items() if self._custom("show_tab_group_chips", True) else ()
@@ -1631,13 +3233,17 @@ class BrowserApp(BrowserFeatures):
             normal_fg = self.ui["text"] if active else self.ui["muted"]
             normal_border = self.ui["border"] if active else self.ui["border_soft"]
 
+            target_tab_width = self._tab_pixel_width(str(tab.get("title") or "New Tab"), pinned=bool(tab.get("pinned")))
+            initial_tab_width, _opening_done = self._tab_open_width(tab.get("id"), target_tab_width)
             frame = tk.Frame(
                 self.tab_items,
                 bg=normal_bg,
                 highlightthickness=1,
                 highlightbackground=normal_border,
+                width=initial_tab_width,
             )
             frame.pack(side="left", padx=(0, 5), pady=(self._ui_padding(2), self._ui_padding(2)), fill="y")
+            frame.pack_propagate(False)
 
             body = tk.Frame(frame, bg=normal_bg)
             body.pack(side="top", fill="both", expand=True, padx=self._ui_padding(2))
@@ -1724,13 +3330,38 @@ class BrowserApp(BrowserFeatures):
                     pass
             if tab.get("loading") and not icon_photo:
                 self._animate_loading_icon(icon, tab.get("id"), 0)
+            self._animate_opening_tab_widget(tab.get("id"), frame, target_tab_width)
+
+        self._place_new_tab_button_inline()
 
     def _decode_favicon_photo(self, data_b64):
+        """Decode a site favicon under strict size/format limits.
+
+        Favicons are website-controlled input. Limit both compressed bytes and
+        decoded dimensions before pixel conversion so a tiny compressed image
+        cannot turn into a large memory allocation in the Tekzite UI process.
+        """
         try:
             raw = base64.b64decode(str(data_b64 or ""), validate=False)
             if not raw or len(raw) > 524288:
                 return None
-            image = Image.open(BytesIO(raw)).convert("RGBA")
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(BytesIO(raw)) as opened:
+                    fmt = str(opened.format or "").upper()
+                    if fmt not in {"PNG", "ICO", "JPEG", "GIF", "WEBP"}:
+                        return None
+                    width, height = map(int, opened.size)
+                    if (
+                        width <= 0 or height <= 0
+                        or width > 2048 or height > 2048
+                        or width * height > 4_194_304
+                    ):
+                        return None
+                    opened.seek(0)
+                    opened.load()
+                    image = opened.convert("RGBA")
             image.thumbnail((16, 16), Image.Resampling.LANCZOS)
             canvas = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
             x = (16 - image.width) // 2
@@ -1862,7 +3493,7 @@ class BrowserApp(BrowserFeatures):
             self.find_bar.configure(height=0)
             self._find_bar_visible = True
             self._repack_browser_chrome()
-            self._animate_widget_height(self.find_bar, 0, self._ui_metric("find_bar_height", 40), duration=155)
+            self._animate_widget_height(self.find_bar, 0, self._ui_metric("find_bar_height", 46), duration=155)
         self.find_entry.focus_set()
         self.find_entry.selection_range(0, "end")
         return "break"
@@ -1880,7 +3511,7 @@ class BrowserApp(BrowserFeatures):
             try:
                 current = max(1, int(self.find_bar.winfo_height()))
             except Exception:
-                current = self._ui_metric("find_bar_height", 40)
+                current = self._ui_metric("find_bar_height", 46)
             self._animate_widget_height(self.find_bar, current, 0, duration=130, on_done=finish)
         try:
             self.root.focus_set()
@@ -1920,14 +3551,51 @@ class BrowserApp(BrowserFeatures):
             self.navigate_to(value, add_history=True)
         return "break"
 
+    def _make_modern_menu(self, parent=None, *, font_size=None):
+        """Create Tekzite's animated rounded popup menu surface.
+
+        Unlike the old native ``tk.Menu`` wrapper this popup is rendered in a
+        tiny borderless Tk window, so opening, hover and press feedback can be
+        animated consistently across the menu bar, hamburger and context menus.
+        """
+        return _AnimatedPopupMenu(self, parent or self.root, font_size=font_size)
+
+    @staticmethod
+    def _menu_item_text(label, icon=""):
+        label = str(label or "")
+        icon = str(icon or "").strip()
+        return f"  {icon}   {label}  " if icon else f"  {label}  "
+
+    def _popup_menu_below(self, button, menu, *, min_width_offset=0):
+        """Toggle an animated chrome menu directly under its menu-bar button."""
+        try:
+            self.root.update_idletasks()
+            if isinstance(menu, _AnimatedPopupMenu) and menu.is_posted():
+                menu.dismiss(include_parent=False)
+                return
+            active = getattr(self, "_active_popup_menu", None)
+            if isinstance(active, _AnimatedPopupMenu) and active is not menu:
+                active.dismiss(include_parent=False)
+            x = int(button.winfo_rootx()) + int(min_width_offset or 0)
+            y = int(button.winfo_rooty()) + int(button.winfo_height()) + self._ui_padding(3)
+            if hasattr(button, "set_selected"):
+                button.set_selected(True)
+            if isinstance(menu, _AnimatedPopupMenu):
+                menu._anchor_button = button
+            menu.tk_popup(max(0, x), max(0, y))
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
     def _show_address_context_menu(self, event):
-        menu = tk.Menu(self.root, tearoff=0, bg=self.ui["chrome"], fg=self.ui["text"],
-                       activebackground=self.ui["accent"], activeforeground="#ffffff", bd=0)
-        menu.add_command(label="Cut", command=lambda: self.address.event_generate("<<Cut>>"))
-        menu.add_command(label="Copy", command=lambda: self.address.event_generate("<<Copy>>"))
-        menu.add_command(label="Paste", command=lambda: self.address.event_generate("<<Paste>>"))
+        menu = self._make_modern_menu(self.root)
+        menu.add_command(label=self._menu_item_text("Cut", "✂"), command=lambda: self.address.event_generate("<<Cut>>"))
+        menu.add_command(label=self._menu_item_text("Copy", "▣"), command=lambda: self.address.event_generate("<<Copy>>"))
+        menu.add_command(label=self._menu_item_text("Paste", "▤"), command=lambda: self.address.event_generate("<<Paste>>"))
         menu.add_separator()
-        menu.add_command(label="Paste and Go", command=self._paste_and_go)
+        menu.add_command(label=self._menu_item_text("Paste and Go", "→"), command=self._paste_and_go)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1935,7 +3603,51 @@ class BrowserApp(BrowserFeatures):
             except Exception: pass
         return "break"
 
+    def _cancel_pending_tab_switch(self):
+        """Invalidate an in-flight/scheduled tab activation without waiting.
+
+        v10.5.32 also cancels the short close-handoff grace timer. That matters
+        for the exact close-then-+ gesture: if Chromium activation has not begun,
+        Tekzite now prevents it from beginning at all instead of merely marking
+        its eventual result stale.
+        """
+        pending = getattr(self, "_tab_switch_pending_id", None) is not None
+        handoff_after = getattr(self, "_closed_tab_handoff_after_id", None)
+        retire_target = getattr(self, "_closed_tab_handoff_retire_target", None)
+        if handoff_after is not None:
+            try:
+                self.root.after_cancel(handoff_after)
+            except Exception:
+                pass
+            self._closed_tab_handoff_after_id = None
+            self._closed_tab_handoff_retire_target = None
+            if retire_target:
+                self._queue_closed_target_retirement(retire_target)
+            pending = True
+        if not pending:
+            return False
+        self._tab_switch_serial += 1
+        self._tab_switch_pending_id = None
+        future = getattr(self, "_tab_switch_future", None)
+        if future is not None:
+            try:
+                future.cancel()
+            except Exception:
+                pass
+        return True
+
     def _new_tab(self, url=None, switch=True, navigate=True):
+        # v10.5.32: the + button gets an exclusive interaction window. Any
+        # closed Chromium target waiting to be destroyed is pushed farther out,
+        # so opening the new tab never races renderer/compositor teardown.
+        self._defer_closed_target_retirement(1800)
+        # v10.5.31: a user opening a new tab wins immediately over the
+        # replacement activation started by an active-tab close. Previously the
+        # late replacement commit could steal selection back, making the +
+        # button appear to lag until Chromium finished switching targets.
+        if switch:
+            self._cancel_pending_tab_switch()
+        had_tabs = bool(self.tabs)
         tab = {
             "id": self._next_tab_id,
             "url": "",
@@ -1958,6 +3670,8 @@ class BrowserApp(BrowserFeatures):
         }
         self._next_tab_id += 1
         self.tabs.append(tab)
+        if had_tabs and self._motion_enabled():
+            self._tab_open_animation_started[tab["id"]] = time.monotonic()
         if switch:
             self._capture_active_tab_state()
             self.active_tab_id = tab["id"]
@@ -1978,7 +3692,17 @@ class BrowserApp(BrowserFeatures):
             self.navigate_to(url)
         elif switch and navigate and not url:
             if getattr(self, "preferences", DEFAULT_PREFERENCES).get("new_tab") == "homepage":
-                self.navigate_to(self._homepage_url())
+                # Paint the fresh tab before Chromium navigation begins. This is
+                # especially important immediately after a page tab was closed.
+                tab_id = tab["id"]
+                homepage = self._homepage_url()
+                def open_homepage_if_still_current():
+                    if self.active_tab_id == tab_id and any(t.get("id") == tab_id for t in self.tabs):
+                        self.navigate_to(homepage)
+                try:
+                    self.root.after(16 if self._motion_enabled() else 1, open_homepage_if_still_current)
+                except Exception:
+                    open_homepage_if_still_current()
             else:
                 self._focus_address()
         return tab
@@ -2009,24 +3733,31 @@ class BrowserApp(BrowserFeatures):
                 return tab
         return None
 
-    def _commit_tab_switch(self, target):
-        """Commit Tekzite chrome after Chromium has activated the target.
+    def _commit_tab_switch(self, target, *, ui_already_selected=False):
+        """Commit a Chromium target after activation without blocking Tekzite chrome.
 
-        Keeping this commit on Tk's thread makes the selected tab, address bar
-        and DWM content move together instead of letting the browser chrome run
-        one visual beat ahead of Chromium's compositor.
+        Normal tab clicks update chrome here. Active-tab close already selected the
+        replacement synchronously before Chromium activation starts, so that path
+        can skip a second tab-strip/address rebuild and only commit presentation.
         """
-        self._capture_active_tab_state()
-        self._navigation_generation += 1
-        self.active_tab_id = target["id"]
+        if not ui_already_selected:
+            self._capture_active_tab_state()
+            self._navigation_generation += 1
+            self.active_tab_id = target["id"]
+            self.history = list(target.get("history") or [])
+            target["history"] = self.history
+            self.history_index = int(target.get("history_index", -1))
+            self.url_var.set(target.get("url") or "")
+            self.update_history_buttons()
+            self._refresh_tab_strip()
+        else:
+            # The close handler already committed logical selection. Do not rebuild
+            # Tk widgets again while the pointer release/new-tab click may be next
+            # in the event queue.
+            self._navigation_generation += 1
+            self.active_tab_id = target["id"]
         target["last_active"] = time.monotonic()
         target["sleeping"] = False
-        self.history = list(target.get("history") or [])
-        target["history"] = self.history
-        self.history_index = int(target.get("history_index", -1))
-        self.url_var.set(target.get("url") or "")
-        self.update_history_buttons()
-        self._refresh_tab_strip()
 
         self._current_document = None
         presentation = target.get("presentation") or (
@@ -2044,7 +3775,7 @@ class BrowserApp(BrowserFeatures):
             and self.edge_host.winfo_ismapped()
         )
         if presentation == "software":
-            set_embedded_chromium_presentation("software", target["chromium_target_id"])
+            self._set_chromium_presentation_fast("software", target["chromium_target_id"])
             self._show_chromium_software_surface(target["chromium_target_id"])
         elif fast_native_switch:
             self._chromium_frame_target_id = target["chromium_target_id"]
@@ -2052,7 +3783,7 @@ class BrowserApp(BrowserFeatures):
             # Zoom verification is intentionally outside the visual switch path.
             self.root.after(120, lambda tid=target["chromium_target_id"]: self._apply_chromium_zoom(tid))
         else:
-            set_embedded_chromium_presentation("native", target["chromium_target_id"])
+            self._set_chromium_presentation_fast("native", target["chromium_target_id"])
             self._show_embedded_host()
             self._schedule_embedded_surface_wake()
             self._schedule_chromium_zoom_apply(target_id=target["chromium_target_id"])
@@ -2085,14 +3816,19 @@ class BrowserApp(BrowserFeatures):
             self._focus_address()
         return True
 
-    def _switch_tab(self, tab_id):
+    def _switch_tab(self, tab_id, on_committed=None, *, force_activate=False, ui_already_selected=False):
         target = next((t for t in self.tabs if t.get("id") == tab_id), None)
         if target is None:
             return False
 
         # A second click can reverse a still-running switch. Do not treat the
         # currently selected Tk tab as a no-op while Chromium is moving elsewhere.
-        if tab_id == self.active_tab_id and self._tab_switch_pending_id is None:
+        if tab_id == self.active_tab_id and self._tab_switch_pending_id is None and not force_activate:
+            if callable(on_committed):
+                try:
+                    on_committed()
+                except Exception:
+                    pass
             return True
 
         self._wake_tab_if_needed(target)
@@ -2101,18 +3837,70 @@ class BrowserApp(BrowserFeatures):
             serial = self._tab_switch_serial
             self._tab_switch_pending_id = tab_id
             target_id = target["chromium_target_id"]
+            switch_started = time.monotonic()
             future = self._tab_switch_executor.submit(activate_embedded_chromium_target, target_id)
+            self._tab_switch_future = future
+            callback_fired = False
+
+            def finish_callback_once():
+                nonlocal callback_fired
+                if callback_fired:
+                    return
+                callback_fired = True
+                if callable(on_committed):
+                    try:
+                        on_committed()
+                    except Exception:
+                        pass
 
             def finish_switch():
+                # v10.5.31: stop polling a superseded activation immediately.
+                # This is especially important when the user hits + right after
+                # closing the active tab. The old 8 ms polling loop could live
+                # for the full activation timeout, while its eventual commit
+                # could also steal focus back from the freshly-created tab.
+                if serial != self._tab_switch_serial:
+                    if getattr(self, "_tab_switch_future", None) is future:
+                        self._tab_switch_future = None
+                    finish_callback_once()
+                    return
                 if not future.done():
+                    # v10.5.28: never let one wedged Chromium activation leave
+                    # Tekzite in a permanent pending-tab state. Active-tab close
+                    # now hides the old DWM source first, so a bounded fallback
+                    # can safely recover the replacement without freezing chrome.
+                    if time.monotonic() - switch_started >= 4.0:
+                        if serial != self._tab_switch_serial:
+                            return
+                        self._tab_switch_serial += 1
+                        self._tab_switch_pending_id = None
+                        if getattr(self, "_tab_switch_future", None) is future:
+                            self._tab_switch_future = None
+                        try:
+                            future.cancel()
+                        except Exception:
+                            pass
+                        current_target = next((t for t in self.tabs if t.get("id") == tab_id), None)
+                        self._show_native_canvas()
+                        if current_target is not None:
+                            self.status_var.set("Tab switch timed out; recovering…")
+                            self._recover_failed_tab_activation(current_target)
+                            finish_callback_once()
+                        else:
+                            self.status_var.set("Tab switch timed out")
+                            finish_callback_once()
+                        return
                     self.root.after(8, finish_switch)
                     return
                 # Ignore stale UI commits. The single-worker executor guarantees
                 # newer activation requests run after older ones, so the final
                 # Chromium target also matches the latest requested tab.
                 if serial != self._tab_switch_serial:
+                    finish_callback_once()
                     return
                 self._tab_switch_pending_id = None
+                if getattr(self, "_tab_switch_future", None) is future:
+                    self._tab_switch_future = None
                 try:
                     activated = bool(future.result())
                 except Exception:
@@ -2120,17 +3908,27 @@ class BrowserApp(BrowserFeatures):
                 if not activated:
                     current_target = next((t for t in self.tabs if t.get("id") == tab_id), None)
                     if current_target is not None:
+                        # Drop the stale DWM/native presentation before recovery.
+                        # This guarantees an active-tab close never destroys the
+                        # source HWND while Tekzite is still visibly mirroring it.
+                        self._show_native_canvas()
                         self._recover_failed_tab_activation(current_target)
+                        finish_callback_once()
                     else:
                         self.status_var.set("Tab switch failed")
+                        finish_callback_once()
                     return
                 current_target = next((t for t in self.tabs if t.get("id") == tab_id), None)
                 if current_target is None or current_target.get("chromium_target_id") != target_id:
+                    finish_callback_once()
                     return
                 try:
-                    self._commit_tab_switch(current_target)
+                    self._commit_tab_switch(current_target, ui_already_selected=ui_already_selected)
                 except Exception:
                     self.status_var.set("Tab switch presentation failed")
+                    finish_callback_once()
+                    return
+                finish_callback_once()
 
             self.root.after(1, finish_switch)
             return True
@@ -2156,6 +3954,11 @@ class BrowserApp(BrowserFeatures):
         self.status_var.set("Ready")
         if target.pop("restore_pending", False):
             self.navigate_to(target["url"], reuse_existing=False)
+        if callable(on_committed):
+            try:
+                on_committed()
+            except Exception:
+                pass
         return True
 
     def _schedule_sleeping_tabs(self, delay_ms=30000):
@@ -2239,7 +4042,7 @@ class BrowserApp(BrowserFeatures):
             self.status_var.set(f"Tab groups changed for this session; save failed: {exc}")
 
     def _create_tab_group(self, tab_id=None):
-        name = simpledialog.askstring("New Tab Group", "Group name:", parent=self.root)
+        name = self._ask_string_animated("New Tab Group", "Group name:", parent=self.root)
         if not name:
             return
         name = str(name).strip()[:32]
@@ -2277,7 +4080,7 @@ class BrowserApp(BrowserFeatures):
         self._refresh_tab_strip()
 
     def _show_tab_groups(self):
-        win = tk.Toplevel(self.root)
+        win = self._new_animated_toplevel(self.root)
         win.title("Tekzite Tab Groups")
         win.geometry("520x390")
         win.transient(self.root)
@@ -2340,66 +4143,296 @@ class BrowserApp(BrowserFeatures):
         tab = next((t for t in self.tabs if t.get("id") == tab_id), None)
         if tab is None:
             return
-        menu = tk.Menu(
-            self.root, tearoff=False, bg=self.ui["chrome_2"], fg=self.ui["text"],
-            activebackground=self.ui["field_focus"], activeforeground="#ffffff",
-            bd=0, relief="flat", font=(self._ui_font_family, self._font_size(9)),
-        )
-        menu.add_command(label="New Tab", command=self._new_tab, accelerator="Ctrl+T")
-        menu.add_command(label="Unpin Tab" if tab.get("pinned") else "Pin Tab", command=lambda: self._toggle_pin(tab_id))
-        menu.add_command(label="Duplicate Tab", command=lambda: self._duplicate_tab(tab_id))
-        group_menu = tk.Menu(menu, tearoff=False, bg=self.ui["chrome_2"], fg=self.ui["text"], activebackground=self.ui["field_focus"], activeforeground="#ffffff")
-        group_menu.add_command(label="New Group…", command=lambda: self._create_tab_group(tab_id))
+        menu = self._make_modern_menu(self.root)
+        menu.add_command(label=self._menu_item_text("New Tab", "+"), command=self._new_tab, accelerator="Ctrl+T")
+        menu.add_command(label=self._menu_item_text("Unpin Tab" if tab.get("pinned") else "Pin Tab", "◆"), command=lambda: self._toggle_pin(tab_id))
+        menu.add_command(label=self._menu_item_text("Duplicate Tab", "▣"), command=lambda: self._duplicate_tab(tab_id))
+        group_menu = self._make_modern_menu(menu)
+        group_menu.add_command(label=self._menu_item_text("New Group…", "+"), command=lambda: self._create_tab_group(tab_id))
         groups = self._normalized_tab_groups()
         if groups:
             group_menu.add_separator()
             for group_name in groups:
-                group_menu.add_command(label=group_name, command=lambda g=group_name: self._assign_tab_group(tab_id, g))
+                group_menu.add_command(label=self._menu_item_text(group_name, "•"), command=lambda g=group_name: self._assign_tab_group(tab_id, g))
         if tab.get("group"):
             group_menu.add_separator()
-            group_menu.add_command(label="Remove from Group", command=lambda: self._assign_tab_group(tab_id, ""))
-        menu.add_cascade(label="Move to Group", menu=group_menu)
-        menu.add_command(label="Reopen Closed Tab", command=self._restore_closed_tab, accelerator="Ctrl+Shift+T")
+            group_menu.add_command(label=self._menu_item_text("Remove from Group", "×"), command=lambda: self._assign_tab_group(tab_id, ""))
+        menu.add_cascade(label=self._menu_item_text("Move to Group", "›"), menu=group_menu)
+        menu.add_command(label=self._menu_item_text("Reopen Closed Tab", "↶"), command=self._restore_closed_tab, accelerator="Ctrl+Shift+T")
         menu.add_separator()
         url = str(tab.get("url") or "")
-        menu.add_command(label="Copy Tab URL", command=lambda u=url: self._clipboard_set(u), state=("normal" if url else "disabled"))
+        menu.add_command(label=self._menu_item_text("Copy Tab URL", "⧉"), command=lambda u=url: self._clipboard_set(u), state=("normal" if url else "disabled"))
         menu.add_separator()
-        menu.add_command(label="Close Tab", command=lambda: self._close_tab(tab_id), accelerator="Ctrl+W")
-        menu.add_command(label="Close Other Tabs", command=lambda: self._close_other_tabs(tab_id), state=("normal" if len(self.tabs) > 1 else "disabled"))
+        menu.add_command(label=self._menu_item_text("Close Tab", "×"), command=lambda: self._close_tab(tab_id), accelerator="Ctrl+W")
+        menu.add_command(label=self._menu_item_text("Close Other Tabs", "×"), command=lambda: self._close_other_tabs(tab_id), state=("normal" if len(self.tabs) > 1 else "disabled"))
         ids = [t.get("id") for t in self.tabs]
         has_right = tab_id in ids and ids.index(tab_id) < len(ids) - 1
-        menu.add_command(label="Close Tabs to the Right", command=lambda: self._close_tabs_to_right(tab_id), state=("normal" if has_right else "disabled"))
+        menu.add_command(label=self._menu_item_text("Close Tabs to the Right", "→"), command=lambda: self._close_tabs_to_right(tab_id), state=("normal" if has_right else "disabled"))
         self._popup_context_menu(menu, event)
 
+    def _queue_closed_target_retirement(self, target_id, delay_ms=1800):
+        """Retire closed Chromium targets only after an interaction grace period.
+
+        Chromium target destruction can trigger renderer/compositor teardown in
+        the browser process. Even when requested from a Python worker, that work
+        can momentarily contend with creation/activation of the very next tab.
+        Keep the dead target parked and invisible for a short period, then close
+        it when the user has stopped interacting with the tab strip.
+        """
+        target_id = str(target_id or "").strip()
+        if not target_id:
+            return False
+        queue = getattr(self, "_closed_target_retire_queue", None)
+        if queue is None:
+            queue = set()
+            self._closed_target_retire_queue = queue
+        queue.add(target_id)
+        return self._defer_closed_target_retirement(delay_ms)
+
+    def _defer_closed_target_retirement(self, delay_ms=1800):
+        queue = getattr(self, "_closed_target_retire_queue", None)
+        if not queue:
+            return False
+        after_id = getattr(self, "_closed_target_retire_after_id", None)
+        if after_id is not None:
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                pass
+            self._closed_target_retire_after_id = None
+
+        def drain():
+            self._closed_target_retire_after_id = None
+            pending = list(getattr(self, "_closed_target_retire_queue", set()))
+            self._closed_target_retire_queue.clear()
+            for tid in pending:
+                self._retire_chromium_target_when_detached(tid)
+
+        try:
+            self._closed_target_retire_after_id = self.root.after(max(250, int(delay_ms)), drain)
+            return True
+        except Exception:
+            # Minimal/test Tk fallback. Production always has root.after.
+            drain()
+            return True
+
+    def _retire_chromium_target(self, target_id):
+        """Close an obsolete Chromium target without blocking Tk's UI thread."""
+        target_id = str(target_id or "").strip()
+        if not target_id:
+            return
+
+        def retire():
+            try:
+                close_embedded_chromium_target(target_id)
+            except Exception:
+                pass
+
+        executor = getattr(self, "_executor", None)
+        if executor is not None:
+            try:
+                executor.submit(retire)
+                return
+            except Exception:
+                pass
+        # Lightweight/test fallback. Production BrowserApp always owns the
+        # Chromium executor, so the normal path above stays off Tk's thread.
+        retire()
+
+    def _retire_chromium_target_when_detached(self, target_id, attempt=0):
+        """Retire a closed target only after it is no longer the visible source.
+
+        A close can be superseded by an immediate new-tab or another tab switch.
+        Never destroy the HWND/CDP target while Tekzite still considers it the
+        current presentation source. This check is intentionally timer-based and
+        non-blocking so the Tk event loop keeps accepting clicks throughout.
+        """
+        target_id = str(target_id or "").strip()
+        if not target_id:
+            return
+        still_visible = bool(
+            (bool(getattr(self, "_embedded_mode", False)) or bool(getattr(self, "_chromium_software_mode", False)))
+            and str(getattr(self, "_chromium_frame_target_id", "") or "") == target_id
+        )
+        if still_visible and attempt < 120:
+            try:
+                self.root.after(25, lambda tid=target_id, n=attempt + 1: self._retire_chromium_target_when_detached(tid, n))
+                return
+            except Exception:
+                pass
+        self._retire_chromium_target(target_id)
+
+    def _select_replacement_tab_chrome(self, replacement):
+        """Select a replacement tab using Tk-only state updates.
+
+        This helper deliberately contains no Chromium, CDP, DWM or Win32 calls.
+        It is safe to run inside the tab close mouse/key callback and returns as
+        soon as the visible Tekzite chrome has moved to the replacement tab.
+        """
+        self.active_tab_id = replacement["id"]
+        replacement["last_active"] = time.monotonic()
+        replacement["sleeping"] = False
+        self.history = list(replacement.get("history") or [])
+        replacement["history"] = self.history
+        self.history_index = int(replacement.get("history_index", -1))
+        self._current_document = None
+        try:
+            self.url_var.set(replacement.get("url") or "")
+        except Exception:
+            pass
+        try:
+            self.update_history_buttons()
+        except Exception:
+            pass
+        self._refresh_tab_strip()
+
+    def _schedule_closed_tab_handoff(self, replacement, old_target_id):
+        """Hand off the page only after a short, cancellable interaction grace.
+
+        The previous after-idle handoff could start Chromium activation almost
+        immediately after the close click. If the user then hit +, Tekzite's UI
+        was logically free but Chromium was already switching/tearing down page
+        machinery. v10.5.32 leaves a brief tab-strip grace window so an immediate
+        new-tab action cancels the handoff before Chromium work starts at all.
+        """
+        replacement_id = replacement.get("id")
+        self._tab_switch_serial += 1
+        reservation = self._tab_switch_serial
+        self._tab_switch_pending_id = replacement_id
+
+        # Cancel an older not-yet-started close handoff, but keep its target in
+        # the deferred retirement queue.
+        old_after = getattr(self, "_closed_tab_handoff_after_id", None)
+        if old_after is not None:
+            try:
+                self.root.after_cancel(old_after)
+            except Exception:
+                pass
+            previous_retire = getattr(self, "_closed_tab_handoff_retire_target", None)
+            if previous_retire:
+                self._queue_closed_target_retirement(previous_retire)
+
+        self._closed_tab_handoff_retire_target = str(old_target_id or "") or None
+
+        def retire_after_handoff(tid=old_target_id):
+            # Do not tear Chromium down while the user is likely to click + next.
+            self._queue_closed_target_retirement(tid, 1800)
+
+        def begin_handoff():
+            self._closed_tab_handoff_after_id = None
+            self._closed_tab_handoff_retire_target = None
+            if (
+                reservation != self._tab_switch_serial
+                or self._tab_switch_pending_id != replacement_id
+                or self.active_tab_id != replacement_id
+            ):
+                retire_after_handoff()
+                return
+            current = next((t for t in self.tabs if t.get("id") == replacement_id), None)
+            if current is None:
+                retire_after_handoff()
+                return
+            # A blank replacement needs no Chromium activation at all.
+            if not current.get("chromium_target_id"):
+                self._tab_switch_pending_id = None
+                self._show_native_canvas()
+                retire_after_handoff()
+                return
+            self._switch_tab(
+                replacement_id,
+                on_committed=retire_after_handoff,
+                force_activate=True,
+                ui_already_selected=True,
+            )
+
+        try:
+            # Roughly one tab animation beat. Fast close->+ gestures now land
+            # before Chromium activation begins, not while it is already busy.
+            self._closed_tab_handoff_after_id = self.root.after(180, begin_handoff)
+        except Exception:
+            begin_handoff()
+
     def _close_tab(self, tab_id):
+        """Close a tab without running Chromium work inside the close callback.
+
+        v10.5.31 treats the GUI and Chromium as two independent phases. The tab
+        disappears and the replacement becomes clickable immediately. Only after
+        Tk returns to its event loop do we activate the replacement target and
+        retire the closed target in background work.
+        """
+        self._tab_open_animation_started.pop(tab_id, None)
         tab = next((t for t in self.tabs if t.get("id") == tab_id), None)
         if tab is None:
             return
-        # v8.0: keep a cheap restore snapshot before destroying the Chromium
-        # target. Ctrl+Shift+T recreates the page with normal Chromium state.
+
         if tab.get("url") or tab.get("loaded"):
             snap = {k: tab.get(k) for k in ("url", "title", "history", "history_index", "pinned", "group")}
             self._closed_tabs.append(snap)
             if len(self._closed_tabs) > 20:
                 self._closed_tabs = self._closed_tabs[-20:]
-        if tab.get("chromium_target_id"):
-            try:
-                close_embedded_chromium_target(tab["chromium_target_id"])
-            except Exception:
-                pass
+
+        target_id = str(tab.get("chromium_target_id") or "")
         index = self.tabs.index(tab)
         was_active = tab_id == self.active_tab_id
+
+        if self._tab_switch_pending_id == tab_id:
+            self._tab_switch_serial += 1
+            self._tab_switch_pending_id = None
+
         self.tabs.remove(tab)
+
         if not self.tabs:
-            self._new_tab(switch=True, navigate=False)
-            self._refresh_tab_strip()
+            # Build the fresh blank tab first. DWM detach/target retirement are
+            # deferred so Ctrl+W or clicking × never enters Win32/CDP work from
+            # inside the close event itself.
+            self.active_tab_id = None
+            self._navigation_generation += 1
+            fresh = {
+                "id": self._next_tab_id,
+                "url": "",
+                "title": "New Tab",
+                "engine": "chromium",
+                "document": None,
+                "history": [],
+                "history_index": -1,
+                "scroll_fraction": 0.0,
+                "chromium_target_id": None,
+                "loaded": False,
+                "loading": False,
+                "ready_state": "",
+                "favicon_url": "",
+                "favicon_photo": None,
+                "group": "",
+                "sleeping": False,
+                "last_active": time.monotonic(),
+                "audible": False,
+            }
+            self._next_tab_id += 1
+            self.tabs.append(fresh)
+            self._select_replacement_tab_chrome(fresh)
+            # _hide_dwm_host now uses ShowWindowAsync, so this is a Tk-fast path
+            # and can make the blank tab visible without waiting on Chromium.
+            self._show_native_canvas()
+            self._queue_closed_target_retirement(target_id, 1800)
+            try:
+                self.root.after_idle(self._focus_address)
+            except Exception:
+                pass
             return
+
         if was_active:
             replacement = self.tabs[min(index, len(self.tabs) - 1)]
-            self.active_tab_id = None
-            self._switch_tab(replacement["id"])
+            self._select_replacement_tab_chrome(replacement)
+            try:
+                self.status_var.set("Ready")
+            except Exception:
+                pass
+            self._schedule_closed_tab_handoff(replacement, target_id)
         else:
             self._refresh_tab_strip()
+            # Renderer teardown is intentionally idle-debounced too. Closing an
+            # inactive page must not make the next + click pay Chromium's cost.
+            self._queue_closed_target_retirement(target_id, 1800)
 
     def _close_active_tab(self):
         tab = self._active_tab()
@@ -2493,6 +4526,7 @@ class BrowserApp(BrowserFeatures):
             WS_POPUP = 0x80000000
             WS_EX_TOOLWINDOW = 0x00000080
             WS_EX_NOACTIVATE = 0x08000000
+            WS_EX_LAYERED = 0x00080000
             user32.CreateWindowExW.argtypes = [
                 wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
                 ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
@@ -2500,7 +4534,7 @@ class BrowserApp(BrowserFeatures):
             ]
             user32.CreateWindowExW.restype = wintypes.HWND
             hwnd = user32.CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
                 "STATIC", "Tekzite DWM Surface", WS_POPUP,
                 0, 0, 1, 1,
                 wintypes.HWND(owner), None, None, None,
@@ -2543,7 +4577,9 @@ class BrowserApp(BrowserFeatures):
             self._dwm_host_original_wndproc = old_proc
             self._dwm_host = hwnd_i
             self._dwm_host_size = (1, 1)
+            self._dwm_host_region_signature = None
             self._dwm_host_visible = False
+            self._dwm_host_alpha = None
             self._dwm_host_rect = None
             return hwnd_i
         except Exception:
@@ -2594,6 +4630,22 @@ class BrowserApp(BrowserFeatures):
                     )
                 self._dwm_host_rect = rect
             self._dwm_host_size = (w, h)
+            self._apply_dwm_host_rounding(hwnd, w, h)
+
+            LWA_ALPHA = 0x00000002
+            target_alpha = 0 if transparent else 255
+            if target_alpha != self._dwm_host_alpha:
+                try:
+                    user32.SetLayeredWindowAttributes.argtypes = [
+                        wintypes.HWND, wintypes.COLORREF, ctypes.c_ubyte, wintypes.DWORD
+                    ]
+                    user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+                    user32.SetLayeredWindowAttributes(
+                        wintypes.HWND(hwnd), wintypes.COLORREF(0), ctypes.c_ubyte(target_alpha), LWA_ALPHA,
+                    )
+                    self._dwm_host_alpha = int(target_alpha)
+                except Exception:
+                    pass
 
             # Startup rule: the raw DWM destination remains completely hidden
             # until _show_embedded_host marks the Chromium surface ready.
@@ -2602,13 +4654,42 @@ class BrowserApp(BrowserFeatures):
                 SW_SHOWNOACTIVATE = 4
                 user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOWNOACTIVATE)
                 self._dwm_host_visible = True
-            elif not should_show and not self._dwm_surface_ready and self._dwm_host_visible:
+            elif not should_show and self._dwm_host_visible:
                 SW_HIDE = 0
-                user32.ShowWindow(wintypes.HWND(hwnd), SW_HIDE)
+                try:
+                    user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+                    user32.ShowWindowAsync.restype = wintypes.BOOL
+                    user32.ShowWindowAsync(wintypes.HWND(hwnd), SW_HIDE)
+                except Exception:
+                    user32.ShowWindow(wintypes.HWND(hwnd), SW_HIDE)
                 self._dwm_host_visible = False
             return (w, h)
         except Exception:
             return None
+
+    def _cancel_dwm_host_reveal(self):
+        if self._dwm_reveal_after_id is not None:
+            try:
+                self.root.after_cancel(self._dwm_reveal_after_id)
+            except Exception:
+                pass
+            self._dwm_reveal_after_id = None
+
+    def _reveal_dwm_host(self):
+        self._dwm_reveal_after_id = None
+        if not (self._embedded_mode and self._chromium_dwm_mode and self._dwm_surface_ready):
+            self._dwm_reveal_pending = False
+            return False
+        self._dwm_reveal_pending = False
+        self._sync_dwm_host_geometry(show=True, transparent=False)
+        return True
+
+    def _schedule_dwm_host_reveal(self, delay=45):
+        self._cancel_dwm_host_reveal()
+        try:
+            self._dwm_reveal_after_id = self.root.after(max(1, int(delay)), self._reveal_dwm_host)
+        except Exception:
+            self._dwm_reveal_after_id = None
 
     def _schedule_dwm_geometry_sync(self, resize=False, delay=8):
         """Coalesce DWM geometry near a 120 Hz cadence without resize spam."""
@@ -2622,7 +4703,7 @@ class BrowserApp(BrowserFeatures):
             self._dwm_geometry_after_id = None
             do_resize = bool(self._dwm_pending_resize)
             self._dwm_pending_resize = False
-            self._sync_dwm_host_geometry(show=True, transparent=False)
+            self._sync_dwm_host_geometry(show=True, transparent=bool(self._dwm_reveal_pending))
             if do_resize:
                 try:
                     w = max(1, int(self.edge_host.winfo_width()))
@@ -2645,8 +4726,29 @@ class BrowserApp(BrowserFeatures):
             self._dwm_geometry_after_id = None
 
     def _hide_dwm_host(self):
+        self._cancel_dwm_host_reveal()
+        if self._dwm_pointer_after_id is not None:
+            try:
+                self.root.after_cancel(self._dwm_pointer_after_id)
+            except Exception:
+                pass
+            self._dwm_pointer_after_id = None
+        self._dwm_pointer_inside = False
+        self._dwm_pointer_last_screen_xy = None
+        self._dwm_pointer_last_page_xy = None
+        self._chromium_left_button_down = False
+        self._chromium_drag_selecting = False
+        self._chromium_press_point = None
+        self._chromium_pending_drag = None
+        if self._chromium_drag_after_id is not None:
+            try:
+                self.root.after_cancel(self._chromium_drag_after_id)
+            except Exception:
+                pass
+            self._chromium_drag_after_id = None
         self._chromium_dwm_mode = False
         self._dwm_surface_ready = False
+        self._dwm_reveal_pending = False
         self._dwm_host_visible = False
         if self._dwm_geometry_after_id is not None:
             try:
@@ -2663,9 +4765,41 @@ class BrowserApp(BrowserFeatures):
             user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
             self._dwm_user32 = user32
             SW_HIDE = 0
-            user32.ShowWindow(wintypes.HWND(int(self._dwm_host)), SW_HIDE)
+            hwnd = wintypes.HWND(int(self._dwm_host))
+            # ShowWindow can synchronously wait on the native window/compositor
+            # path. For tab-close/new-tab transitions we only need to enqueue a
+            # hide, so prefer ShowWindowAsync and return to Tk immediately.
+            try:
+                user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+                user32.ShowWindowAsync.restype = wintypes.BOOL
+                user32.ShowWindowAsync(hwnd, SW_HIDE)
+            except Exception:
+                user32.ShowWindow(hwnd, SW_HIDE)
         except Exception:
             pass
+
+    def _set_chromium_presentation_fast(self, mode, target_id=None):
+        """Change presentation state without ever waiting on CDP from Tk.
+
+        The old path could spend seconds clearing Chromium device metrics on the
+        GUI thread just after an active tab closed. That made the whole Tekzite
+        window stop processing clicks even though target activation itself was
+        already on a worker. Mark the live session immediately, then do the CDP
+        housekeeping on the shared Chromium executor.
+        """
+        normalized = "software" if str(mode).lower() == "software" else "native"
+        try:
+            set_embedded_chromium_presentation(normalized, target_id, defer_io=True)
+        except Exception:
+            pass
+        if normalized == "native":
+            executor = getattr(self, "_executor", None)
+            if executor is not None:
+                try:
+                    executor.submit(set_embedded_chromium_presentation, normalized, target_id, False)
+                except Exception:
+                    pass
+        return normalized
 
     def _show_native_canvas(self):
         if not self._embedded_mode and not self._chromium_software_mode:
@@ -2673,6 +4807,7 @@ class BrowserApp(BrowserFeatures):
         self._embedded_mode = False
         self._chromium_software_mode = False
         self._hide_dwm_host()
+        self._chromium_frame_target_id = None
         self._chromium_frame_generation += 1
         self._chromium_last_frame_signature = None
         self._chromium_frame_source_size = None
@@ -2718,7 +4853,7 @@ class BrowserApp(BrowserFeatures):
 
     def _show_chromium_software_surface(self, target_id=None):
         self._hide_dwm_host()
-        set_embedded_chromium_presentation("software", target_id)
+        self._set_chromium_presentation_fast("software", target_id)
         self._embedded_mode = True
         self._chromium_software_mode = True
         self._chromium_frame_target_id = target_id
@@ -2858,7 +4993,7 @@ class BrowserApp(BrowserFeatures):
         # device metrics override before native HWND presentation resumes.
         tab["presentation"] = "native-retry"
         try:
-            set_embedded_chromium_presentation("native", target_id)
+            self._set_chromium_presentation_fast("native", target_id)
             self._show_embedded_host(recovery=True)
             resize_embedded_chromium(int(viewport[0]), int(viewport[1]))
             # v5.04: a fallback tab may retain the old pre-fullscreen RWH size
@@ -2881,7 +5016,7 @@ class BrowserApp(BrowserFeatures):
             # Keep both the tab state and the shared Chromium session on the same
             # authoritative presentation mode before exposing the fallback widget.
             try:
-                set_embedded_chromium_presentation("software", target_id)
+                self._set_chromium_presentation_fast("software", target_id)
             except Exception:
                 pass
             self._show_chromium_software_surface(target_id)
@@ -3022,6 +5157,43 @@ class BrowserApp(BrowserFeatures):
     def _chromium_input_surface_active(self):
         return bool(self._chromium_software_mode or self._chromium_dwm_mode)
 
+    def _dwm_local_to_chromium_xy(self, x, y):
+        """Map a point in the visible DWM destination to Chromium page CSS pixels.
+
+        Both Tk events and the v10.5.4 native pointer watchdog use this exact
+        transform.  Keeping one mapping function prevents the visual DWM crop,
+        browser zoom and pointer hit testing from drifting into different
+        coordinate systems.
+        """
+        x = max(0.0, float(x))
+        y = max(0.0, float(y))
+        try:
+            dw, dh = getattr(self, "_dwm_host_size", (1, 1))
+            # The DWM thumbnail is cropped from Chromium's outer app window,
+            # but CDP hit testing is relative to the page renderer. v5.36
+            # applies the live measured delta between those two origins.
+            ox, oy = get_embedded_chromium_dwm_input_offset()
+            x += float(ox)
+            y += float(oy)
+            x = min(max(0.0, x), max(0.0, float(dw) - 1.0))
+            y = min(max(0.0, y), max(0.0, float(dh) - 1.0))
+
+            # v10.5.6: DWM/Win32 positions are native window pixels; CDP
+            # pointer APIs use CSS viewport pixels.  The live scale includes
+            # Windows DPI/device scaling *and* Chromium page zoom.  Using only
+            # the saved zoom percentage caused the exact "click above the
+            # input" symptom on scaled displays.
+            scale_x, scale_y = get_embedded_chromium_input_scale()
+            scale_x = float(scale_x or 1.0)
+            scale_y = float(scale_y or 1.0)
+            if scale_x > 0.0 and abs(scale_x - 1.0) > 1e-6:
+                x /= scale_x
+            if scale_y > 0.0 and abs(scale_y - 1.0) > 1e-6:
+                y /= scale_y
+        except Exception:
+            pass
+        return x, y
+
     def _surface_xy(self, event):
         """Translate Tk pointer coordinates into Chromium frame coordinates.
 
@@ -3034,30 +5206,7 @@ class BrowserApp(BrowserFeatures):
         x = max(0.0, float(getattr(event, "x", 0)))
         y = max(0.0, float(getattr(event, "y", 0)))
         if self._chromium_dwm_mode and self._dwm_host is not None:
-            try:
-                dw, dh = getattr(self, "_dwm_host_size", (1, 1))
-                # The DWM thumbnail is cropped from Chromium's outer app window,
-                # but CDP hit testing is relative to the page renderer. v5.36
-                # applies the live measured delta between those two origins.
-                ox, oy = get_embedded_chromium_dwm_input_offset()
-                x += float(ox)
-                y += float(oy)
-                x = min(max(0.0, x), max(0.0, float(dw) - 1.0))
-                y = min(max(0.0, y), max(0.0, float(dh) - 1.0))
-
-                # v7.2: DWM shows Chromium's physical page pixels, while CDP
-                # pointer APIs use CSS viewport coordinates. Native browser zoom
-                # makes those coordinate spaces diverge (e.g. at 150%, 600
-                # visible pixels correspond to about 400 CSS px). Convert every
-                # DWM pointer path here so click, focus, hover, cursor probing and
-                # context menus all share exactly the same mapping.
-                zoom = float(get_embedded_chromium_input_zoom_factor() or 1.0)
-                if zoom > 0.0 and abs(zoom - 1.0) > 1e-6:
-                    x /= zoom
-                    y /= zoom
-            except Exception:
-                pass
-            return x, y
+            return self._dwm_local_to_chromium_xy(x, y)
         src = self._chromium_frame_source_size
         dst = self._chromium_frame_display_size
         if src and dst and dst[0] > 0 and dst[1] > 0:
@@ -3069,6 +5218,265 @@ class BrowserApp(BrowserFeatures):
             x = min(x, max(0.0, float(src[0]) - 1.0))
             y = min(y, max(0.0, float(src[1]) - 1.0))
         return x, y
+
+    def _note_dwm_tk_pointer_delivery(self, x=None, y=None):
+        """Remember a DWM pointer point that Windows successfully delivered to Tk."""
+        if self._chromium_dwm_mode:
+            self._dwm_tk_pointer_event_at = time.monotonic()
+            if x is not None and y is not None:
+                self._dwm_pointer_last_page_xy = (round(float(x), 3), round(float(y), 3))
+
+    def _queue_chromium_hover_xy(self, x, y):
+        """Coalesce a page-space hover point onto Chromium's dedicated hover lane."""
+        self._chromium_pending_motion = (float(x), float(y))
+        self._mark_chromium_interaction(0.45)
+        if self._chromium_motion_after_id is None:
+            self._chromium_motion_after_id = self.root.after(
+                self._chromium_motion_interval_ms, self._flush_chromium_surface_motion
+            )
+
+    def _dispatch_chromium_press_xy(self, x, y):
+        """Send one left press in already-mapped Chromium page coordinates."""
+        if not self._chromium_input_surface_active():
+            return None
+        # State matching also de-duplicates the native DWM fallback if the same
+        # physical press reaches Tk a moment later.
+        if self._chromium_left_button_down:
+            return "break"
+        try:
+            (self.edge_host if self._chromium_dwm_mode else self.chromium_surface).focus_set()
+        except Exception:
+            pass
+        self._address_focus_active = False
+        self._chromium_page_keyboard_active = True
+        self._cancel_embedded_surface_wakes()
+        self._mark_chromium_interaction(1.0)
+        x, y = float(x), float(y)
+        self._chromium_left_button_down = True
+        self._chromium_drag_selecting = False
+        self._chromium_press_point = (x, y)
+        self._chromium_press_click_count = _next_pointer_click_count(
+            self._chromium_last_click_release_at,
+            self._chromium_last_click_point,
+            self._chromium_last_click_count,
+            time.monotonic(),
+            (x, y),
+        )
+        # Move first on the same ordered input worker. Sites that reveal or
+        # arm controls on hover therefore see the pointer at the exact pixel
+        # before the button transition arrives. mouseMoved deliberately uses
+        # clickCount=0; only actual button transitions carry click semantics.
+        self._submit_chromium_input(
+            dispatch_embedded_chromium_mouse, "mouseMoved", x, y,
+            button="none", buttons=0, click_count=0,
+            target_id=self._chromium_frame_target_id,
+        )
+        self._submit_chromium_input(
+            dispatch_embedded_chromium_mouse, "mousePressed", x, y,
+            button="left", buttons=1, click_count=self._chromium_press_click_count,
+            target_id=self._chromium_frame_target_id,
+        )
+        return "break"
+
+    def _flush_pending_chromium_drag_before_release(self):
+        """Queue the newest drag point before its release on the ordered lane."""
+        if self._chromium_drag_after_id is not None:
+            try:
+                self.root.after_cancel(self._chromium_drag_after_id)
+            except Exception:
+                pass
+            self._chromium_drag_after_id = None
+        pending = self._chromium_pending_drag
+        self._chromium_pending_drag = None
+        if pending is None:
+            return
+        x, y = map(float, pending)
+        self._chromium_drag_future = self._submit_chromium_input(
+            dispatch_embedded_chromium_mouse, "mouseMoved", x, y,
+            button="left", buttons=1, click_count=0,
+            target_id=self._chromium_frame_target_id,
+        )
+
+    def _dispatch_chromium_release_xy(self, x, y):
+        """Send one left release in already-mapped Chromium page coordinates."""
+        if not self._chromium_input_surface_active():
+            return None
+        if not self._chromium_left_button_down:
+            return "break"
+        self._mark_chromium_interaction(1.0)
+        x, y = float(x), float(y)
+        # A coalesced drag may still have one newest point waiting in Tk. Queue
+        # that move first; the single-threaded input executor guarantees the
+        # subsequent mouseReleased cannot overtake it.
+        self._flush_pending_chromium_drag_before_release()
+        click_count = max(1, int(self._chromium_press_click_count or 1))
+        was_drag = bool(self._chromium_drag_selecting)
+        self._submit_chromium_input(
+            dispatch_embedded_chromium_mouse, "mouseReleased", x, y,
+            button="left", buttons=0, click_count=click_count,
+            target_id=self._chromium_frame_target_id, refresh=True,
+        )
+        self._chromium_left_button_down = False
+        self._chromium_drag_selecting = False
+        self._chromium_press_point = None
+        if was_drag:
+            # A selection/slider drag must not become click #1 of a later
+            # accidental double-click sequence.
+            self._chromium_last_click_release_at = 0.0
+            self._chromium_last_click_point = None
+            self._chromium_last_click_count = 0
+        else:
+            self._chromium_last_click_release_at = time.monotonic()
+            self._chromium_last_click_point = (x, y)
+            self._chromium_last_click_count = click_count
+        self._chromium_press_click_count = 1
+        return "break"
+
+    def _dispatch_chromium_drag_xy(self, x, y):
+        """Coalesce a held-left pointer drag while preserving final ordering."""
+        if not self._chromium_input_surface_active() or not self._chromium_left_button_down:
+            return None
+        x, y = float(x), float(y)
+        start = self._chromium_press_point
+        if start is not None:
+            dx = x - float(start[0])
+            dy = y - float(start[1])
+            if (dx * dx + dy * dy) >= 4.0:
+                self._chromium_drag_selecting = True
+        self._mark_chromium_interaction(0.6)
+        self._chromium_pending_drag = (x, y)
+        if self._chromium_drag_after_id is None:
+            try:
+                self._chromium_drag_after_id = self.root.after(4, self._flush_chromium_drag_motion)
+            except Exception:
+                self._chromium_drag_after_id = None
+                self._flush_chromium_drag_motion()
+        self._chromium_cursor_point = (x, y)
+        return "break"
+
+    def _flush_chromium_drag_motion(self):
+        """Keep only the newest held-left move while Chromium is consuming one."""
+        self._chromium_drag_after_id = None
+        if not self._chromium_input_surface_active() or not self._chromium_left_button_down:
+            self._chromium_pending_drag = None
+            return
+        if self._chromium_drag_future is not None and not self._chromium_drag_future.done():
+            self._chromium_drag_after_id = self.root.after(4, self._flush_chromium_drag_motion)
+            return
+        pending = self._chromium_pending_drag
+        self._chromium_pending_drag = None
+        if pending is None:
+            return
+        x, y = map(float, pending)
+        self._chromium_drag_future = self._submit_chromium_input(
+            dispatch_embedded_chromium_mouse, "mouseMoved", x, y,
+            button="left", buttons=1, click_count=0,
+            target_id=self._chromium_frame_target_id,
+        )
+        if self._chromium_pending_drag is not None and self._chromium_drag_after_id is None:
+            self._chromium_drag_after_id = self.root.after(4, self._flush_chromium_drag_motion)
+
+    def _schedule_dwm_pointer_bridge(self, delay=8):
+        """Arm the Windows pointer fallback for the visible DWM destination."""
+        if os.name != "nt" or not (self._embedded_mode and self._chromium_dwm_mode and self._dwm_surface_ready):
+            return False
+        if self._dwm_pointer_after_id is not None:
+            return True
+        try:
+            self._dwm_pointer_after_id = self.root.after(max(1, int(delay)), self._poll_dwm_pointer_bridge)
+            return True
+        except Exception:
+            self._dwm_pointer_after_id = None
+            return False
+
+    def _poll_dwm_pointer_bridge(self):
+        """Repair any DWM pointer event Windows failed to pass through to Tk.
+
+        ``WM_NCHITTEST -> HTTRANSPARENT`` remains the normal zero-overhead input
+        route.  This poller only emits hover packets when Tk has gone quiet, and
+        only emits button transitions when Tekzite's tracked state disagrees
+        with the physical left button.  That makes it a fallback rather than a
+        second competing input source.
+        """
+        self._dwm_pointer_after_id = None
+        if getattr(self, "_closing", False):
+            return
+        if not (os.name == "nt" and self._embedded_mode and self._chromium_dwm_mode
+                and self._dwm_surface_ready and self._dwm_host_visible and self._dwm_host):
+            return
+        next_delay = 24
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
+            self._dwm_user32 = user32
+
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+            user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+            user32.GetCursorPos.restype = wintypes.BOOL
+            user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+            user32.GetAsyncKeyState.restype = ctypes.c_short
+
+            pt = POINT()
+            if not user32.GetCursorPos(ctypes.byref(pt)):
+                raise OSError(ctypes.get_last_error(), "GetCursorPos failed")
+            sx, sy = int(pt.x), int(pt.y)
+            rect = self._dwm_host_rect
+            if not rect:
+                raise RuntimeError("DWM host geometry unavailable")
+            rx, ry, rw, rh = map(int, rect)
+            rw, rh = max(1, rw), max(1, rh)
+            inside = (rx <= sx < rx + rw and ry <= sy < ry + rh)
+            physical_left_down = bool(user32.GetAsyncKeyState(0x01) & 0x8000)
+
+            # Continue tracking a drag that started inside even if the pointer
+            # leaves the viewport, so Chromium always receives the matching
+            # mouseReleased transition.  Coordinates clamp to the visible edge.
+            tracking = bool(inside or self._chromium_left_button_down)
+            if tracking:
+                lx = min(max(float(sx - rx), 0.0), float(rw - 1))
+                ly = min(max(float(sy - ry), 0.0), float(rh - 1))
+                x, y = self._dwm_local_to_chromium_xy(lx, ly)
+                transitioned = False
+
+                page_point = (round(float(x), 3), round(float(y), 3))
+                if physical_left_down and not self._chromium_left_button_down and inside:
+                    self._dispatch_chromium_press_xy(x, y)
+                    self._dwm_pointer_last_page_xy = page_point
+                    transitioned = True
+                elif (not physical_left_down) and self._chromium_left_button_down:
+                    self._dispatch_chromium_release_xy(x, y)
+                    self._dwm_pointer_last_page_xy = page_point
+                    transitioned = True
+
+                point_changed = self._dwm_pointer_last_page_xy != page_point
+                tk_quiet_for = time.monotonic() - float(self._dwm_tk_pointer_event_at or 0.0)
+                if point_changed and not transitioned and tk_quiet_for >= 0.018:
+                    if physical_left_down and self._chromium_left_button_down:
+                        self._dispatch_chromium_drag_xy(x, y)
+                        self._dwm_pointer_last_page_xy = page_point
+                    elif inside:
+                        self._queue_chromium_hover_xy(x, y)
+                        self._dwm_pointer_last_page_xy = page_point
+
+                self._dwm_pointer_last_screen_xy = (sx, sy)
+                next_delay = 8
+            else:
+                self._dwm_pointer_last_screen_xy = (sx, sy)
+                self._dwm_pointer_last_page_xy = None
+
+            if self._dwm_pointer_inside and not inside and not self._chromium_left_button_down:
+                self._chromium_cursor_point = None
+                self._apply_chromium_cursor("default")
+            self._dwm_pointer_inside = bool(inside)
+        except Exception:
+            # Pointer fallback is intentionally non-fatal. Tk's regular input
+            # plane remains active even if a Win32 probe is unavailable.
+            next_delay = 32
+        finally:
+            self._schedule_dwm_pointer_bridge(delay=next_delay)
 
     def _submit_chromium_input(self, func, *args, refresh=False, **kwargs):
         """Send software-surface input on a dedicated ordered lane.
@@ -3100,46 +5508,19 @@ class BrowserApp(BrowserFeatures):
     def _on_chromium_surface_press(self, event):
         if not self._chromium_input_surface_active():
             return None
-        try:
-            (self.edge_host if self._chromium_dwm_mode else self.chromium_surface).focus_set()
-        except Exception:
-            pass
-        self._address_focus_active = False
-        self._chromium_page_keyboard_active = True
-        self._cancel_embedded_surface_wakes()
-        self._mark_chromium_interaction(1.0)
         x, y = self._surface_xy(event)
-        self._chromium_left_button_down = True
-        self._chromium_drag_selecting = False
-        self._chromium_press_point = (x, y)
-        self._submit_chromium_input(
-            dispatch_embedded_chromium_mouse, "mousePressed", x, y,
-            button="left", buttons=1, click_count=1,
-            target_id=self._chromium_frame_target_id,
-        )
-        return "break"
+        self._note_dwm_tk_pointer_delivery(x, y)
+        return self._dispatch_chromium_press_xy(x, y)
 
     def _on_chromium_surface_release(self, event):
+        # mouseReleased is emitted by _dispatch_chromium_release_xy; keeping the
+        # actual CDP packet in the shared helper also de-duplicates the DWM
+        # native fallback against ordinary Tk delivery.
         if not self._chromium_input_surface_active():
             return None
-        self._mark_chromium_interaction(1.0)
         x, y = self._surface_xy(event)
-        was_drag = bool(self._chromium_drag_selecting)
-        self._submit_chromium_input(
-            dispatch_embedded_chromium_mouse, "mouseReleased", x, y,
-            button="left", buttons=0, click_count=1,
-            target_id=self._chromium_frame_target_id, refresh=True,
-        )
-        self._chromium_left_button_down = False
-        self._chromium_drag_selecting = False
-        self._chromium_press_point = None
-        # v8.9: Input.dispatchMouseEvent already performs Chromium's native
-        # focus behavior. Older builds followed every ordinary click with a
-        # second Runtime.evaluate/focus() round-trip on the critical input lane,
-        # making simple clicks heavier and occasionally delaying the next key.
-        # Keep the gesture purely native-CDP here; explicit focus remains
-        # available for exceptional call sites that actually require it.
-        return "break"
+        self._note_dwm_tk_pointer_delivery(x, y)
+        return self._dispatch_chromium_release_xy(x, y)
 
     def _on_chromium_surface_drag(self, event):
         """Forward a held-left-button pointer drag to Chromium.
@@ -3152,30 +5533,15 @@ class BrowserApp(BrowserFeatures):
         if not self._chromium_input_surface_active() or not self._chromium_left_button_down:
             return None
         x, y = self._surface_xy(event)
-        start = self._chromium_press_point
-        if start is not None:
-            dx = float(x) - float(start[0])
-            dy = float(y) - float(start[1])
-            if (dx * dx + dy * dy) >= 4.0:
-                self._chromium_drag_selecting = True
-        self._mark_chromium_interaction(0.6)
-        self._submit_chromium_input(
-            dispatch_embedded_chromium_mouse, "mouseMoved", x, y,
-            button="left", buttons=1, click_count=1,
-            target_id=self._chromium_frame_target_id,
-        )
-        self._chromium_cursor_point = (x, y)
-        return "break"
+        self._note_dwm_tk_pointer_delivery(x, y)
+        return self._dispatch_chromium_drag_xy(x, y)
 
     def _on_chromium_surface_motion(self, event):
         if not self._chromium_input_surface_active():
             return None
-        self._chromium_pending_motion = self._surface_xy(event)
-        self._mark_chromium_interaction(0.45)
-        if self._chromium_motion_after_id is None:
-            self._chromium_motion_after_id = self.root.after(
-                self._chromium_motion_interval_ms, self._flush_chromium_surface_motion
-            )
+        x, y = self._surface_xy(event)
+        self._note_dwm_tk_pointer_delivery(x, y)
+        self._queue_chromium_hover_xy(x, y)
         return None
 
     def _flush_chromium_surface_motion(self):
@@ -3308,18 +5674,30 @@ class BrowserApp(BrowserFeatures):
             return None
         self._mark_chromium_interaction(1.0)
         x, y = self._surface_xy(event)
+        self._note_dwm_tk_pointer_delivery(x, y)
         delta = -float(getattr(event, "delta", 0) or 0)
-        # v8.7: keep wheel bursts out of the click/keyboard FIFO. Accumulate
-        # deltas while one scroll packet is in flight, retaining only the newest
-        # pointer position. This is especially important for precision touchpads.
+        state = int(getattr(event, "state", 0) or 0)
+        shift = bool(state & 0x0001)
+        control = bool(state & 0x0004)
+        alt = bool(state & 0x0008)
+        modifiers = (8 if shift else 0) | (2 if control else 0) | (1 if alt else 0)
+        # Shift+wheel is horizontal scrolling in Chromium. Keep the axis and
+        # modifier state all the way through CDP so nested scrollers behave as
+        # they do in a normal browser.
+        dx, dy = (delta, 0.0) if shift else (0.0, delta)
+        # v8.7/v10.5.7: keep wheel bursts out of the click/keyboard FIFO and
+        # coalesce both axes while one scroll packet is in flight.
         if self._chromium_pending_wheel is None:
-            self._chromium_pending_wheel = [x, y, 0.0]
+            self._chromium_pending_wheel = [x, y, 0.0, 0.0, modifiers]
         self._chromium_pending_wheel[0] = x
         self._chromium_pending_wheel[1] = y
-        self._chromium_pending_wheel[2] += delta
+        self._chromium_pending_wheel[2] += dx
+        self._chromium_pending_wheel[3] += dy
+        self._chromium_pending_wheel[4] = modifiers
         if self._chromium_wheel_after_id is None:
             self._chromium_wheel_after_id = self.root.after(1, self._flush_chromium_wheel)
         return "break"
+
 
     def _flush_chromium_wheel(self):
         self._chromium_wheel_after_id = None
@@ -3333,11 +5711,12 @@ class BrowserApp(BrowserFeatures):
         self._chromium_pending_wheel = None
         if not pending:
             return
-        x, y, delta = pending
+        x, y, delta_x, delta_y, modifiers = pending
         try:
             self._chromium_scroll_future = self._chromium_scroll_executor.submit(
                 dispatch_embedded_chromium_mouse, "mouseWheel", x, y,
-                delta_y=delta, target_id=self._chromium_frame_target_id,
+                delta_x=delta_x, delta_y=delta_y, modifiers=modifiers,
+                target_id=self._chromium_frame_target_id,
                 timeout=2, purpose="scroll",
             )
         except Exception:
@@ -3392,7 +5771,11 @@ class BrowserApp(BrowserFeatures):
         # Ordinary text goes through Input.insertText so IME/layout differences
         # between Tk and Chromium do not corrupt what the user typed. Modified
         # printable keys are dispatched as real key events for Ctrl+C/V/A etc.
-        if char and char.isprintable() and not (control or alt):
+        altgr_text = bool(char and char.isprintable() and control and alt)
+        if char and char.isprintable() and (not (control or alt) or altgr_text):
+            # On many European Windows layouts AltGr is reported by Tk as
+            # Ctrl+Alt. Treat an actual printable character as text so @, €,
+            # braces and similar layout characters reach Chromium correctly.
             self._submit_chromium_input(
                 dispatch_embedded_chromium_key, text=char, event_type="insertText",
                 target_id=self._chromium_frame_target_id, refresh=True,
@@ -3438,14 +5821,10 @@ class BrowserApp(BrowserFeatures):
             pass
 
     def _context_menu_base(self):
-        menu = tk.Menu(
-            self.root, tearoff=False, bg=self.ui["chrome_2"], fg=self.ui["text"],
-            activebackground=self.ui["field_focus"], activeforeground="#ffffff",
-            bd=0, relief="flat", font=(self._ui_font_family, self._font_size(9)),
-        )
-        menu.add_command(label="Back", command=self.go_back)
-        menu.add_command(label="Forward", command=self.go_forward)
-        menu.add_command(label="Reload", command=self._reload_current)
+        menu = self._make_modern_menu(self.root)
+        menu.add_command(label=self._menu_item_text("Back", "←"), command=self.go_back)
+        menu.add_command(label=self._menu_item_text("Forward", "→"), command=self.go_forward)
+        menu.add_command(label=self._menu_item_text("Reload", "↻"), command=self._reload_current)
         menu.add_separator()
         return menu
 
@@ -3454,26 +5833,26 @@ class BrowserApp(BrowserFeatures):
         selected_text = str(selected_text or "")
         image_url = str(image_url or "")
         if link_url:
-            menu.insert_command(0, label="Open Link", command=lambda u=link_url: self.navigate_to(u))
-            menu.insert_command(1, label="Open Link in New Tab", command=lambda u=link_url: self._new_tab(url=u, switch=True, navigate=True))
-            menu.insert_command(2, label="Copy Link Address", command=lambda u=link_url: self._clipboard_set(u))
+            menu.insert_command(0, label=self._menu_item_text("Open Link", "↗"), command=lambda u=link_url: self.navigate_to(u))
+            menu.insert_command(1, label=self._menu_item_text("Open Link in New Tab", "+"), command=lambda u=link_url: self._new_tab(url=u, switch=True, navigate=True))
+            menu.insert_command(2, label=self._menu_item_text("Copy Link Address", "⧉"), command=lambda u=link_url: self._clipboard_set(u))
             menu.insert_separator(3)
         if selected_text:
-            menu.add_command(label="Copy Selected Text", command=lambda t=selected_text: self._clipboard_set(t))
+            menu.add_command(label=self._menu_item_text("Copy Selected Text", "▣"), command=lambda t=selected_text: self._clipboard_set(t))
             query = quote_plus(selected_text[:500])
-            menu.add_command(label="Search Selected Text", command=lambda q=query: self._new_tab(url=f"https://www.startpage.com/do/search?q={q}", switch=True, navigate=True))
+            menu.add_command(label=self._menu_item_text("Search Selected Text", "⌕"), command=lambda q=query: self._new_tab(url=f"https://www.startpage.com/do/search?q={q}", switch=True, navigate=True))
         if image_url:
-            menu.add_command(label="Copy Image Address", command=lambda u=image_url: self._clipboard_set(u))
+            menu.add_command(label=self._menu_item_text("Copy Image Address", "▧"), command=lambda u=image_url: self._clipboard_set(u))
         if selected_text or image_url:
             menu.add_separator()
         if editable:
-            menu.add_command(label="Cut", command=lambda: self._edit_shortcut("x"))
-            menu.add_command(label="Copy", command=lambda: self._edit_shortcut("c"))
-            menu.add_command(label="Paste", command=lambda: self._edit_shortcut("v"))
+            menu.add_command(label=self._menu_item_text("Cut", "✂"), command=lambda: self._edit_shortcut("x"))
+            menu.add_command(label=self._menu_item_text("Copy", "▣"), command=lambda: self._edit_shortcut("c"))
+            menu.add_command(label=self._menu_item_text("Paste", "▤"), command=lambda: self._edit_shortcut("v"))
             menu.add_separator()
-        menu.add_command(label="Home", command=self._go_home)
-        menu.add_command(label="Copy Page URL", command=lambda: self._clipboard_set(self.url_var.get()))
-        menu.add_command(label="Inspect HTML", command=self.inspect_html)
+        menu.add_command(label=self._menu_item_text("Home", "⌂"), command=self._go_home)
+        menu.add_command(label=self._menu_item_text("Copy Page URL", "⧉"), command=lambda: self._clipboard_set(self.url_var.get()))
+        menu.add_command(label=self._menu_item_text("Inspect HTML", "</>"), command=self.inspect_html)
         return menu
 
     def _popup_context_menu(self, menu, event=None):
@@ -3540,6 +5919,42 @@ class BrowserApp(BrowserFeatures):
         self._popup_context_menu(menu, event)
         return "break"
 
+    def _on_chromium_surface_middle_click(self, event):
+        """Open links under the DWM pointer without relying on hidden chrome."""
+        if not self._chromium_input_surface_active():
+            return None
+        x, y = self._surface_xy(event)
+        self._note_dwm_tk_pointer_delivery(x, y)
+        self._mark_chromium_interaction(0.8)
+        target_id = self._chromium_frame_target_id
+        future = self._executor.submit(
+            get_embedded_chromium_context, x, y, target_id=target_id
+        )
+
+        def poll():
+            if not future.done():
+                self.root.after(10, poll)
+                return
+            try:
+                href = str((future.result() or {}).get("href") or "")
+            except Exception:
+                href = ""
+            if href:
+                self._new_tab(url=href, switch=False, navigate=True)
+                return
+            # No link: preserve page-level auxclick/autoscroll semantics.
+            self._submit_chromium_input(
+                dispatch_embedded_chromium_mouse, "mousePressed", x, y,
+                button="middle", buttons=4, click_count=1, target_id=target_id,
+            )
+            self._submit_chromium_input(
+                dispatch_embedded_chromium_mouse, "mouseReleased", x, y,
+                button="middle", buttons=0, click_count=1, target_id=target_id, refresh=True,
+            )
+
+        self.root.after(0, poll)
+        return "break"
+
     def _on_chromium_surface_context_menu(self, event):
         if not self._chromium_input_surface_active():
             return None
@@ -3557,12 +5972,20 @@ class BrowserApp(BrowserFeatures):
         # Tekzite-owned.
         x, y = self._surface_xy(event)
         target_id = self._chromium_frame_target_id
-        # Ask Chromium what is under the pointer without blocking Tk. The menu
-        # appears as soon as the tiny Runtime.evaluate call completes.
+        self._chromium_page_keyboard_active = True
+        # Focus the exact editable under the right click before querying menu
+        # state. This makes Cut/Copy/Paste target the field the user actually
+        # clicked, even when another input previously owned Chromium focus.
         root_x, root_y = self._screen_cursor_position(event)
-        future = self._executor.submit(
-            get_embedded_chromium_context, x, y, target_id=target_id
-        )
+
+        def resolve_context():
+            try:
+                focus_embedded_chromium_point(x, y, target_id=target_id, timeout=2)
+            except Exception:
+                pass
+            return get_embedded_chromium_context(x, y, target_id=target_id)
+
+        future = self._executor.submit(resolve_context)
 
         def poll():
             if not future.done():
@@ -3808,13 +6231,13 @@ class BrowserApp(BrowserFeatures):
             target_id = tab.get("chromium_target_id")
             tab["presentation"] = "software"
             try:
-                set_embedded_chromium_presentation("software", target_id)
+                self._set_chromium_presentation_fast("software", target_id)
             except Exception:
                 pass
             if not self._chromium_software_mode or self._chromium_frame_target_id != target_id:
                 self._show_chromium_software_surface(target_id)
             return False
-        set_embedded_chromium_presentation("native", tab.get("chromium_target_id") if tab else None)
+        self._set_chromium_presentation_fast("native", tab.get("chromium_target_id") if tab else None)
         self._chromium_frame_target_id = tab.get("chromium_target_id") if tab else None
         self._embedded_mode = True
         self._chromium_software_mode = False
@@ -3829,6 +6252,7 @@ class BrowserApp(BrowserFeatures):
         if not self.edge_host.winfo_ismapped():
             self.edge_host.pack(fill="both", expand=True)
         self.root.update_idletasks()
+        self._cancel_dwm_host_reveal()
         # v6.1: position the DWM destination while it is still hidden. The
         # surface is revealed only after Chromium has received its real viewport.
         self._dwm_surface_ready = False
@@ -3842,14 +6266,23 @@ class BrowserApp(BrowserFeatures):
         resize_embedded_chromium(host_w, host_h)
         self._dwm_last_chromium_viewport = (host_w, host_h)
         # The open/navigation future only reaches this point after Chromium has
-        # produced a usable frame. Reveal the DWM host now, never before.
+        # produced a usable frame. Keep the host transparent for one short
+        # compositor beat so Tekzite never flashes the raw white DWM surface.
         self._dwm_surface_ready = True
+        self._dwm_reveal_pending = True
         # v9.0: arm Tk-to-Chromium keyboard ownership *before* exposing the
         # DWM frame. This removes the final few-instruction window where the
         # page could be visible while the root still owned keyboard input.
         if self._chromium_dwm_mode:
             self._arm_dwm_input_surface()
-        self._sync_dwm_host_geometry(show=True, transparent=False)
+        self._sync_dwm_host_geometry(show=True, transparent=True)
+        self._schedule_dwm_host_reveal(delay=45)
+        self.root.after(140, self._reveal_dwm_host)
+        # v10.5.4: keep a native pointer fallback armed while the DWM popup is
+        # visible.  Normal operation still uses Tk's edge_host bindings; this
+        # only fills in a missing move/press/release if Windows fails to pass a
+        # hit through the separate top-level thumbnail destination.
+        self._schedule_dwm_pointer_bridge(delay=1)
         # v9.2: non-critical I/O lanes warm only after the first frame is visible.
         # This keeps scroll/hover WebSocket setup off the startup reveal path.
         if tab and tab.get("chromium_target_id"):
@@ -3920,11 +6353,15 @@ class BrowserApp(BrowserFeatures):
         )
 
     def _on_root_configure_native_overlay(self, event=None):
-        if not self._embedded_mode or self._chromium_software_mode:
-            return
         try:
             if getattr(event, "widget", self.root) is not self.root:
                 return
+            self._apply_window_rounding()
+        except Exception:
+            pass
+        if not self._embedded_mode or self._chromium_software_mode:
+            return
+        try:
             if self._chromium_dwm_mode:
                 # v9.8 live dragging moves the top-level HWND and DWM destination
                 # together. Do not schedule a second compositor chase from the
@@ -4053,7 +6490,7 @@ class BrowserApp(BrowserFeatures):
             # compositor/window hierarchy untouched until a real user-driven
             # geometry change occurs.
             try:
-                set_embedded_chromium_presentation("native", target_id)
+                self._set_chromium_presentation_fast("native", target_id)
             except Exception:
                 pass
             self.status_var.set("Chromium native surface stalled; recovery paused to preserve DComp stability")
@@ -4075,7 +6512,7 @@ class BrowserApp(BrowserFeatures):
         # helper can run, so the latch cannot overwrite a proven recovery.
         tab["presentation"] = "software"
         try:
-            set_embedded_chromium_presentation("software", target_id)
+            self._set_chromium_presentation_fast("software", target_id)
         except Exception:
             pass
         if not self._chromium_software_mode or self._chromium_frame_target_id != target_id:
@@ -4178,6 +6615,8 @@ class BrowserApp(BrowserFeatures):
         height = max(1, int(self.content_frame.winfo_height()))
         if not self._embedded_mode:
             self._dwm_surface_ready = False
+        self._dwm_reveal_pending = False
+        self._cancel_dwm_host_reveal()
         self._sync_dwm_host_geometry(show=False, transparent=False)
         parent_hwnd = int(self._ensure_dwm_host())
         tab = self._active_tab()
@@ -4399,6 +6838,105 @@ class BrowserApp(BrowserFeatures):
         )
         self._refresh_standard_toolbar_state()
 
+    def _apply_window_rounding(self):
+        """Request native Windows rounded corners without clipping Tk itself.
+
+        v10.5.14 also used ``SetWindowRgn`` on Tk's wrapper HWND.  On some
+        Windows/Tk/DPI combinations that region is interpreted in a different
+        native coordinate space than ``winfo_width()/winfo_height()``.  The
+        result can punch a large transparent hole through Tekzite's own chrome,
+        exposing the desktop while the separate DWM page popup stays visible.
+
+        Keep the modern outer shape through Windows 11's native DWM corner
+        preference only.  Maximized/fullscreen windows explicitly request
+        square corners.  The Chromium content popup keeps its own independent
+        rounded region in ``_apply_dwm_host_rounding``.
+        """
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            self.root.update_idletasks()
+            inner = wintypes.HWND(int(self.root.winfo_id()))
+            GA_ROOT = 2
+            try:
+                user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+                user32.GetAncestor.restype = wintypes.HWND
+                hwnd = int(user32.GetAncestor(inner, GA_ROOT) or 0)
+            except Exception:
+                hwnd = 0
+            if not hwnd:
+                hwnd = int(user32.GetParent(inner) or int(self.root.winfo_id()))
+
+            rounded = not (self._window_maximized or self._fullscreen)
+            radius = self._ui_metric("window_corner_radius", 24) if rounded else 0
+            signature = (hwnd, int(radius), bool(rounded))
+            if signature == self._window_rounding_signature:
+                return True
+
+            # Important: never SetWindowRgn() on the Tk root wrapper here.
+            # DWM's native corner preference does not remove any Tk client
+            # pixels and therefore cannot make the title/tab/toolbar area
+            # transparent on scaled displays.
+            try:
+                user32.SetWindowRgn.argtypes = [wintypes.HWND, wintypes.HRGN, wintypes.BOOL]
+                user32.SetWindowRgn.restype = ctypes.c_int
+                user32.SetWindowRgn(wintypes.HWND(hwnd), None, True)
+            except Exception:
+                pass
+
+            DWMWA_WINDOW_CORNER_PREFERENCE = 33
+            DWMWCP_DONOTROUND = 1
+            DWMWCP_ROUND = 2
+            preference = ctypes.c_int(DWMWCP_ROUND if rounded and radius else DWMWCP_DONOTROUND)
+            try:
+                dwmapi = ctypes.windll.dwmapi
+                dwmapi.DwmSetWindowAttribute.argtypes = [
+                    wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD
+                ]
+                dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+                dwmapi.DwmSetWindowAttribute(
+                    wintypes.HWND(hwnd), DWMWA_WINDOW_CORNER_PREFERENCE,
+                    ctypes.byref(preference), ctypes.sizeof(preference),
+                )
+            except Exception:
+                pass
+            self._window_rounding_signature = signature
+            return True
+        except Exception:
+            return False
+
+    def _apply_dwm_host_rounding(self, hwnd, width, height):
+        """Clip the live Chromium DWM mirror to a softly rounded content card."""
+        if sys.platform != "win32" or not hwnd:
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            radius = 0 if self._fullscreen else self._ui_metric("content_corner_radius", 18)
+            signature = (int(hwnd), int(width), int(height), int(radius))
+            if signature == self._dwm_host_region_signature:
+                return True
+            user32 = ctypes.windll.user32
+            user32.SetWindowRgn.argtypes = [wintypes.HWND, wintypes.HRGN, wintypes.BOOL]
+            user32.SetWindowRgn.restype = ctypes.c_int
+            if radius <= 0:
+                user32.SetWindowRgn(wintypes.HWND(int(hwnd)), None, True)
+            else:
+                gdi32 = ctypes.windll.gdi32
+                gdi32.CreateRoundRectRgn.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+                gdi32.CreateRoundRectRgn.restype = wintypes.HRGN
+                diameter = max(2, int(radius) * 2)
+                region = gdi32.CreateRoundRectRgn(0, 0, int(width) + 1, int(height) + 1, diameter, diameter)
+                if region and not user32.SetWindowRgn(wintypes.HWND(int(hwnd)), region, True):
+                    gdi32.DeleteObject(region)
+            self._dwm_host_region_signature = signature
+            return True
+        except Exception:
+            return False
+
     def _apply_frameless_app_style(self):
         """Keep an override-redirect Tk window visible in the Windows taskbar."""
         if sys.platform != "win32":
@@ -4421,11 +6959,13 @@ class BrowserApp(BrowserFeatures):
             style = get_long(hwnd, GWL_EXSTYLE)
             style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
             set_long(hwnd, GWL_EXSTYLE, style)
+            self._window_rounding_signature = None
+            self._apply_window_rounding()
         except Exception:
             pass
 
     def _make_window_control(self, parent, role, command, close=False):
-        size = max(26, self._ui_metric("app_bar_height", 34) - self._ui_padding(10))
+        size = max(26, self._ui_metric("app_bar_height", 44) - self._ui_padding(10))
         button = tk.Canvas(
             parent,
             width=size,
@@ -4488,7 +7028,7 @@ class BrowserApp(BrowserFeatures):
 
     def _redraw_window_control(self, button):
         try:
-            size = max(26, self._ui_metric("app_bar_height", 34) - self._ui_padding(10))
+            size = max(26, self._ui_metric("app_bar_height", 44) - self._ui_padding(10))
             button.configure(width=size, height=size, bg=self.ui["bg"])
             button.delete("all")
             role = getattr(button, "_tekzite_role", "")
@@ -4624,53 +7164,51 @@ class BrowserApp(BrowserFeatures):
                 ("About Tekzite", self._show_about, ""),
             ]),
         ]
+        menu_icons = {
+            "New Tab": "+", "Close Tab": "×", "Reopen Closed Tab": "↶",
+            "New Window": "□", "New Private Window": "◐", "Open Location": "⌖",
+            "Exit": "⏻", "Find in Page": "⌕", "Cut": "✂", "Copy": "▣",
+            "Paste": "▤", "Select All": "▦", "Reload": "↻",
+            "Focus Address Bar": "⌖", "Customize Tekzite…": "✦", "Reset Interface": "↺",
+            "Fullscreen": "⛶", "Toggle Quiet Mode": "◌", "Search History": "◷",
+            "Back": "←", "Forward": "→", "Home": "⌂", "Bookmark This Page": "☆",
+            "Manage Bookmarks": "▤", "Downloads": "↓", "Toggle Ad Blocking for This Site": "◇",
+            "Site Info & Privacy": "◈", "Privacy Shield": "◆", "Permissions Manager": "✓",
+            "Extension Manager": "◇", "Tab Groups": "▦", "Profiles": "◉",
+            "Task Manager": "▥", "Diagnostics": "⌁", "Local Ports & Loopback": "⌘",
+            "Check for Updates": "↥", "Settings": "⚙", "Copy All Debug": "⧉",
+            "Copy Full Debug": "⧉", "Inspect Chromium HTML": "</>", "About Tekzite": "ⓘ",
+        }
         for label, items in menu_specs:
-            button = tk.Menubutton(
-                parent,
-                text=label,
-                bg=self.ui["bg"],
-                fg=self.ui["muted"],
-                activebackground=self.ui["field_focus"],
-                activeforeground=self.ui["text"],
-                relief="flat",
-                bd=0,
-                highlightthickness=0,
-                font=(self._ui_font_family, self._font_size(9)),
-                cursor="hand2",
-                padx=7,
-            )
-            menu = tk.Menu(
-                button,
-                tearoff=0,
-                bg=self.ui["chrome_2"],
-                fg=self.ui["text"],
-                activebackground=self.ui["accent"],
-                activeforeground="#ffffff",
-                disabledforeground=self.ui["muted"],
-                relief="flat",
-                bd=1,
-                font=(self._ui_font_family, self._font_size(9)),
-            )
+            menu = self._make_modern_menu(self.root)
             for item in items:
                 if item is None:
                     menu.add_separator()
                     continue
                 item_label, command, accelerator = item
-                menu.add_command(label=item_label, command=command, accelerator=accelerator)
+                menu.add_command(
+                    label=self._menu_item_text(item_label, menu_icons.get(item_label, "•")),
+                    command=command,
+                    accelerator=(f"  {accelerator}  " if accelerator else ""),
+                )
             if label == "Tools":
                 menu.configure(postcommand=lambda m=menu: self._update_site_menu(m))
-            button.configure(menu=menu)
+
+            button = _RoundedChromeButton(
+                parent, label, None,
+                surface_bg=self.ui["bg"], hover_bg=self.ui["field_focus"],
+                fg=self.ui["muted"], hover_fg=self.ui["text"],
+                border=self.ui["bg"], hover_border=self.ui["border_soft"],
+                canvas_bg=self.ui["bg"],
+                font=(self._ui_font_family, self._font_size(9)),
+                padx=self._ui_padding(10), pady=self._ui_padding(5),
+                radius=self._ui_metric("control_corner_radius", 16),
+                disabled_fg=self.ui["muted_dim"],
+            )
+            button._command = lambda b=button, m=menu: self._popup_menu_below(b, m)
             self._browser_menu_buttons.append(button)
             self._browser_menus.append(menu)
-            button.bind("<Enter>", lambda event, b=button: (
-                self._animate_widget_color(b, "bg", self.ui["field_focus"], 100),
-                self._animate_widget_color(b, "fg", self.ui["text"], 100),
-            ))
-            button.bind("<Leave>", lambda event, b=button: (
-                self._animate_widget_color(b, "bg", self.ui["bg"], 140),
-                self._animate_widget_color(b, "fg", self.ui["muted"], 140),
-            ))
-            button.pack(side="left", fill="y")
+            button.pack(side="left", padx=(0, self._ui_padding(2)), pady=self._ui_padding(4))
 
 
     def _prewarm_native_window_drag(self):
@@ -4881,6 +7419,11 @@ class BrowserApp(BrowserFeatures):
             self.root.geometry(f"{width}x{height}+{x}+{y}")
             self._window_maximized = True
         self._refresh_window_controls()
+        self._window_rounding_signature = None
+        self._dwm_host_region_signature = None
+        self.root.after_idle(self._apply_window_rounding)
+        if self._embedded_mode and self._chromium_dwm_mode:
+            self.root.after_idle(lambda: self._schedule_dwm_geometry_sync(resize=False, delay=1))
 
     def _minimize_window(self):
         # Tk cannot iconify an override-redirect window directly on Windows.
@@ -4904,6 +7447,11 @@ class BrowserApp(BrowserFeatures):
             self.root.attributes("-fullscreen", self._fullscreen)
         except Exception:
             pass
+        self._window_rounding_signature = None
+        self._dwm_host_region_signature = None
+        self.root.after_idle(self._apply_window_rounding)
+        if self._embedded_mode and self._chromium_dwm_mode:
+            self.root.after_idle(lambda: self._schedule_dwm_geometry_sync(resize=False, delay=1))
 
     def _spawn_browser_process(self, *, private=False, profile=None):
         if getattr(sys, "frozen", False):
@@ -5012,35 +7560,39 @@ class BrowserApp(BrowserFeatures):
             pass
 
     def _show_main_menu(self):
-        menu = tk.Menu(
-            self.root, tearoff=0, bg=self.ui["chrome_2"], fg=self.ui["text"],
-            activebackground=self.ui["accent"], activeforeground="#ffffff",
-            disabledforeground=self.ui["muted"], relief="flat", bd=1,
-            font=(self._ui_font_family, self._font_size(9)),
-        )
-        menu.add_command(label="New Tab", command=self._new_tab, accelerator="Ctrl+T")
-        menu.add_command(label="New Window", command=self._new_window, accelerator="Ctrl+N")
-        menu.add_command(label="New Private Window", command=self._new_private_window, accelerator="Ctrl+Shift+N")
+        active = getattr(self, "_active_popup_menu", None)
+        if (isinstance(active, _AnimatedPopupMenu) and active.is_posted()
+                and getattr(active, "_anchor_button", None) is self.main_menu_button):
+            active.dismiss(include_parent=False)
+            return "break"
+        menu = self._make_modern_menu(self.root, font_size=self._font_size(10))
+        menu.add_command(label=self._menu_item_text("New Tab", "+"), command=self._new_tab, accelerator="  Ctrl+T  ")
+        menu.add_command(label=self._menu_item_text("New Window", "□"), command=self._new_window, accelerator="  Ctrl+N  ")
+        menu.add_command(label=self._menu_item_text("New Private Window", "◐"), command=self._new_private_window, accelerator="  Ctrl+Shift+N  ")
         menu.add_separator()
-        menu.add_command(label="History", command=self._show_history, accelerator="Ctrl+H")
-        menu.add_command(label="Downloads", command=self._show_downloads, accelerator="Ctrl+J")
-        menu.add_command(label="Bookmarks", command=self._show_bookmarks, accelerator="Ctrl+Shift+O")
+        menu.add_command(label=self._menu_item_text("History", "◷"), command=self._show_history, accelerator="  Ctrl+H  ")
+        menu.add_command(label=self._menu_item_text("Downloads", "↓"), command=self._show_downloads, accelerator="  Ctrl+J  ")
+        menu.add_command(label=self._menu_item_text("Bookmarks", "☆"), command=self._show_bookmarks, accelerator="  Ctrl+Shift+O  ")
         menu.add_separator()
-        menu.add_command(label="Find in Page", command=self._show_find_bar, accelerator="Ctrl+F")
-        menu.add_command(label="Reload", command=self._reload_current, accelerator="Ctrl+R")
-        menu.add_command(label="Home", command=self._go_home)
+        menu.add_command(label=self._menu_item_text("Find in Page", "⌕"), command=self._show_find_bar, accelerator="  Ctrl+F  ")
+        menu.add_command(label=self._menu_item_text("Reload", "↻"), command=self._reload_current, accelerator="  Ctrl+R  ")
+        menu.add_command(label=self._menu_item_text("Home", "⌂"), command=self._go_home)
         menu.add_separator()
-        menu.add_command(label="Extensions", command=self._show_extension_manager)
-        menu.add_command(label="Customize Tekzite…", command=self._show_customize_browser, accelerator="Ctrl+Shift+,")
-        menu.add_command(label="Settings", command=self.show_preferences, accelerator="Ctrl+,")
-        menu.add_command(label="About Tekzite", command=self._show_about)
+        menu.add_command(label=self._menu_item_text("Extensions", "◇"), command=self._show_extension_manager)
+        menu.add_command(label=self._menu_item_text("Customize Tekzite…", "✦"), command=self._show_customize_browser, accelerator="  Ctrl+Shift+,  ")
+        menu.add_command(label=self._menu_item_text("Settings", "⚙"), command=self.show_preferences, accelerator="  Ctrl+,  ")
+        menu.add_command(label=self._menu_item_text("About Tekzite", "ⓘ"), command=self._show_about)
         menu.add_separator()
-        menu.add_command(label="Exit", command=self.on_close, accelerator="Alt+F4")
+        menu.add_command(label=self._menu_item_text("Exit", "⏻"), command=self.on_close, accelerator="  Alt+F4  ")
         try:
             self.root.update_idletasks()
             x = self.main_menu_button.winfo_rootx() + self.main_menu_button.winfo_width()
             y = self.main_menu_button.winfo_rooty() + self.main_menu_button.winfo_height()
-            menu.tk_popup(max(0, x - 230), y)
+            if hasattr(self.main_menu_button, "set_selected"):
+                self.main_menu_button.set_selected(True)
+            if isinstance(menu, _AnimatedPopupMenu):
+                menu._anchor_button = self.main_menu_button
+            menu.tk_popup(max(0, x - 250), y + self._ui_padding(3))
         finally:
             try:
                 menu.grab_release()
@@ -5280,7 +7832,7 @@ class BrowserApp(BrowserFeatures):
         return custom.get(key, default)
 
     def _density_factor(self):
-        return {"compact": 0.84, "comfortable": 1.0, "spacious": 1.18}.get(str(self._custom("density", "comfortable")), 1.0)
+        return {"compact": 0.84, "comfortable": 1.0, "spacious": 1.18}.get(str(self._custom("density", "spacious")), 1.0)
 
     def _ui_metric(self, key, default):
         try:
@@ -5331,16 +7883,16 @@ class BrowserApp(BrowserFeatures):
                 pass
         visible = self._custom("toolbar_visible", {})
         order = self._custom("toolbar_order", TOOLBAR_ITEM_IDS)
-        gap = self._ui_padding(5)
-        outer = self._ui_padding(9)
+        gap = self._ui_padding(7)
+        outer = self._ui_padding(12)
         for item in order:
             widget = widgets.get(item)
             if widget is None or not bool(visible.get(item, True)):
                 continue
             if item == "address":
-                widget.pack(side="left", fill="x", expand=True, padx=(self._ui_padding(10), outer), pady=outer)
+                widget.pack(side="left", fill="x", expand=True, padx=(self._ui_padding(12), outer), pady=outer)
             else:
-                widget.pack(side="left", padx=(0, gap), pady=self._ui_padding(8))
+                widget.pack(side="left", padx=(0, gap), pady=self._ui_padding(10))
         try:
             self.site_info_button.pack_forget()
             if self._custom("show_site_info_button", True):
@@ -5399,19 +7951,14 @@ class BrowserApp(BrowserFeatures):
             status.pack(fill="x")
         try:
             self.tab_items.pack_forget()
-            self.new_tab_button.pack_forget()
-            new_tab_left = self._custom("new_tab_button_position", "right") == "left"
-            if new_tab_left and self._custom("show_new_tab_button", True):
-                self.new_tab_button.pack(side="left", padx=(self._ui_padding(12), self._ui_padding(4)), pady=(self._ui_padding(6), self._ui_padding(5)))
-            self.tab_items.pack(side="left", fill="both", expand=True, padx=(self._ui_padding(12), self._ui_padding(6)), pady=(self._ui_padding(6), self._ui_padding(5)))
-            if not new_tab_left and self._custom("show_new_tab_button", True):
-                self.new_tab_button.pack(side="right", padx=(self._ui_padding(4), self._ui_padding(12)), pady=(self._ui_padding(6), self._ui_padding(5)))
+            self.tab_items.pack(side="left", fill="both", expand=True, padx=(self._ui_padding(16), self._ui_padding(10)), pady=(self._ui_padding(8), self._ui_padding(7)))
+            self._place_new_tab_button_inline()
         except Exception:
             pass
         try:
             self.app_brand.pack_forget()
             if self._custom("show_brand_badge", True) or self._custom("show_title_text", True):
-                self.app_brand.pack(side="left", padx=(self._ui_padding(14), self._ui_padding(12)), fill="y")
+                self.app_brand.pack(side="left", padx=(self._ui_padding(18), self._ui_padding(16)), fill="y")
             self.brand_badge.pack_forget()
             if self._custom("show_brand_badge", True):
                 self.brand_badge.pack(side="left", pady=self._ui_padding(5))
@@ -5423,16 +7970,16 @@ class BrowserApp(BrowserFeatures):
         try:
             self.menu_strip.pack_forget()
             if self._custom("show_menu_bar", True):
-                self.menu_strip.pack(side="left", fill="y", padx=(0, self._ui_padding(6)))
+                self.menu_strip.pack(side="left", fill="y", padx=(0, self._ui_padding(10)))
         except Exception:
             pass
         try:
             self.window_controls.pack_forget()
             if self._custom("show_window_controls", True):
                 if self._custom("window_control_style", "traffic_lights") == "traffic_lights":
-                    self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(10), self._ui_padding(4)), pady=self._ui_padding(5), before=self.app_brand)
+                    self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(14), self._ui_padding(6)), pady=self._ui_padding(7), before=self.app_brand)
                 else:
-                    self.window_controls.pack(side="right", fill="y", padx=(self._ui_padding(6), self._ui_padding(10)), pady=self._ui_padding(5))
+                    self.window_controls.pack(side="right", fill="y", padx=(self._ui_padding(8), self._ui_padding(14)), pady=self._ui_padding(7))
         except Exception:
             pass
         try:
@@ -5446,10 +7993,10 @@ class BrowserApp(BrowserFeatures):
             self.status_text_label.pack_forget()
             self.status_version_label.pack_forget()
             if self._custom("show_status_activity_dot", True):
-                self.status_activity_dot.pack(side="left", padx=(self._ui_padding(12), self._ui_padding(6)))
+                self.status_activity_dot.pack(side="left", padx=(self._ui_padding(16), self._ui_padding(8)))
             self.status_text_label.pack(side="left", fill="x", expand=True)
             if self._custom("show_status_version", True):
-                self.status_version_label.pack(side="right", padx=(self._ui_padding(8), self._ui_padding(12)))
+                self.status_version_label.pack(side="right", padx=(self._ui_padding(10), self._ui_padding(16)))
         except Exception:
             pass
 
@@ -5486,15 +8033,29 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             pass
         try:
-            self.app_bar.configure(height=self._ui_metric("app_bar_height", 38), bg=self.ui["bg"])
-            self.tab_bar.configure(height=self._ui_metric("tab_bar_height", 44), bg=self.ui["chrome"])
-            self.toolbar.configure(height=self._ui_metric("toolbar_height", 62), bg=self.ui["chrome"])
-            self.status_bar.configure(height=self._ui_metric("status_bar_height", 26), bg=self.ui["chrome"], highlightbackground=self.ui["border"])
+            self.app_bar.configure(height=self._ui_metric("app_bar_height", 44), bg=self.ui["bg"])
+            self.tab_bar.configure(height=self._ui_metric("tab_bar_height", 52), bg=self.ui["chrome"])
+            self.toolbar.configure(height=self._ui_metric("toolbar_height", 72), bg=self.ui["chrome"])
+            self.status_bar.configure(height=self._ui_metric("status_bar_height", 30), bg=self.ui["chrome"], highlightbackground=self.ui["border"])
             self.chrome_separator.configure(bg=self.ui["border_soft"])
             self.brand_badge.configure(bg=self.ui["accent"])
             self.status_activity_dot.configure(fg=self.ui.get("success", "#45d483"), bg=self.ui["chrome"])
-            self.address_shell.configure(bg=self.ui["field"], highlightbackground=self.ui["border"], highlightcolor=self.ui["border_focus"])
+            self.address_shell.configure(bg=self.ui["chrome"])
+            self.address_backdrop.configure(bg=self.ui["chrome"])
+            self._set_address_shell_focus(self._address_focused)
+            if hasattr(self.new_tab_button, "set_palette"):
+                self.new_tab_button.set_palette(
+                    surface_bg=self.ui["chrome_2"], hover_bg=self.ui["field_focus"],
+                    fg=self.ui["muted"], hover_fg=self.ui["text"],
+                    border=self.ui["border_soft"], hover_border=self.ui["border_focus"],
+                    canvas_bg=self.ui["chrome"],
+                    radius=self._ui_metric("control_corner_radius", 16),
+                    disabled_fg=self.ui["muted_dim"],
+                )
             self._refresh_window_controls()
+            self._window_rounding_signature = None
+            self._dwm_host_region_signature = None
+            self.root.after_idle(self._apply_window_rounding)
         except Exception:
             pass
         try:
@@ -5521,20 +8082,42 @@ class BrowserApp(BrowserFeatures):
             base = max(7, int(self._custom("font_size", 10)))
             menu = max(7, int(self._custom("menu_font_size", 9)))
             toolbar_size = max(7, int(self._custom("toolbar_font_size", 10)))
-            self.address.configure(font=(self._ui_font_family, base))
+            self.address.configure(font=("Segoe UI", max(10, base + 1)))
+            self._schedule_address_preview_render()
             self.title_label.configure(font=(self._ui_font_family, menu, "bold"))
             self.brand_badge.configure(font=(self._ui_font_family, menu, "bold"))
             self.status_text_label.configure(font=(self._ui_font_family, menu))
             self.status_version_label.configure(font=(self._ui_font_family, max(7, menu - 1)))
             for item, button in self._toolbar_widgets.items():
                 if item != "address":
+                    if hasattr(button, "set_palette"):
+                        button.set_palette(
+                            surface_bg=self.ui["field"], hover_bg=self.ui["field_focus"],
+                            fg=self.ui["muted"], hover_fg="#ffffff",
+                            border=self.ui["border_soft"], hover_border=self.ui["border_focus"],
+                            canvas_bg=self.ui["chrome"],
+                            radius=self._ui_metric("control_corner_radius", 16),
+                            disabled_fg=self.ui["muted_dim"],
+                        )
                     button.configure(font=(self._ui_font_family, toolbar_size))
             for button in getattr(self, "_browser_menu_buttons", []):
-                button.configure(font=(self._ui_font_family, menu), bg=self.ui["bg"], fg=self.ui["muted"],
-                                 activebackground=self.ui["field_focus"], activeforeground=self.ui["text"])
+                if hasattr(button, "set_palette"):
+                    button.set_palette(
+                        surface_bg=self.ui["bg"], hover_bg=self.ui["field_focus"],
+                        fg=self.ui["muted"], hover_fg=self.ui["text"],
+                        border=self.ui["bg"], hover_border=self.ui["border_soft"],
+                        canvas_bg=self.ui["bg"], radius=self._ui_metric("control_corner_radius", 16),
+                        disabled_fg=self.ui["muted_dim"],
+                    )
+                button.configure(font=(self._ui_font_family, menu))
             for browser_menu in getattr(self, "_browser_menus", []):
-                browser_menu.configure(bg=self.ui["chrome_2"], fg=self.ui["text"], activebackground=self.ui["accent"],
-                                       activeforeground="#ffffff", disabledforeground=self.ui["muted"], font=(self._ui_font_family, menu))
+                browser_menu.configure(
+                    bg=self.ui["chrome_2"], fg=self.ui["text"],
+                    activebackground=self.ui["field_focus"], activeforeground=self.ui["text"],
+                    disabledforeground=self.ui["muted_dim"], selectcolor=self.ui["accent"],
+                    borderwidth=0, activeborderwidth=0,
+                    font=(self._ui_font_family, max(menu, self._font_size(10))),
+                )
         except Exception:
             pass
         try:
@@ -5585,7 +8168,7 @@ class BrowserApp(BrowserFeatures):
             pass
 
     def _reset_interface_customization(self, confirm=False):
-        if confirm and not messagebox.askyesno("Reset Tekzite interface", "Reset all interface customization to Tekzite defaults?", parent=self.root):
+        if confirm and not self._ask_yes_no("Reset Tekzite interface", "Reset all interface customization to Tekzite defaults?", parent=self.root):
             return "break"
         self.preferences["customization"] = _normalized_customization(DEFAULT_CUSTOMIZATION)
         self.customization = self.preferences["customization"]
@@ -5635,7 +8218,7 @@ class BrowserApp(BrowserFeatures):
     def _show_customize_browser(self):
         import tkinter.font as tkfont
 
-        win = tk.Toplevel(self.root)
+        win = self._new_animated_toplevel(self.root)
         win.title(f"Customize Tekzite — v{BROWSER_VERSION}")
         win.geometry("900x720")
         win.minsize(780, 620)
@@ -5645,12 +8228,10 @@ class BrowserApp(BrowserFeatures):
         original_custom = json.loads(json.dumps(_normalized_customization(self.preferences.get("customization"))))
         draft = json.loads(json.dumps(original_custom))
 
-        header = tk.Frame(win, bg=self.ui["bg"], padx=18, pady=14)
+        header = tk.Frame(win, bg=self.ui["bg"], padx=18, pady=(4, 10))
         header.pack(fill="x")
-        tk.Label(header, text="Customize Tekzite", bg=self.ui["bg"], fg=self.ui["text"],
-                 font=(self._ui_display_font_family, self._font_size(18), "bold")).pack(anchor="w")
         tk.Label(header, text="Colors, typography, chrome layout, toolbar order, tabs, window sizing and browser behavior are all profile-specific.",
-                 bg=self.ui["bg"], fg=self.ui["muted"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(3, 0))
+                 bg=self.ui["bg"], fg=self.ui["muted"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w")
 
         notebook = ttk.Notebook(win, style="Tekzite.TNotebook")
         notebook.pack(fill="both", expand=True, padx=16, pady=(0, 10))
@@ -5665,6 +8246,7 @@ class BrowserApp(BrowserFeatures):
         tabs_page = page("Tabs & Layout")
         behavior_page = page("Behavior")
         advanced_page = page("Advanced")
+        notebook.bind("<<NotebookTabChanged>>", lambda _e: self._animate_notebook_page(notebook), add="+")
 
         def label(parent, text, *, muted=False, bold=False, width=None):
             return tk.Label(parent, text=text, bg=self.ui["bg"], fg=self.ui["muted"] if muted else self.ui["text"],
@@ -5728,15 +8310,15 @@ class BrowserApp(BrowserFeatures):
         ttk.Combobox(mono_row, textvariable=mono_font_var, values=[""] + families, width=24).pack(side="left")
 
         size_row = tk.Frame(appearance, bg=self.ui["bg"]); size_row.pack(fill="x", pady=5)
-        font_size_var = tk.StringVar(value=str(draft.get("font_size", 10)))
-        menu_font_size_var = tk.StringVar(value=str(draft.get("menu_font_size", 9)))
-        tab_font_size_var = tk.StringVar(value=str(draft.get("tab_font_size", 9)))
-        toolbar_font_size_var = tk.StringVar(value=str(draft.get("toolbar_font_size", 10)))
+        font_size_var = tk.StringVar(value=str(draft.get("font_size", 11)))
+        menu_font_size_var = tk.StringVar(value=str(draft.get("menu_font_size", 10)))
+        tab_font_size_var = tk.StringVar(value=str(draft.get("tab_font_size", 10)))
+        toolbar_font_size_var = tk.StringVar(value=str(draft.get("toolbar_font_size", 11)))
         for text, var in (("UI size", font_size_var), ("Menu", menu_font_size_var), ("Tabs", tab_font_size_var), ("Toolbar", toolbar_font_size_var)):
             label(size_row, text).pack(side="left", padx=(0, 4))
             entry(size_row, var, width=4).pack(side="left", padx=(0, 12), ipady=3)
 
-        density_var = tk.StringVar(value=draft.get("density", "comfortable"))
+        density_var = tk.StringVar(value=draft.get("density", "spacious"))
         scale_var = tk.StringVar(value=str(draft.get("ui_scale", 1.0)))
         animations_var = tk.BooleanVar(value=bool(draft.get("animations", True)))
         window_control_style_var = tk.StringVar(value=draft.get("window_control_style", "traffic_lights"))
@@ -5828,20 +8410,35 @@ class BrowserApp(BrowserFeatures):
         tab_position_var = tk.StringVar(value=draft.get("tab_position", "above_toolbar"))
         new_tab_position_var = tk.StringVar(value=draft.get("new_tab_button_position", "right"))
         tab_chars_var = tk.StringVar(value=str(draft.get("tab_title_chars", 28)))
+        tab_min_width_var = tk.StringVar(value=str(draft.get("tab_min_width", 175)))
+        tab_max_width_var = tk.StringVar(value=str(draft.get("tab_max_width", 330)))
         row = tk.Frame(tabs_page, bg=self.ui["bg"]); row.pack(fill="x", pady=(16, 4))
         label(row, "Tab strip position", width=18).pack(side="left")
         ttk.Combobox(row, textvariable=tab_position_var, values=["above_toolbar", "below_toolbar"], state="readonly", width=16).pack(side="left", padx=(0, 18))
         label(row, "+ button position").pack(side="left")
         ttk.Combobox(row, textvariable=new_tab_position_var, values=["left", "right"], state="readonly", width=10).pack(side="left", padx=(6, 18))
         label(row, "Tab title chars").pack(side="left")
-        entry(row, tab_chars_var, width=5).pack(side="left", padx=(6, 0), ipady=3)
+        entry(row, tab_chars_var, width=5).pack(side="left", padx=(6, 14), ipady=3)
+        label(row, "Min width").pack(side="left")
+        entry(row, tab_min_width_var, width=5).pack(side="left", padx=(6, 14), ipady=3)
+        label(row, "Max width").pack(side="left")
+        entry(row, tab_max_width_var, width=5).pack(side="left", padx=(6, 0), ipady=3)
+
+        window_radius_var = tk.StringVar(value=str(draft.get("window_corner_radius", 24)))
+        content_radius_var = tk.StringVar(value=str(draft.get("content_corner_radius", 18)))
+        control_radius_var = tk.StringVar(value=str(draft.get("control_corner_radius", 16)))
+        radius_row = tk.Frame(tabs_page, bg=self.ui["bg"]); radius_row.pack(fill="x", pady=(10, 2))
+        label(radius_row, "Corner radius", bold=True, width=18).pack(side="left")
+        for text, var in (("Window", window_radius_var), ("Web content", content_radius_var), ("Controls", control_radius_var)):
+            label(radius_row, text).pack(side="left", padx=(0, 4))
+            entry(radius_row, var, width=5).pack(side="left", padx=(0, 14), ipady=3)
 
         heights = {
-            "app_bar_height": tk.StringVar(value=str(draft.get("app_bar_height", 34))),
-            "tab_bar_height": tk.StringVar(value=str(draft.get("tab_bar_height", 40))),
-            "toolbar_height": tk.StringVar(value=str(draft.get("toolbar_height", 58))),
-            "status_bar_height": tk.StringVar(value=str(draft.get("status_bar_height", 25))),
-            "find_bar_height": tk.StringVar(value=str(draft.get("find_bar_height", 40))),
+            "app_bar_height": tk.StringVar(value=str(draft.get("app_bar_height", 44))),
+            "tab_bar_height": tk.StringVar(value=str(draft.get("tab_bar_height", 52))),
+            "toolbar_height": tk.StringVar(value=str(draft.get("toolbar_height", 72))),
+            "status_bar_height": tk.StringVar(value=str(draft.get("status_bar_height", 30))),
+            "find_bar_height": tk.StringVar(value=str(draft.get("find_bar_height", 46))),
         }
         label(tabs_page, "Chrome heights (px before UI scaling)", bold=True).pack(anchor="w", pady=(18, 6))
         row = tk.Frame(tabs_page, bg=self.ui["bg"]); row.pack(fill="x")
@@ -5901,10 +8498,10 @@ class BrowserApp(BrowserFeatures):
             custom["font_family"] = font_var.get().strip()
             custom["display_font_family"] = display_font_var.get().strip()
             custom["monospace_font_family"] = mono_font_var.get().strip()
-            custom["font_size"] = int_value(font_size_var, 10)
-            custom["menu_font_size"] = int_value(menu_font_size_var, 9)
-            custom["tab_font_size"] = int_value(tab_font_size_var, 9)
-            custom["toolbar_font_size"] = int_value(toolbar_font_size_var, 10)
+            custom["font_size"] = int_value(font_size_var, 11)
+            custom["menu_font_size"] = int_value(menu_font_size_var, 10)
+            custom["tab_font_size"] = int_value(tab_font_size_var, 10)
+            custom["toolbar_font_size"] = int_value(toolbar_font_size_var, 11)
             custom["density"] = density_var.get()
             custom["ui_scale"] = float_value(scale_var, 1.0)
             custom["animations"] = bool(animations_var.get())
@@ -5921,6 +8518,11 @@ class BrowserApp(BrowserFeatures):
             custom["tab_position"] = tab_position_var.get()
             custom["new_tab_button_position"] = new_tab_position_var.get()
             custom["tab_title_chars"] = int_value(tab_chars_var, 28)
+            custom["tab_min_width"] = int_value(tab_min_width_var, 175)
+            custom["tab_max_width"] = int_value(tab_max_width_var, 330)
+            custom["window_corner_radius"] = int_value(window_radius_var, 24)
+            custom["content_corner_radius"] = int_value(content_radius_var, 18)
+            custom["control_corner_radius"] = int_value(control_radius_var, 16)
             for key, var in heights.items():
                 custom[key] = int_value(var, DEFAULT_CUSTOMIZATION[key])
             custom["window_width"] = int_value(window_width_var, 1280)
@@ -5948,6 +8550,8 @@ class BrowserApp(BrowserFeatures):
                 visible_vars[item].set(bool(draft["toolbar_visible"].get(item, True)))
             for key, var in bool_vars.items(): var.set(bool(draft[key]))
             tab_position_var.set(draft["tab_position"]); new_tab_position_var.set(draft["new_tab_button_position"]); tab_chars_var.set(str(draft["tab_title_chars"]))
+            tab_min_width_var.set(str(draft["tab_min_width"])); tab_max_width_var.set(str(draft["tab_max_width"]))
+            window_radius_var.set(str(draft["window_corner_radius"])); content_radius_var.set(str(draft["content_corner_radius"])); control_radius_var.set(str(draft["control_corner_radius"]))
             for key, var in heights.items(): var.set(str(draft[key]))
             window_width_var.set(str(draft["window_width"])); window_height_var.set(str(draft["window_height"]))
             min_width_var.set(str(draft["window_min_width"])); min_height_var.set(str(draft["window_min_height"])); start_max_var.set(bool(draft["start_maximized"]))
@@ -5973,12 +8577,22 @@ class BrowserApp(BrowserFeatures):
             if not path:
                 return
             try:
-                payload = json.loads(Path(path).read_text(encoding="utf-8"))
-                custom = payload.get("customization", payload) if isinstance(payload, dict) else {}
+                preset_path = Path(path)
+                if preset_path.stat().st_size > 1024 * 1024:
+                    raise ValueError("customization preset is larger than 1 MiB")
+                payload = json.loads(preset_path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("customization preset must be a JSON object")
+                preset_format = payload.get("format")
+                if preset_format not in (None, "tekzite-customization"):
+                    raise ValueError("unsupported customization preset format")
+                custom = payload.get("customization", payload)
+                if not isinstance(custom, dict):
+                    raise ValueError("customization payload must be an object")
                 load_custom_into_controls(custom)
                 preview()
             except Exception as exc:
-                messagebox.showerror("Customize Tekzite", f"Could not import customization:\n{exc}", parent=win)
+                self._show_message("error", "Customize Tekzite", f"Could not import customization:\n{exc}", parent=win)
 
         def reset_controls():
             load_custom_into_controls(DEFAULT_CUSTOMIZATION)
@@ -5988,11 +8602,11 @@ class BrowserApp(BrowserFeatures):
             custom = collect_custom()
             search_template = search_var.get().strip()
             if "{query}" not in search_template:
-                messagebox.showerror("Customize Tekzite", "Search URL template must contain {query}.", parent=win)
+                self._show_message("error", "Customize Tekzite", "Search URL template must contain {query}.", parent=win)
                 return
             self.preferences["customization"] = custom
             self.customization = custom
-            self.preferences["homepage"] = homepage_var.get().strip() or START_URL
+            self.preferences["homepage"] = (homepage_var.get().strip()[:32768] or START_URL)
             self.preferences["search_url_template"] = search_template
             self.preferences["startup"] = startup_var.get()
             self.preferences["new_tab"] = newtab_var.get()
@@ -6001,7 +8615,7 @@ class BrowserApp(BrowserFeatures):
             try:
                 save_preferences(self.preferences)
             except Exception as exc:
-                messagebox.showerror("Customize Tekzite", f"Could not save customization:\n{exc}", parent=win)
+                self._show_message("error", "Customize Tekzite", f"Could not save customization:\n{exc}", parent=win)
                 return
             self._apply_customization_runtime()
             self._apply_chromium_zoom_to_all_tabs()
@@ -6026,21 +8640,18 @@ class BrowserApp(BrowserFeatures):
 
         win.protocol("WM_DELETE_WINDOW", cancel)
         win.bind("<Escape>", lambda event: cancel())
-        self._animate_toplevel_in(win, 140)
         return "break"
 
     def _show_privacy_shield(self):
-        win = tk.Toplevel(self.root)
+        win = self._new_animated_toplevel(self.root)
         win.title(f"Tekzite Privacy Shield — v{BROWSER_VERSION}")
         win.configure(bg=self.ui["bg"])
         win.transient(self.root)
         win.geometry("720x650")
         outer = tk.Frame(win, bg=self.ui["bg"], padx=22, pady=18)
         outer.pack(fill="both", expand=True)
-        tk.Label(outer, text="Privacy Shield", fg=self.ui["text"], bg=self.ui["bg"],
-                 font=(self._ui_display_font_family, self._font_size(20), "bold")).pack(anchor="w")
         tk.Label(outer, text="A live audit of Tekzite's privacy boundaries. No browsing destinations are stored here.",
-                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(2, 14))
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(0, 14))
 
         body = tk.Text(outer, bg=self.ui["field"], fg=self.ui["text"], insertbackground=self.ui["text"],
                        relief="flat", wrap="word", font=(self._ui_monospace_font_family, self._font_size(9)), padx=14, pady=12)
@@ -6112,11 +8723,10 @@ class BrowserApp(BrowserFeatures):
         tk.Button(footer, text="Refresh", command=refresh, bg=self.ui["accent"], fg="#ffffff",
                   relief="flat", padx=16, pady=7).pack(side="right")
         refresh()
-        self._animate_toplevel_in(win, 130)
         return "break"
 
     def show_preferences(self):
-        win = tk.Toplevel(self.root)
+        win = self._new_animated_toplevel(self.root)
         win.title(f"Tekzite Browser Settings — v{BROWSER_VERSION}")
         dialog_width = 620
         win.configure(bg=self.ui["bg"])
@@ -6131,10 +8741,8 @@ class BrowserApp(BrowserFeatures):
 
         outer = tk.Frame(win, bg=self.ui["bg"], padx=22, pady=18)
         outer.pack(fill="both", expand=True)
-        tk.Label(outer, text="Browser Settings", fg=self.ui["text"], bg=self.ui["bg"],
-                 font=(self._ui_display_font_family, self._font_size(18), "bold")).pack(anchor="w")
         tk.Label(outer, text="Customize Tekzite without editing configuration files.", fg=self.ui["muted"],
-                 bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(2, 18))
+                 bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(0, 18))
 
         homepage = tk.StringVar(value=getattr(self, "preferences", DEFAULT_PREFERENCES).get("homepage", START_URL))
         startup = tk.StringVar(value=getattr(self, "preferences", DEFAULT_PREFERENCES).get("startup", "homepage"))
@@ -6310,7 +8918,7 @@ class BrowserApp(BrowserFeatures):
             try:
                 save_preferences(self.preferences)
             except Exception as exc:
-                messagebox.showerror("Tekzite Settings", f"Could not save preferences:\n{exc}", parent=win)
+                self._show_message("error", "Tekzite Settings", f"Could not save preferences:\n{exc}", parent=win)
                 return
             self._apply_preferences_runtime()
             # Apply synchronously once before closing the modal, then keep a
@@ -6386,7 +8994,7 @@ class BrowserApp(BrowserFeatures):
 
             try:
                 win.deiconify()
-                self._animate_toplevel_in(win, 145)
+                self._animate_toplevel_in(win, 155, slide=14)
                 win.lift()
                 win.attributes("-topmost", True)
                 win.after(150, lambda: win.winfo_exists() and win.attributes("-topmost", False))
@@ -6405,12 +9013,210 @@ class BrowserApp(BrowserFeatures):
         win.after_idle(fit_and_center_preferences)
         win.protocol("WM_DELETE_WINDOW", cancel_preferences)
 
+    def _raise_toplevel_above_dwm(self, win, hold_ms=420):
+        """Force an app dialog above the separate native DWM presentation HWND.
+
+        Tk ``lift``/``-topmost`` is usually enough, but the Chromium page is
+        mirrored through a raw owned Win32 popup.  Resolve the real Tk wrapper
+        HWND and use SetWindowPos so the dialog wins the native z-order race too.
+        The TOPMOST state is temporary; after the first visible frame it returns
+        to normal app-owned ordering.
+        """
+        try:
+            win.update_idletasks()
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+        except Exception:
+            pass
+        if os.name != "nt":
+            try:
+                win.attributes("-topmost", True)
+                win.after(max(120, int(hold_ms)), lambda w=win: w.winfo_exists() and w.attributes("-topmost", False))
+            except Exception:
+                pass
+            return True
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            GA_ROOT = 2
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            raw = int(win.winfo_id())
+            hwnd = int(user32.GetAncestor(wintypes.HWND(raw), GA_ROOT) or raw)
+            flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            user32.SetWindowPos(wintypes.HWND(hwnd), wintypes.HWND(HWND_TOPMOST), 0, 0, 0, 0, flags)
+            win.attributes("-topmost", True)
+
+            def release_native_topmost(w=win, native_hwnd=hwnd):
+                try:
+                    if not w.winfo_exists():
+                        return
+                    user32.SetWindowPos(wintypes.HWND(native_hwnd), wintypes.HWND(HWND_NOTOPMOST), 0, 0, 0, 0, flags)
+                    w.attributes("-topmost", False)
+                    w.lift()
+                except Exception:
+                    pass
+            win.after(max(160, int(hold_ms)), release_native_topmost)
+            return True
+        except Exception:
+            try:
+                win.attributes("-topmost", True)
+                win.after(max(160, int(hold_ms)), lambda w=win: w.winfo_exists() and w.attributes("-topmost", False))
+            except Exception:
+                pass
+            return False
+
     def _show_about(self):
-        messagebox.showinfo(
-            "About Tekzite",
-            f"Tekzite Browser v{BROWSER_VERSION}{' — Private Window' if self._private_mode else ''}\n\nChromium-only web engine with Tekzite-native browser UI and DWM presentation.",
-            parent=self.root,
+        """Open a real, reusable About window that always appears above DWM.
+
+        Earlier builds routed Help -> About Tekzite through the generic modal
+        message helper.  Because the webpage is presented by a separate native
+        DWM popup, that small modal could end up visually behind the page even
+        though it had the Tk grab, making About look as if it did nothing.
+        Keep About as a normal Tekzite-owned animated toplevel and explicitly
+        raise it above the presentation surface.
+        """
+        existing = getattr(self, "_about_window", None)
+        try:
+            if existing is not None and existing.winfo_exists():
+                existing.deiconify()
+                self._raise_toplevel_above_dwm(existing, hold_ms=420)
+                return existing
+        except Exception:
+            self._about_window = None
+
+        win = self._new_animated_toplevel(self.root, duration=165, slide=14, branded=False)
+        self._about_window = win
+        # Build and size About while withdrawn. This guarantees that neither Tk
+        # nor the DWM popup can expose an unpositioned/1x1 first frame.
+        try:
+            win.withdraw()
+        except Exception:
+            pass
+        win.title("About Tekzite")
+        win.transient(self.root)
+        win.resizable(False, False)
+        win.configure(bg=self.ui["bg"])
+
+        def clear_about_ref(event=None):
+            try:
+                if event is None or event.widget is win:
+                    if getattr(self, "_about_window", None) is win:
+                        self._about_window = None
+            except Exception:
+                pass
+
+        win.bind("<Destroy>", clear_about_ref, add="+")
+        win.bind("<Escape>", lambda _e: win.destroy())
+
+        outer = tk.Frame(win, bg=self.ui["bg"], padx=28, pady=24)
+        outer.pack(fill="both", expand=True)
+
+        header = tk.Frame(outer, bg=self.ui["bg"])
+        header.pack(fill="x")
+        logo = tk.Canvas(header, width=54, height=54, bg=self.ui["bg"], highlightthickness=0, bd=0)
+        logo.pack(side="left", padx=(0, 16))
+        logo.create_rectangle(4, 4, 50, 50, fill=self.ui["accent"], outline=self.ui["accent_hover"], width=1)
+        logo.create_text(27, 27, text="T", fill="#ffffff",
+                         font=(self._ui_display_font_family, self._font_size(20), "bold"))
+
+        title_col = tk.Frame(header, bg=self.ui["bg"])
+        title_col.pack(side="left", fill="x", expand=True)
+        about_title = tk.Label(title_col, text="Tekzite Browser", bg=self.ui["bg"], fg=self.ui["text"],
+                               font=(self._ui_display_font_family, self._font_size(18), "bold"), anchor="w")
+        about_title.pack(fill="x")
+        about_version = tk.Label(title_col, text=f"Version {BROWSER_VERSION}", bg=self.ui["bg"], fg=self.ui["accent_hover"],
+                                 font=(self._ui_font_family, self._font_size(10)), anchor="w")
+        about_version.pack(fill="x", pady=(2, 0))
+        top_close = tk.Button(
+            header, text="×", command=win.destroy,
+            bg=self.ui["bg"], fg=self.ui["muted"],
+            activebackground=self.ui["chrome_hover"], activeforeground=self.ui["text"],
+            relief="flat", bd=0, highlightthickness=0, cursor="hand2",
+            font=(self._ui_display_font_family, self._font_size(15)), padx=10, pady=4,
         )
+        top_close.pack(side="right", padx=(14, 0))
+        self._bind_frameless_dialog_drag(
+            win, outer, header, logo, title_col, about_title, about_version
+        )
+
+        tk.Frame(outer, bg=self.ui["border_soft"], height=1).pack(fill="x", pady=(20, 18))
+
+        mode = "Private Window" if self._private_mode else (
+            "Privacy Lockdown" if self.preferences.get("privacy_lockdown", True) else "Standard profile"
+        )
+        details = (
+            "Tekzite-native browser interface with Chromium web rendering and Windows DWM presentation.\n\n"
+            f"Mode: {mode}\n"
+            f"Profile: {getattr(self, '_profile_name', 'Default')}\n"
+            "Renderer: Chromium\n"
+            "Platform: Windows 10/11"
+        )
+        tk.Label(outer, text=details, bg=self.ui["bg"], fg=self.ui["muted"],
+                 font=(self._ui_font_family, self._font_size(10)), justify="left",
+                 anchor="w", wraplength=500).pack(fill="x")
+
+        footer = tk.Frame(outer, bg=self.ui["bg"])
+        footer.pack(fill="x", pady=(24, 0))
+
+        def copy_about_info():
+            info = (
+                f"Tekzite Browser v{BROWSER_VERSION}\n"
+                f"Mode: {mode}\n"
+                f"Profile: {getattr(self, '_profile_name', 'Default')}\n"
+                "Renderer: Chromium + Windows DWM"
+            )
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(info)
+                self.root.update_idletasks()
+                self.status_var.set("About information copied")
+            except Exception:
+                pass
+
+        tk.Button(footer, text="Copy info", command=copy_about_info,
+                  bg=self.ui["chrome_2"], fg=self.ui["text"],
+                  activebackground=self.ui["chrome_hover"], activeforeground=self.ui["text"],
+                  relief="flat", bd=0, padx=16, pady=8, cursor="hand2").pack(side="left")
+        tk.Button(footer, text="Check for updates", command=self._check_for_updates,
+                  bg=self.ui["chrome_2"], fg=self.ui["text"],
+                  activebackground=self.ui["chrome_hover"], activeforeground=self.ui["text"],
+                  relief="flat", bd=0, padx=16, pady=8, cursor="hand2").pack(side="left", padx=(8, 0))
+        close_btn = tk.Button(footer, text="Close", command=win.destroy,
+                              bg=self.ui["accent"], fg="#ffffff",
+                              activebackground=self.ui["accent_hover"], activeforeground="#ffffff",
+                              relief="flat", bd=0, padx=22, pady=8, cursor="hand2")
+        close_btn.pack(side="right")
+
+        win.update_idletasks()
+        width = max(520, int(outer.winfo_reqwidth()) + 12)
+        height = max(330, int(outer.winfo_reqheight()) + 8)
+        try:
+            px, py = int(self.root.winfo_rootx()), int(self.root.winfo_rooty())
+            pw, ph = int(self.root.winfo_width()), int(self.root.winfo_height())
+            x = px + max(0, (pw - width) // 2)
+            y = py + max(0, (ph - height) // 2)
+            win.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            win.geometry(f"{width}x{height}")
+
+        # DWM presentation is a separate native owned popup. Use Win32 z-order
+        # directly as well as Tk so About cannot be hidden behind the webpage.
+        self._raise_toplevel_above_dwm(win, hold_ms=520)
+        try:
+            close_btn.focus_set()
+        except Exception:
+            pass
+        return win
 
     def navigate(self):
         # v4.83: pressing Enter/Go commits the omnibox. Do not leave its
@@ -6424,6 +9230,8 @@ class BrowserApp(BrowserFeatures):
 
     def navigate_to(self, url, add_history=True, reuse_existing=True):
         """Navigate using Chromium only. Tekzite no longer has a web renderer."""
+        # Do not retire a just-closed renderer while the next page is starting.
+        self._defer_closed_target_retirement(1800)
         url = self.normalize_url(url)
         if self.preferences.get("strip_tracking_parameters", True):
             url, removed = strip_tracking_parameters(url)
@@ -6565,7 +9373,7 @@ class BrowserApp(BrowserFeatures):
         Paint Debug and Background Debug already routed through this helper,
         but the helper itself had been lost during earlier UI refactoring.
         """
-        window = tk.Toplevel(self.root)
+        window = self._new_animated_toplevel(self.root)
         window.title(f"Tekzite {title}")
         window.geometry(geometry)
 
@@ -6645,7 +9453,7 @@ class BrowserApp(BrowserFeatures):
                 f"Copied {label} to clipboard ({len(report):,} chars)"
             )
         except Exception as exc:
-            messagebox.showerror(
+            self._show_message("error", 
                 label,
                 f"Could not copy debug output:\\n{exc}",
             )
@@ -6675,7 +9483,7 @@ class BrowserApp(BrowserFeatures):
         Native pages expose the exact response source that Tekzite parsed.
         Embedded Chromium pages expose the live DOM after JavaScript has run.
         """
-        window = tk.Toplevel(self.root)
+        window = self._new_animated_toplevel(self.root)
         window.title(f"Tekzite HTML Inspector — v{BROWSER_VERSION}")
         window.geometry("1180x760")
         window.configure(bg=self.ui["bg"])
@@ -6853,7 +9661,7 @@ class BrowserApp(BrowserFeatures):
                 self._save_session()
                 write_json(self._state_directory / "history.json", [] if self.preferences.get("clear_browsing_data_on_exit", True) else self.visits)
             except OSError as exc:
-                if not messagebox.askyesno("Save browser state", f"Could not save browser state:\n{exc}\n\nClose anyway?", parent=self.root):
+                if not self._ask_yes_no("Save browser state", f"Could not save browser state:\n{exc}\n\nClose anyway?", parent=self.root):
                     self._restart_after_close = False
                     return False
         self._closing = True
@@ -6913,9 +9721,17 @@ class BrowserApp(BrowserFeatures):
             for temp_profile in (getattr(self, "_private_profile_dir", None), getattr(self, "_privacy_profile_dir", None)):
                 if temp_profile:
                     try:
-                        shutil.rmtree(temp_profile, ignore_errors=True)
-                    except Exception:
-                        pass
+                        removed = remove_profile_tree(temp_profile)
+                        if not removed:
+                            self._write_stability_log(
+                                "Private profile cleanup warning",
+                                f"Temporary profile remained after retry cleanup: {temp_profile}",
+                            )
+                    except Exception as exc:
+                        self._write_stability_log(
+                            "Private profile cleanup error",
+                            f"{type(exc).__name__}: {exc}",
+                        )
             restart_after_close = bool(getattr(self, "_restart_after_close", False))
             restart_private = bool(getattr(self, "_private_mode", False))
             try:
@@ -6930,6 +9746,10 @@ class BrowserApp(BrowserFeatures):
         return True
 
     def run(self):
+        try:
+            self.root.after_idle(self._animate_main_window_in)
+        except Exception:
+            pass
         self.root.mainloop()
 
 

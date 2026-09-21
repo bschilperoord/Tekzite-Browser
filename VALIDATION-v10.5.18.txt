@@ -1,0 +1,10 @@
+Tekzite Browser v10.5.18 validation
+
+Focus: crisp omnibox URL rendering on dark Windows themes.
+
+Checks
+- Resting URL preview is rendered through Pillow/FreeType grayscale antialiasing.
+- The editable Tk Entry remains authoritative for focus, caret, selection and keyboard input.
+- Preview click focuses Entry and restores caret placement.
+- URL/theme/resize changes schedule preview regeneration.
+- Existing DWM and Chromium input paths are unchanged.

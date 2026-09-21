@@ -1,0 +1,13 @@
+Tekzite Browser v10.5.9 validation
+=================================
+
+Inline new-tab button release.
+
+Automated coverage verifies:
+- the + button is parented to the tab-items row rather than the outer tab bar;
+- tab refresh preserves the persistent + button while rebuilding dynamic tabs;
+- right placement means immediately after the final visible tab;
+- left placement remains supported before the first visible tab;
+- the tab-items row still expands, leaving unused strip space to the right without dragging + to the far edge.
+
+A Windows smoke test should confirm the visual spacing with one and multiple tabs.

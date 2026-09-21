@@ -1,0 +1,11 @@
+Tekzite Browser v10.5.32 validation
+
+Focus: active-tab close freeze hardening.
+
+Checks
+- Active-tab close detaches the DWM/native input surface before starting replacement activation.
+- Closed target remains alive until replacement handoff callback or safe recovery.
+- Target activation uses bounded startup/CDP timeouts.
+- Windows activation repaint uses asynchronous RedrawWindow invalidation only.
+- No DwmFlush, UpdateWindow, or RDW_UPDATENOW exists in the activation hot path.
+- Tab-switch polling has a 4-second watchdog and invalidates stale completion.

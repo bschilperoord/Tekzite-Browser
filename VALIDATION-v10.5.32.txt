@@ -1,0 +1,11 @@
+Tekzite Browser v10.5.32 validation
+
+Focus: eliminate close-then-new-tab latency when the closed tab had a live Chromium page.
+
+Expected architecture
+- Closed target destruction is idle-debounced for 1800 ms.
+- New-tab and navigation activity resets that retirement grace.
+- Active close handoff waits 180 ms and can be cancelled before activation starts.
+- Blank replacement skips Chromium activation.
+- DWM hide prefers ShowWindowAsync.
+- Last-tab blank replacement is shown immediately without a 250 ms teardown timer.

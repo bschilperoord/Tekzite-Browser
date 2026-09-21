@@ -3,8 +3,32 @@ Set-Location $PSScriptRoot
 
 Write-Host "== Tekzite Browser UltraSpeed Windows build ==" -ForegroundColor Cyan
 
-python -m pip install -r requirements.txt
-python -m pip install -r requirements-build.txt
+# Keep source/release trees free of interpreter/test caches.
+Get-ChildItem -Path $PSScriptRoot -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -in @("__pycache__", ".pytest_cache") } |
+  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $PSScriptRoot -File -Recurse -Force -Filter "*.pyc" -ErrorAction SilentlyContinue |
+  Remove-Item -Force -ErrorAction SilentlyContinue
+
+python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
+python -m pip install --only-binary=:all: --require-hashes -r requirements-build-windows.lock
+
+function Invoke-TekziteSign([string]$Path) {
+    $thumbprint = [string]$env:TEKZITE_SIGN_CERT_SHA1
+    if ([string]::IsNullOrWhiteSpace($thumbprint)) {
+        return $false
+    }
+    $signtool = (Get-Command signtool.exe -ErrorAction Stop).Source
+    $timestamp = [string]$env:TEKZITE_SIGN_TIMESTAMP_URL
+    if ([string]::IsNullOrWhiteSpace($timestamp)) {
+        $timestamp = "http://timestamp.digicert.com"
+    }
+    & $signtool sign /sha1 $thumbprint /fd SHA256 /tr $timestamp /td SHA256 $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw "Authenticode signing failed for $Path"
+    }
+    return $true
+}
 
 $helperWork = Join-Path $PSScriptRoot "build\network-work"
 $helperDist = Join-Path $PSScriptRoot "build\network-dist"
@@ -38,6 +62,7 @@ $helperExe = Join-Path $helperDist "tekzite-network.exe"
 if (-not (Test-Path $helperExe)) {
     throw "Network helper build completed without expected executable: $helperExe"
 }
+$helperSigned = Invoke-TekziteSign $helperExe
 Copy-Item $helperExe (Join-Path $PSScriptRoot "tekzite-network.exe") -Force
 
 Write-Host "Generating optimized OneFile spec..." -ForegroundColor Yellow
@@ -123,6 +148,7 @@ $exe = Join-Path $PSScriptRoot "dist\TekziteBrowser.exe"
 if (-not (Test-Path $exe)) {
     throw "Build completed without expected executable: $exe"
 }
+$browserSigned = Invoke-TekziteSign $exe
 
 Write-Host ""
 Write-Host "Built successfully:" -ForegroundColor Green
@@ -135,6 +161,11 @@ Write-Host "  - Windows execution-speed throttling disabled where supported"
 Write-Host "  - cached proxy policy + hostname classification"
 Write-Host "  - coalesced privacy-counter disk writes"
 Write-Host "  - unused heavy Python modules excluded from OneFile"
+if ($browserSigned) {
+    Write-Host "  - Authenticode signed (SHA-256 + RFC3161 timestamp)" -ForegroundColor Green
+} else {
+    Write-Host "  - UNSIGNED build (set TEKZITE_SIGN_CERT_SHA1 to enable Authenticode)" -ForegroundColor Yellow
+}
 Write-Host ""
 Write-Host "Run it with:" -ForegroundColor Cyan
 Write-Host '& ".\dist\TekziteBrowser.exe"'

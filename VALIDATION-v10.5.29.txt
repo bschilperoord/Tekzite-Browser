@@ -1,0 +1,10 @@
+Tekzite Browser v10.5.32 validation
+
+Focus: immediate new-tab interaction after closing an active tab.
+
+Checks
+- New-tab creation invalidates any pending tab-switch serial before selecting the new tab.
+- Pending activation future is cancelled when possible.
+- A stale activation poll exits before scheduling another 8 ms callback.
+- The stale handoff callback fires once so the closed Chromium target is still retired safely.
+- Existing active-close DWM detach and watchdog behavior remains intact.

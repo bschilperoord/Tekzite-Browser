@@ -1,0 +1,10 @@
+Tekzite Browser v10.5.10 validation
+
+Focus: wider, consistent browser tabs.
+
+Checks
+- Normal tabs default to 150 px minimum and 290 px maximum before UI scaling.
+- Soft and Classic styles both use _tab_pixel_width().
+- Pinned tabs keep the compact width contract.
+- Tab min/max width customization is normalized and max cannot fall below min.
+- Inline new-tab button behavior remains unchanged.

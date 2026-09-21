@@ -1,10 +1,8 @@
-<img width="902" height="752" alt="afbeelding" src="https://github.com/user-attachments/assets/36bd1ab3-0b48-43fc-af98-fc7db6861157" />
-
 # Tekzite Browser
 
 Tekzite Browser is an experimental Windows desktop browser shell built in Python/Tk around a real Chromium renderer. Tekzite keeps its own tabs, omnibox, menus, preferences and interaction layer while Chromium handles web standards, JavaScript, media, cookies, canvas, WebGL and page rendering.
 
-> **Current release:** v10.5.2 UltraSpeed for Windows  
+> **Current release:** v10.5.32 UltraSpeed for Windows  
 > **Platform:** Windows 10/11  
 > **Status:** experimental, actively developed
 
@@ -54,7 +52,7 @@ cd tekzite-browser
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# Install runtime dependencies
+# Install runtime dependencies for development
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
@@ -75,7 +73,7 @@ python -m py_compile main.py engine\net.py tekzite_network.py tekzite_network_fa
 python -m pytest
 ```
 
-The CI workflow runs these checks on Windows with supported Python versions.
+The CI workflow runs these checks on Windows with supported Python versions. Official Windows packaging uses `requirements-windows.lock` and `requirements-build-windows.lock` with `pip --require-hashes`; the plain requirements files remain convenient development inputs.
 
 ## Architecture
 
@@ -183,7 +181,7 @@ At runtime PyInstaller expands the bundled application into a temporary `_MEI...
 Tekzite can run the network helper from Python during development. To build the standalone Windows helper:
 
 ```powershell
-python -m pip install -r requirements-build.txt
+# The build script uses the SHA-256 hash-locked Windows toolchain.
 .\build_network_exe.bat
 ```
 
@@ -215,6 +213,166 @@ Bookmarks and session addresses are stored locally alongside preferences, separa
 
 Build on Windows with `powershell -ExecutionPolicy Bypass -File .\build_windows.ps1`, or run `python main.py` after installing requirements.
 
+
+
+## New in v10.5.32
+
+- Keeps closed Chromium renderer targets out of the immediate close-then-new-tab path by debouncing target destruction for about 1.8 seconds.
+- Opening or navigating a fresh tab postpones cleanup again, giving the new tab priority over Chromium teardown.
+- Adds a 180 ms cancelable handoff window after an active tab closes, so a quick `+` click prevents replacement-target activation from even starting.
+- Uses asynchronous DWM-popup hiding for blank/new-tab transitions.
+- Paints homepage-style new tabs before their Chromium navigation starts.
+
+## New in v10.5.31
+
+- Active-tab close no longer starts Chromium work inside the tab's click/keyboard callback. The replacement tab becomes the logical selection immediately, while target activation starts after the close event returns.
+- Soft tabs close on mouse release instead of mouse press, avoiding re-entrant destruction of the clicked tab widget.
+- Chromium target activation and closure use short, loopback-only DevTools HTTP commands instead of the shared browser CDP WebSocket.
+- A new-tab click or another tab action can cancel a pending close handoff.
+
+## New in v10.5.25
+
+- Unifies Tekzite-owned dialogs and menu option windows around the About Tekzite visual shell, with the Tekzite tile, title, version line, separator and consistent spacing.
+- Applies the same DWM-safe native z-order behavior to every branded dialog so managers and settings windows do not disappear behind the webpage.
+- Preserves each dialog's existing body space when the shared header is inserted.
+- Keeps native Windows file/folder/color pickers native, while every Tekzite-rendered dialog uses the shared design.
+
+
+## New in v10.5.24
+
+- Adds a browser-wide motion system for Tekzite-owned windows, tools, settings, inspectors and managers.
+- App windows now fade and lift into place and fade/settle out when closed, including Close/Escape paths wired before dialog controls are created.
+- Replaces Tekzite message boxes and text prompts with animated theme-aware dialogs so warnings, errors, confirmations and input prompts match the rest of the browser.
+- Adds a startup fade for the main shell, animated Customize page transitions, animated standard button hover/press feedback and animated Entry focus surfaces.
+- Keeps Chromium/DWM webpage presentation outside the animation layer so page input, rendering and compositor timing remain untouched.
+- Existing animated menus and Find-bar motion remain integrated with the same Animations/Quiet Mode preference.
+
+
+## New in v10.5.18
+
+- Fixes dark-theme omnibox URL text that could look half dark/half light from Windows ClearType subpixel rendering.
+- Shows a grayscale-antialiased resting URL preview while retaining the real Tk Entry whenever the address bar is focused or edited.
+- Clicking the URL preview focuses the omnibox and places the caret where you clicked.
+
+
+## New in v10.5.17
+
+- Replaces native popup menus with Tekzite-rendered rounded animated menus.
+- Menus fade and slide into place with a short ease-out transition.
+- Menu rows now have hover, keyboard-selection and tactile pressed/click feedback before actions run.
+- Cascading submenus open on hover or click and animate independently.
+- Top menu buttons stay visibly selected while their menu is open and click again to close.
+- Escape, arrows, Enter and outside-click dismissal are supported without touching Chromium/DWM input.
+
+
+## New in v10.5.16
+
+- Uses a spacious layout by default with more breathing room around the title bar, menus, tabs, toolbar, omnibox, status bar and find bar.
+- Increases default chrome heights and slightly enlarges core UI typography.
+- Expands normal tabs to 175–330 px and shows up to 28 title characters by default.
+- Starts at 1440×900 by default so the roomier browser chrome still leaves generous webpage space.
+- Automatically migrates the untouched previous default layout, while layouts that the user changed remain unchanged.
+- Retains the safe native Windows corner handling from v10.5.14 and the rounded modern control design from v10.5.13.
+
+
+## New in v10.5.14
+
+- Uses Windows' native DWM corner preference for the outer frameless window instead of clipping Tk with `SetWindowRgn`.
+- Prevents the title/tab/toolbar region from becoming transparent and exposing the desktop.
+- Keeps rounded web content and rounded controls intact.
+
+
+## New in v10.5.13
+
+- Adds rounded native window corners, rounded web-content presentation, rounded toolbar controls and a pill-shaped omnibox.
+- Adds configurable Window, Web content and Controls corner radii.
+
+
+## New in v10.5.12
+
+- Verifies the Tekzite Network helper with a per-launch random instance token before terminating any listener PID, closing the remaining Windows PID/port reuse race.
+- Restores Chromium client-side phishing detection and component updates instead of disabling them.
+- Bounds website-controlled titles, URLs, origins and favicon URLs before they cross CDP into the Tekzite UI/state layer.
+- Streams favicon responses with a hard 512 KiB cutoff instead of downloading an unlimited response before checking its size.
+- Blocks direct opening of downloads unless Chromium reports a completed, safe/accepted state.
+- Rejects DNS rebinding from ordinary public hostnames to private, loopback, link-local or other non-global addresses, and connects to the exact validated DNS result.
+- Caps CDP WebSocket frames/messages to prevent oversized local DevTools messages from exhausting memory.
+- Hash-locks the official Windows runtime/build dependencies and pins GitHub Actions to immutable commit SHAs.
+- Hardens `main.py` customization-preset import and persisted homepage/search settings with type and size limits.
+
+
+## New in v10.5.11
+
+- Verifies stale Chromium PID markers before termination, preventing PID-reuse from killing an unrelated Windows process.
+- Uses Chromium-assigned ephemeral CDP ports via `--remote-debugging-port=0` and validates `DevToolsActivePort`, listener ownership and loopback WebSocket URLs.
+- Removes the broad `--remote-allow-origins=*` DevTools switch.
+- Hardens website-controlled favicon decoding with format, compressed-size and decoded-dimension limits.
+- Replaces silent private-profile deletion with retrying, verified cleanup and abandoned-profile scavenging.
+- Caps proxy request headers and concurrent client threads, and rejects malformed authorities/headers.
+- Pins runtime/build/development dependencies and adds `pip-audit` and Bandit checks to CI.
+- Adds optional Authenticode signing support to the Windows build script and removes cache artifacts before builds.
+- Updates `SECURITY.md` to match the extension's actual permissions and current CDP boundary.
+
+
+## New in v10.5.10
+
+- Tabs are wider by default, using a 150–290 px normal range before UI scaling instead of the previous 112–230 px range.
+- Soft and Classic tabs now share the same pixel-width calculation.
+- Customize Tekzite → Tabs & layout now exposes minimum and maximum tab widths.
+- Pinned tabs stay compact and the `+` button remains directly beside the open tabs.
+
+
+## New in v10.5.9
+
+- Prevents the raw white Tekzite DWM destination from flashing during initial native page reveal.
+- The layered DWM host is shown transparent first and becomes opaque only after the first compositor beat.
+- Deferred DWM geometry updates preserve that transparency until reveal completes.
+
+
+## New in v10.5.7
+
+- Preserves Chromium single/double/triple-click semantics across the DWM input plane, including word and paragraph selection.
+- Coalesces held-left drag motion while preserving the final pointer position before release, improving sliders, scrollbars and text selection under fast mouse movement.
+- Adds browser-style middle-click link opening without depending on Chromium's hidden native chrome; non-link middle clicks still reach page auxclick/autoscroll handlers.
+- Right-click now focuses the exact editable under the pointer before Tekzite builds its context menu, so Cut/Copy/Paste apply to the intended field.
+- Shift+wheel is forwarded as horizontal scrolling and wheel modifier state is preserved through CDP.
+- Printable AltGr characters are inserted correctly on European Windows keyboard layouts where Tk reports AltGr as Ctrl+Alt.
+- Keeps all v10.5.6 native-pixel/CSS-pixel alignment fixes.
+
+## New in v10.5.6
+
+- Fixes DWM clicks being vertically displaced on scaled Windows displays.
+- Pointer input now converts from the live native DWM/RenderWidgetHost pixel plane to Chromium CSS viewport coordinates.
+- The scale is measured from the actual renderer and `window.innerWidth` / `window.innerHeight`, with `devicePixelRatio` as fallback.
+- Browser zoom is not double-counted because Chromium already includes it in the effective device scale.
+- The v10.5.5 crop-origin correction remains active before the CSS conversion.
+
+## New in v10.5.5
+
+- Fixes DWM click hit-testing when Chromium's live RenderWidgetHost origin differs from the currently committed visual crop.
+- Pointer coordinates now use `crop origin - renderer origin` before native zoom conversion, so clicking a visible text field focuses that exact field instead of an element lower on the page.
+- The correction is refreshed on full DWM crop discovery and retained across the fast resize path.
+
+## New in v10.5.4
+
+### DWM pointer interaction hardening
+
+- The visible DWM page mirror remains a presentation surface, while Tekzite forwards pointer input to Chromium through CDP.
+- A native Windows pointer watchdog now fills in missed hover, click, drag and release transitions if the separate DWM popup fails to pass a mouse event through to the Tk input plane.
+- Fallback input is state-deduplicated, so normal Tk delivery does not produce double clicks.
+- All DWM pointer paths share one crop- and zoom-aware coordinate transform, keeping the cursor aligned with links, buttons, text boxes and other page elements.
+- Clicks send a pointer-move packet first, improving controls that arm or reveal behavior on hover.
+- CSS cursor mirroring remains active for pointer, text, resize and other common web cursors.
+- Includes the v10.5.3 Chromium chrome crop hotfix.
+
+## New in v10.5.3
+
+### Chromium chrome leak hotfix
+
+- Fixes Chromium's own tab strip and omnibox appearing inside the Tekzite page area when Chromium reports native top chrome taller than the previous 160 px crop guard.
+- The DWM page crop now accepts sane top-chrome insets up to 360 px while preserving at least a real page-sized renderer.
+- Keeps the existing 1:1 DWM mirror, off-screen Chromium source, input mapping and presenter quarantine.
+- Inherits the v10.5.2 UltraSpeed cleanup and release hardening.
 
 ## New in v10.5.2
 

@@ -1,0 +1,8 @@
+Tekzite Browser v10.5.32 validation
+
+Focus: safe closing of the first/current Chromium tab.
+
+- Active target is not retired until replacement presentation commit.
+- Last-tab close hides DWM/native Chromium presentation before target retirement.
+- Target closure runs through the general Chromium executor instead of blocking Tk.
+- Pending activation of the closed tab is invalidated.

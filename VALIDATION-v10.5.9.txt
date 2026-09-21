@@ -1,0 +1,9 @@
+Tekzite Browser v10.5.9 validation
+
+Focus: suppress raw white Tekzite DWM surface during initial native reveal.
+
+Checks
+- DWM host is created with WS_EX_LAYERED.
+- _sync_dwm_host_geometry applies SetLayeredWindowAttributes alpha 0/255 based on transparent mode.
+- _show_embedded_host reveals the popup transparently first, then schedules an opaque reveal.
+- Coalesced DWM geometry sync preserves transparency while the reveal is pending.

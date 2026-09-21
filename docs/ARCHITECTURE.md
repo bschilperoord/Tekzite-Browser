@@ -50,7 +50,7 @@ The release executable is a PyInstaller OneFile package. Its bundled `tekzite-ne
 
 ### Native zoom bridge
 
-`chromium_zoom_extension/` is a local Manifest V3 extension used only to control Chromium's actual tab zoom through `chrome.tabs.setZoom()`. It has no host permissions.
+`chromium_zoom_extension/` is Tekzite's bundled Manifest V3 browser-services extension. It controls Chromium tab zoom and also supports downloads plus declarative network rules. Because its privacy content script and rule plumbing operate on ordinary pages, it has `http://*/*` and `https://*/*` host permissions.
 
 ## State on disk
 
@@ -60,7 +60,7 @@ Tekzite preferences and Chromium profile data live under `%LOCALAPPDATA%\Tekzite
 
 `browser_features.py` owns downloads/history dialogs, pins, quiet mode and periodic state checkpoints. `browser_state.py` writes atomic JSON files beside preferences. `engine/features.py` serializes extension requests through a dedicated DevTools connection to the existing extension service worker; it creates no page or window. As of v10.0.2, startup launches the requested page directly, and optional services initialize after successful presentation. Proxy fallback protection remains until extension rules are confirmed.
 
-The extension adds downloads and declarativeNetRequest permissions to tabs/storage, without host permissions. Packaged static rules block the existing ad domains. Higher-priority dynamic main-frame allowAllRequests rules implement hostname exceptions. The proxy retains independent telemetry filtering and end-to-end CONNECT tunnels. In v10.0.1 it also filters ads until the extension confirms its configuration, using a local atomic fallback-policy file. Optional extension initialization errors are recorded without aborting launch.
+The extension adds downloads and declarativeNetRequest permissions to tabs/storage, with `http://*/*` and `https://*/*` host permissions for its privacy content script and network-rule integration. Packaged static rules block the existing ad domains. Higher-priority dynamic main-frame allowAllRequests rules implement hostname exceptions. The proxy retains independent telemetry filtering and end-to-end CONNECT tunnels. In v10.0.1 it also filters ads until the extension confirms its configuration, using a local atomic fallback-policy file. Optional extension initialization errors are recorded without aborting launch.
 
 ### v10.1 private windows, site privacy and user extensions
 

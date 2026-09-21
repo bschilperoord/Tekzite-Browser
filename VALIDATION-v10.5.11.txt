@@ -1,0 +1,12 @@
+Tekzite Browser v10.5.11 validation
+
+Focus: security hardening across process ownership, CDP, image decoding, private-profile cleanup, loopback proxy limits, dependency/build hygiene and documentation.
+
+Expected checks
+- no --remote-allow-origins=* Chromium switch
+- --remote-debugging-port=0 with DevToolsActivePort validation
+- stale PID is verified against exact profile Chromium processes before taskkill
+- favicon decode has byte/format/dimension limits
+- private profile cleanup is retried and verified
+- proxy headers <= 64 KiB and concurrent clients <= 64
+- exact dependency pins and CI pip-audit/Bandit steps

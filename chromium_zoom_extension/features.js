@@ -27,7 +27,15 @@ async function tekziteFeature(action, payload) {
   const [item] = await chrome.downloads.search({id: payload.id});
   if (!item) throw new Error("Download is no longer available");
   if (action === "show") { chrome.downloads.show(item.id); return true; }
-  if (action === "open") { await chrome.downloads.open(item.id); return true; }
+  if (action === "open") {
+    const safeDangerStates = new Set(["safe", "accepted", "deepScannedSafe"]);
+    const danger = String(item.danger || "");
+    if (item.state !== "complete") throw new Error("Download is not complete");
+    if (!safeDangerStates.has(danger))
+      throw new Error(`Tekzite blocked opening a download with danger status: ${danger || "unknown"}`);
+    await chrome.downloads.open(item.id);
+    return true;
+  }
   if (action === "erase") { await chrome.downloads.erase({id: item.id}); return true; }
   if (action === "pause") { await chrome.downloads.pause(item.id); return true; }
   if (action === "resume") { await chrome.downloads.resume(item.id); return true; }

@@ -5,7 +5,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_version_84():
-    assert 'BROWSER_VERSION = "10.5.2"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.32"' in MAIN
 
 
 def test_hover_has_separate_executor():

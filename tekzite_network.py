@@ -22,6 +22,10 @@ from urllib.parse import urlsplit
 BUF = 64 * 1024
 CONNECT_TIMEOUT = 15.0
 IDLE_TIMEOUT = 60.0
+MAX_HEADER_BYTES = 64 * 1024
+MAX_HEADER_COUNT = 200
+MAX_HEADER_LINE = 8 * 1024
+MAX_CONCURRENT_CLIENTS = 64
 LOG_LEVEL = "off"
 ALLOW_BROWSER_TELEMETRY = False
 ADBLOCK_ENABLED = True
@@ -254,6 +258,8 @@ def _log(event: str, **fields):
 
 def _split_host_port(authority: str, default_port: int):
     authority = authority.strip()
+    if not authority or any(ch in authority for ch in "\r\n\x00"):
+        raise ValueError("invalid empty/control-character authority")
     if authority.startswith("["):
         end = authority.find("]")
         if end < 0:
@@ -261,38 +267,64 @@ def _split_host_port(authority: str, default_port: int):
         host = authority[1:end]
         rest = authority[end + 1:]
         port = int(rest[1:]) if rest.startswith(":") else default_port
-        return host, port
-    if authority.count(":") == 1:
-        host, port = authority.rsplit(":", 1)
-        return host, int(port)
-    return authority, default_port
+    elif authority.count(":") == 1:
+        host, port_text = authority.rsplit(":", 1)
+        port = int(port_text)
+    else:
+        host, port = authority, default_port
+    host = host.strip()
+    if not host or any(ch in host for ch in " /\\@\r\n\x00"):
+        raise ValueError("invalid authority host")
+    port = int(port)
+    if not (1 <= port <= 65535):
+        raise ValueError("invalid authority port")
+    return host, port
 
 
-def _recv_headers(sock: socket.socket, limit=1024 * 1024):
+def _recv_headers(sock: socket.socket, limit=MAX_HEADER_BYTES):
     data = bytearray()
     while b"\r\n\r\n" not in data:
-        chunk = sock.recv(min(BUF, limit - len(data)))
+        remaining = int(limit) - len(data)
+        if remaining <= 0:
+            raise ValueError("request headers too large")
+        chunk = sock.recv(min(BUF, remaining))
         if not chunk:
             break
         data.extend(chunk)
-        if len(data) >= limit:
+        if len(data) >= limit and b"\r\n\r\n" not in data:
             raise ValueError("request headers too large")
     marker = data.find(b"\r\n\r\n")
     if marker < 0:
-        return bytes(data), b""
+        raise ValueError("incomplete request headers")
     return bytes(data[:marker + 4]), bytes(data[marker + 4:])
 
 
 def _parse_headers(header_blob: bytes):
-    text = header_blob.decode("iso-8859-1", "replace")
+    text = header_blob.decode("iso-8859-1", "strict")
     lines = text.split("\r\n")
-    request_line = lines[0]
+    request_line = lines[0] if lines else ""
+    if not request_line or len(request_line) > MAX_HEADER_LINE:
+        raise ValueError("invalid/oversized request line")
+    raw_headers = [line for line in lines[1:] if line]
+    if len(raw_headers) > MAX_HEADER_COUNT:
+        raise ValueError("too many request headers")
     headers = []
-    for line in lines[1:]:
-        if not line or ":" not in line:
-            continue
+    token_chars = set("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+    for line in raw_headers:
+        if len(line) > MAX_HEADER_LINE:
+            raise ValueError("request header line too large")
+        if line[:1] in {" ", "\t"}:
+            raise ValueError("obsolete folded request header rejected")
+        if ":" not in line:
+            raise ValueError("malformed request header")
         name, value = line.split(":", 1)
-        headers.append((name.strip(), value.lstrip()))
+        name = name.strip()
+        value = value.lstrip()
+        if not name or any(ch not in token_chars for ch in name):
+            raise ValueError("invalid request header name")
+        if any((ord(ch) < 32 and ch != "\t") or ord(ch) == 127 for ch in value):
+            raise ValueError("invalid control character in request header")
+        headers.append((name, value))
     return request_line, headers
 
 
@@ -403,13 +435,82 @@ def _tune_latency_socket(sock: socket.socket):
 
 def _is_local_network_host(host: str) -> bool:
     value = (host or "").strip().strip("[]").lower()
-    if value in {"localhost", "127.0.0.1", "::1"} or value.endswith((".local", ".lan")):
+    if value in {"localhost", "127.0.0.1", "::1"} or value.endswith((".local", ".lan", ".home.arpa")):
         return True
     try:
         ip = ipaddress.ip_address(value)
         return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
     except ValueError:
         return False
+
+
+def _explicit_private_target(host: str) -> bool:
+    """Return True only when the URL itself clearly names a local/private target."""
+    value = (host or "").strip().strip("[]").rstrip(".").lower()
+    if value in {"localhost"} or value.endswith((".local", ".lan", ".home.arpa")):
+        return True
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return not ip.is_global
+
+
+def _resolved_upstream_endpoints(host: str, port: int):
+    """Resolve once and reject public-name -> private-address DNS rebinding.
+
+    A public-looking DNS name is allowed to connect only when *all* A/AAAA
+    answers are globally routable. Explicit IP literals and conventional local
+    names (.local/.lan/.home.arpa) may target private LAN space. Returning the
+    exact getaddrinfo sockaddr also avoids resolving the name a second time
+    between validation and connect.
+    """
+    explicit_private = _explicit_private_target(host)
+    infos = socket.getaddrinfo(host, int(port), 0, socket.SOCK_STREAM)
+    endpoints = []
+    seen = set()
+    for family, socktype, proto, canonname, sockaddr in infos:
+        if not sockaddr:
+            continue
+        address = str(sockaddr[0]).split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if not explicit_private and not ip.is_global:
+            _log("dns_rebind_blocked", host=host, address=address, port=int(port))
+            raise PermissionError(f"public hostname resolved to non-global address: {address}")
+        # Never permit unspecified or multicast endpoints, even when supplied
+        # literally. They are not useful browser destinations.
+        if ip.is_unspecified or ip.is_multicast:
+            raise PermissionError(f"unsafe upstream address: {address}")
+        key = (family, socktype, proto, sockaddr)
+        if key in seen:
+            continue
+        seen.add(key)
+        endpoints.append((family, socktype, proto, sockaddr))
+    if not endpoints:
+        raise OSError(f"no usable addresses for {host}:{port}")
+    return endpoints
+
+
+def _open_upstream_connection(host: str, port: int, timeout=CONNECT_TIMEOUT):
+    last_error = None
+    for family, socktype, proto, sockaddr in _resolved_upstream_endpoints(host, port):
+        sock = socket.socket(family, socktype, proto)
+        try:
+            sock.settimeout(timeout)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as exc:
+            last_error = exc
+            try:
+                sock.close()
+            except Exception:
+                pass
+    if last_error:
+        raise last_error
+    raise OSError(f"could not connect to {host}:{port}")
 
 
 class ProxyHandler(socketserver.BaseRequestHandler):
@@ -426,6 +527,13 @@ class ProxyHandler(socketserver.BaseRequestHandler):
                 method, target, version = request_line.split(" ", 2)
             except ValueError:
                 return
+            token_chars = set("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+            if not method or any(ch not in token_chars for ch in method):
+                raise ValueError("invalid HTTP method")
+            if version not in {"HTTP/1.0", "HTTP/1.1"}:
+                raise ValueError("unsupported HTTP version")
+            if not target or len(target) > 16384 or any(ord(ch) < 32 or ord(ch) == 127 for ch in target):
+                raise ValueError("invalid HTTP request target")
             method_upper = method.upper()
             if method_upper == "CONNECT":
                 self._connect_tunnel(client, target)
@@ -450,7 +558,7 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             _deny_ad(client, host, "CONNECT")
             return
         _log("connect", host=host, port=port)
-        upstream = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+        upstream = _open_upstream_connection(host, port, timeout=CONNECT_TIMEOUT)
         _tune_latency_socket(upstream)
         try:
             client.sendall(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: Tekzite-Network/1\r\n\r\n")
@@ -501,7 +609,7 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             )
             return
         _log("http", method=method.upper(), host=host, port=port, path=path[:512])
-        upstream = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+        upstream = _open_upstream_connection(host, port, timeout=CONNECT_TIMEOUT)
         _tune_latency_socket(upstream)
         upstream.settimeout(IDLE_TIMEOUT)
         try:
@@ -552,6 +660,37 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     daemon_threads = True
     request_queue_size = 128
+    block_on_close = True
+
+    def __init__(self, *args, **kwargs):
+        self._client_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CLIENTS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._client_slots.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
+                    b"Content-Length: 0\r\n\r\n"
+                )
+            except Exception:
+                pass
+            try:
+                request.close()
+            except Exception:
+                pass
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._client_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._client_slots.release()
 
 
 def main(argv=None):
@@ -567,6 +706,7 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=17890)
     ap.add_argument("--ready-file")
+    ap.add_argument("--instance-token", default="")
     ap.add_argument("--log-level", choices=("off", "errors", "full"), default="off")
     ap.add_argument("--allow-browser-telemetry", action="store_true")
     ap.add_argument("--disable-adblock", action="store_true")
@@ -575,6 +715,8 @@ def main(argv=None):
     ap.add_argument("--adblock-policy")
     ap.add_argument("--privacy-stats")
     args = ap.parse_args(argv)
+    if args.instance_token and (len(args.instance_token) < 16 or not all(ch in "0123456789abcdefABCDEF" for ch in args.instance_token)):
+        raise SystemExit("invalid Tekzite Network instance token")
     LOG_LEVEL = args.log_level
     ALLOW_BROWSER_TELEMETRY = bool(args.allow_browser_telemetry)
     ADBLOCK_ENABLED = not bool(args.disable_adblock)

@@ -1,0 +1,9 @@
+Tekzite Browser v10.5.16 validation
+
+Focus: modern browser menu styling.
+
+- Top File/Edit/View/History/Bookmarks/Tools/Help controls are rounded _RoundedChromeButton instances.
+- Popup menus share _make_modern_menu styling with borderless surfaces, larger fonts and soft hover colors.
+- Hamburger, address, tab and page context menus use the common menu styling.
+- Menu styling refreshes with Tekzite customization changes.
+- Existing DWM/native input and security paths are unchanged.

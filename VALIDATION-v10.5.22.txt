@@ -1,0 +1,10 @@
+Tekzite Browser v10.5.24 validation
+
+Focus: animated new-tab opening.
+
+Checks
+- New tabs after the initial tab receive a monotonic animation start timestamp.
+- Soft and Classic tab widgets begin at the current animated width and expand to their target width.
+- Animation progress survives tab-strip rebuilds because it is stored by tab id.
+- The inline new-tab button naturally slides as the new tab expands.
+- Quiet Mode or disabled Animations bypass the transition.

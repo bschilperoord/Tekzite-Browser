@@ -6,7 +6,7 @@ NET = (ROOT / 'engine' / 'net.py').read_text(encoding='utf-8')
 
 
 def test_release_is_v89():
-    assert 'BROWSER_VERSION = "10.5.2"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.32"' in MAIN
 
 
 def test_devtools_sockets_disable_nagle():

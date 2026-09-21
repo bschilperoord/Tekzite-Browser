@@ -1,0 +1,13 @@
+Tekzite Browser v10.5.12 validation
+
+Focus: second security hardening pass.
+
+Checks
+- Network helper listener PID requires per-launch identity token before taskkill.
+- Chromium phishing detection/component updates are not disabled.
+- CDP metadata and WebSocket payloads have explicit memory/length bounds.
+- Favicon fetch streams with an early 512 KiB cutoff.
+- Dangerous downloads cannot be opened directly from Tekzite.
+- Proxy rejects public DNS names resolving to non-global addresses.
+- Official Windows build dependencies are hash-locked and GitHub Actions use full commit SHAs.
+- main.py customization import and URL settings are bounded.

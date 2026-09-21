@@ -1,0 +1,26 @@
+Tekzite Browser v10.5.4 validation
+=================================
+
+DWM pointer interaction focus
+-----------------------------
+- DWM destination remains hit-test transparent and visually presentation-only.
+- Tk edge_host bindings remain the primary mouse input route.
+- A Win32 pointer watchdog repairs missed hover, left press, drag and release transitions.
+- Fallback transitions are de-duplicated against normal Tk delivery by tracked button state.
+- Tk and fallback paths use the same crop- and zoom-aware coordinate mapping.
+- Click press queues mouseMoved before mousePressed for hover-sensitive controls.
+- CSS cursor probing remains attached to the same mapped hover coordinates.
+
+Automated validation
+--------------------
+- Python syntax compilation: PASS
+- Current test suite: PASS (191 tests)
+- Focused v10.5.4 / DWM crop / release tests: PASS (20 tests)
+
+Manual Windows validation still required
+----------------------------------------
+- Hover links/buttons in the DWM-rendered page and confirm the cursor changes appropriately.
+- Click links, buttons and Startpage's search field and confirm the exact pointed element receives the click.
+- Click a text field, type immediately, and verify focus/keyboard routing stays on the page.
+- Drag-select text and release both inside and just outside the page viewport.
+- Scroll with the mouse wheel / precision touchpad and verify pointer alignment remains correct.

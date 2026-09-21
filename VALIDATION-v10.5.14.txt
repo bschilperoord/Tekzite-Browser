@@ -1,0 +1,9 @@
+Tekzite Browser v10.5.14 validation
+
+Focus: v10.5.13 transparent-Tk-chrome regression.
+
+- Outer Tk root no longer receives a rounded SetWindowRgn region.
+- Any legacy root region is explicitly cleared.
+- Windows 11 DWM corner preference remains enabled for the outer window.
+- DWM page popup retains its independent rounded region.
+- Full current Python regression suite and extension checks must pass.

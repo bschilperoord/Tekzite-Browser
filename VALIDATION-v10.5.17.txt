@@ -1,0 +1,11 @@
+Tekzite Browser v10.5.17 validation
+
+Focus: animated menu surfaces and click feedback.
+
+Checks
+- Animated popup menus use a borderless Tk toplevel, not native tk.Menu.
+- Reveal uses a short alpha + vertical ease-out sequence.
+- Command rows provide hover/press feedback and invoke after a 45 ms tactile pulse.
+- Cascades support hover/click opening.
+- Menu bar buttons stay selected while a popup is open and toggle closed on a second click.
+- Outside click and keyboard navigation dismiss/select cleanly.

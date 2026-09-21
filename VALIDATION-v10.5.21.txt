@@ -1,0 +1,9 @@
+Tekzite Browser v10.5.24 validation
+
+Focus: address-bar thin-band regression.
+
+Checks
+- URL text host vertical padding reduced to 1 UI unit.
+- Preview uses its current Canvas background rather than stale focus state.
+- Generic Entry focus-color animation explicitly skips the omnibox Entry.
+- Real Entry and preview still fill the same host and preserve click-to-edit behavior.

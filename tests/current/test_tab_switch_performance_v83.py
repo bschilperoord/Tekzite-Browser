@@ -21,12 +21,14 @@ def test_tab_switches_are_serialized():
 def test_ui_commit_happens_after_activation_result():
     switch = MAIN[MAIN.index('def _switch_tab'):MAIN.index('def _close_tab')]
     assert 'activated = bool(future.result())' in switch
-    assert 'self._commit_tab_switch(current_target)' in switch
-    assert switch.index('activated = bool(future.result())') < switch.index('self._commit_tab_switch(current_target)')
+    assert 'self._commit_tab_switch(current_target, ui_already_selected=ui_already_selected)' in switch
+    assert switch.index('activated = bool(future.result())') < switch.index('self._commit_tab_switch(current_target, ui_already_selected=ui_already_selected)')
 
 
 def test_native_activation_pulses_dwm_without_resize():
     fn = NET[NET.index('def activate_embedded_chromium_target'):NET.index('def close_embedded_chromium_target')]
     assert 'RedrawWindow' in fn
-    assert 'DwmFlush()' in fn
+    assert 'DwmFlush()' not in fn
+    assert 'UpdateWindow(' not in fn
+    assert 'RDW_INVALIDATE | RDW_ALLCHILDREN' in fn
     assert 'resize_embedded_chromium' not in fn

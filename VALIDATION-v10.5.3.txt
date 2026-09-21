@@ -1,0 +1,21 @@
+Tekzite Browser v10.5.3 validation
+=================================
+
+Hotfix focus
+------------
+- DWM Chromium chrome crop no longer rejects valid top UI insets above 160 px.
+- Sane top inset ceiling remains 360 px, matching the existing live-render crop guard.
+- Source expansion, 1:1 DWM mapping, off-screen parking and input mapping are unchanged.
+
+Automated validation
+--------------------
+- Python syntax compilation: PASS
+- Current test suite: PASS (185 tests)
+- Focused v10.5.3 / DWM / bootstrap / release tests: PASS (24 tests)
+
+Manual Windows validation still required
+----------------------------------------
+- Launch Tekzite on Windows with the same Chromium build that previously showed
+  the nested Chromium tab strip/omnibox.
+- Verify only webpage pixels appear below Tekzite's own toolbar.
+- Verify pointer, text input, scrolling, navigation and resize alignment remain correct.

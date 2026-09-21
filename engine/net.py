@@ -1,6 +1,6 @@
 from functools import lru_cache
 from urllib.request import Request, urlopen, ProxyHandler, build_opener
-from urllib.parse import unquote_to_bytes
+from urllib.parse import unquote_to_bytes, quote
 from http.cookiejar import CookieJar
 import base64
 import io
@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import json
 import socket
+import ipaddress
+import secrets
 import time
 import sys
 import atexit
@@ -50,6 +52,15 @@ SUBRESOURCE_HEADERS = {
 
 DOCUMENT_TIMEOUT = 15
 SUBRESOURCE_TIMEOUT = 6
+
+# Security bounds for untrusted webpage metadata crossing the CDP boundary.
+MAX_PAGE_TITLE_CHARS = 1024
+MAX_PAGE_URL_CHARS = 32768
+MAX_FAVICON_URL_CHARS = 8192
+MAX_ORIGIN_CHARS = 4096
+MAX_HOST_CHARS = 1024
+MAX_CDP_WEBSOCKET_FRAME_BYTES = 16 * 1024 * 1024
+MAX_CDP_WEBSOCKET_MESSAGE_BYTES = 32 * 1024 * 1024
 
 # One cookie jar for the browser session. urllib follows HTTP redirects for us,
 # but does not persist cookies between separate urlopen() calls by itself.
@@ -159,29 +170,32 @@ def _stop_network_engine_unlocked():
         state_port = state.get("port")
         proc = state.get("process")
 
-        # Important for nested PyInstaller OneFile:
-        # the Popen PID can be only the short-lived bootloader parent. The real
-        # tekzite-network worker keeps listening on the proxy port after that
-        # parent has already exited. Therefore resolve the listener PID from the
-        # actual proxy port and terminate it independently of proc.poll().
+        # The tracked Popen object is authoritative only while that exact
+        # process handle is still alive. Resolve the real listener independently of proc.poll(),
+        # but never trust that listener PID without identity verification. Listener PIDs discovered later from the
+        # TCP table are never trusted by number alone because Windows can reuse
+        # a PID/port after a crash. They must carry this launch's random helper
+        # token and expected proxy port on their command line.
+        pids = []
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    pid = int(proc.pid)
+                    if pid > 0 and pid != os.getpid():
+                        pids.append(pid)
+            except Exception:
+                pass
+
         listener_pid = None
         if os.name == "nt" and state_port:
             try:
-                listener_pid = _listener_pid_for_port(int(state_port))
+                candidate = _listener_pid_for_port(int(state_port))
+                if candidate and _network_helper_pid_matches_state(candidate, state):
+                    listener_pid = int(candidate)
             except Exception:
                 listener_pid = None
-
-        pids = []
-        for candidate in (
-            getattr(proc, "pid", None) if proc is not None else None,
-            listener_pid,
-        ):
-            try:
-                candidate = int(candidate)
-            except (TypeError, ValueError):
-                continue
-            if candidate > 0 and candidate != os.getpid() and candidate not in pids:
-                pids.append(candidate)
+        if listener_pid and listener_pid not in pids:
+            pids.append(listener_pid)
 
         if os.name == "nt":
             for pid in pids:
@@ -196,25 +210,28 @@ def _stop_network_engine_unlocked():
                 except Exception:
                     pass
 
-            # A nested OneFile worker can survive the tracked bootloader parent.
-            # Wait until nothing is listening on Tekzite's exact proxy port.
             if state_port:
                 deadline = time.monotonic() + 5.0
                 while time.monotonic() < deadline:
                     try:
-                        if _listener_pid_for_port(int(state_port)) is None:
-                            break
+                        candidate = _listener_pid_for_port(int(state_port))
                     except Exception:
+                        candidate = None
+                    if candidate is None:
+                        break
+                    # Stop waiting if another process has legitimately reused
+                    # the port. Never kill it merely because the port matches.
+                    if not _network_helper_pid_matches_state(candidate, state):
                         break
                     time.sleep(0.05)
 
-                # Final exact-port fallback in case the worker changed PID while
-                # the PyInstaller bootloader was handing off.
+                # Final exact-port fallback, still guarded by the per-launch
+                # helper identity token so a reused port/PID can never be killed.
                 try:
                     final_pid = _listener_pid_for_port(int(state_port))
                 except Exception:
                     final_pid = None
-                if final_pid:
+                if final_pid and _network_helper_pid_matches_state(final_pid, state):
                     try:
                         subprocess.run(
                             ["taskkill", "/PID", str(int(final_pid)), "/T", "/F"],
@@ -236,8 +253,6 @@ def _stop_network_engine_unlocked():
                 except Exception:
                     pass
 
-        # Reap the original Popen object when possible. It may already represent
-        # an exited OneFile bootloader parent, which is fine.
         if proc is not None:
             try:
                 wait = getattr(proc, "wait", None)
@@ -293,6 +308,7 @@ def _ensure_network_engine_locked():
     root = _network_engine_root()
     exe = root / "tekzite-network.exe"
     script = root / "tekzite_network.py"
+    instance_token = secrets.token_hex(16)
     if exe.is_file():
         command = [str(exe), "--host", host, "--port", str(port)]
         mode = "exe"
@@ -316,6 +332,7 @@ def _ensure_network_engine_locked():
         log_handle = open(os.devnull, "w", encoding="utf-8")
     else:
         log_handle = open(log_path, "a", encoding="utf-8", buffering=1)
+    command += ["--instance-token", instance_token]
     command += ["--log-level", log_level]
     command += ["--privacy-stats", str(state_dir / "privacy-stats.json")]
     adblock_enabled = str(os.environ.get("TEKZITE_ADBLOCK_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
@@ -374,6 +391,7 @@ def _ensure_network_engine_locked():
         "proxy_url": proxy_url,
         "mode": mode,
         "command": command,
+        "instance_token": instance_token,
         "log_path": str(log_path),
         "recovered_same_port": bool(recovering),
     }
@@ -631,51 +649,52 @@ def _profile_recovery_needed(profile_dir):
 
 
 def _terminate_stale_profile_owner(profile_dir):
-    """Clean up a helper left behind by an earlier Tekzite run.
+    """Terminate a stale Chromium owner only after verifying its identity.
 
-    Edge refuses to open the same user-data-dir twice. When an old hidden
-    helper survives a crash, a new launch can silently hand navigation to that
-    stale process instead of exposing Tekzite's DevTools port. Kill only the
-    PID recorded by Tekzite inside its dedicated bridge profile.
+    Windows can reuse PIDs after a crash. The marker inside the Tekzite profile
+    is therefore never sufficient authority to call taskkill by itself. Before
+    terminating anything, require the recorded PID to be a Chromium-family
+    process whose command line contains this exact Tekzite ``--user-data-dir``.
+    If verification fails, only discard the stale marker.
     """
     owner = _edge_profile_owner_file(profile_dir)
     try:
-        raw = Path(owner).read_text(encoding="ascii").strip()
-        pid = int(raw)
+        pid = int(Path(owner).read_text(encoding="ascii").strip())
     except Exception:
         try:
             os.remove(owner)
         except OSError:
             pass
-        return
+        return False
 
     if pid <= 0 or pid == os.getpid():
         try:
             os.remove(owner)
         except OSError:
             pass
-        return
+        return False
 
+    verified = False
     if os.name == "nt":
         try:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=4, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            verified = pid in set(_profile_chromium_pids(profile_dir))
         except Exception:
-            pass
-    else:
-        try:
-            os.kill(pid, 15)
-        except Exception:
-            pass
+            verified = False
+        if verified:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=4, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:
+                pass
 
     try:
         os.remove(owner)
     except OSError:
         pass
-
+    return bool(verified)
 
 
 
@@ -696,7 +715,8 @@ def _profile_chromium_pids(profile_dir):
         f"$profile='{escaped}'; "
         f"$selfPid={int(os.getpid())}; "
         "Get-CimInstance Win32_Process | Where-Object { "
-        "$_.ProcessId -ne $selfPid -and $_.CommandLine -and "
+        "$_.ProcessId -ne $selfPid -and $_.CommandLine -and $_.Name -and "
+        "$_.Name.ToLower() -match '^(chrome|chromium|ungoogled-chromium)(\\.exe)?$' -and "
         "($_.CommandLine.ToLower().Contains('--user-data-dir=' + $profile.ToLower()) -or "
         "$_.CommandLine.ToLower().Contains('--user-data-dir=\\\"' + $profile.ToLower() + '\\\"')) "
         "} | Select-Object -ExpandProperty ProcessId"
@@ -763,11 +783,125 @@ def _clear_chromium_profile_locks(profile_dir):
                 removed.append(name)
             elif path.is_dir():
                 import shutil as _shutil
-                _shutil.rmtree(path, ignore_errors=True)
+                _shutil.rmtree(path)
                 removed.append(name)
         except Exception:
             pass
     return removed
+
+def _pid_is_alive(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            try:
+                code = wintypes.DWORD()
+                return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and int(code.value) == STILL_ACTIVE)
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def remove_profile_tree(path, retries=8, delay=0.08):
+    """Remove a Tekzite-owned profile and verify that it is actually gone."""
+    if not path:
+        return True
+    target = Path(path)
+    try:
+        if not target.exists():
+            return True
+    except OSError:
+        pass
+
+    def _onerror(func, failing_path, exc_info):
+        try:
+            os.chmod(failing_path, 0o700)
+            func(failing_path)
+        except Exception:
+            pass
+
+    attempts = max(1, int(retries))
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(target, onerror=_onerror)
+        except FileNotFoundError:
+            return True
+        except Exception:
+            pass
+        try:
+            if not target.exists():
+                return True
+        except OSError:
+            return True
+        if attempt + 1 < attempts:
+            time.sleep(max(0.0, float(delay)) * (attempt + 1))
+    try:
+        return not target.exists()
+    except OSError:
+        return False
+
+
+def cleanup_abandoned_temporary_profiles(base_dir=None, minimum_orphan_age=3600):
+    """Scavenge dead Tekzite private/lockdown temp profiles without races."""
+    root = Path(base_dir or tempfile.gettempdir())
+    removed, skipped_live = [], []
+    now = time.time()
+    try:
+        children = list(root.iterdir())
+    except Exception:
+        return {"removed": removed, "skipped_live": skipped_live}
+    for child in children:
+        name = child.name
+        if not child.is_dir() or not (
+            name.startswith("Tekzite-Private-") or name.startswith("Tekzite-Privacy-")
+        ):
+            continue
+        candidate_pids = set()
+        marker_path = child / "tekzite-helper.pid"
+        try:
+            marker_pid = int(marker_path.read_text(encoding="ascii").strip())
+            if marker_pid > 0:
+                candidate_pids.add(marker_pid)
+        except Exception:
+            pass
+        for prefix in ("Tekzite-Private-", "Tekzite-Privacy-"):
+            if name.startswith(prefix):
+                token = name[len(prefix):].split("-", 1)[0]
+                if token.isdigit() and int(token) > 0:
+                    candidate_pids.add(int(token))
+                break
+        if any(_pid_is_alive(pid) for pid in candidate_pids):
+            skipped_live.append(str(child))
+            continue
+        if not candidate_pids:
+            try:
+                age = max(0.0, now - child.stat().st_mtime)
+            except OSError:
+                age = 0.0
+            if age < max(300.0, float(minimum_orphan_age)):
+                continue
+        if remove_profile_tree(child):
+            removed.append(str(child))
+    return {"removed": removed, "skipped_live": skipped_live}
+
 
 def _write_profile_owner(profile_dir, pid):
     try:
@@ -806,6 +940,69 @@ def _devtools_json(port, path="/json/list", timeout=1.0):
         f"http://127.0.0.1:{int(port)}{path}", timeout=timeout
     ) as response:
         return json.loads(response.read().decode("utf-8", errors="replace"))
+
+
+def _devtools_active_port_file(profile_dir):
+    return Path(profile_dir) / "DevToolsActivePort"
+
+
+def _clear_devtools_active_port(profile_dir):
+    path = _devtools_active_port_file(profile_dir)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise RuntimeError(f"Could not clear stale DevToolsActivePort: {exc}") from exc
+    return True
+
+
+def _read_devtools_active_port(profile_dir):
+    path = _devtools_active_port_file(profile_dir)
+    try:
+        lines = path.read_text(encoding="utf-8", errors="strict").splitlines()
+    except (FileNotFoundError, PermissionError, UnicodeError, OSError):
+        return None
+    if not lines:
+        return None
+    try:
+        port = int(lines[0].strip())
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= port <= 65535):
+        return None
+    browser_path = str(lines[1].strip()) if len(lines) > 1 else ""
+    if browser_path and not browser_path.startswith("/devtools/browser/"):
+        return None
+    return port, browser_path
+
+
+def _validate_devtools_ws_url(ws_url, expected_port=None):
+    """Accept only a loopback Chromium DevTools WebSocket on the expected port."""
+    parsed = urlsplit(str(ws_url or ""))
+    if parsed.scheme != "ws":
+        raise RuntimeError("DevTools WebSocket must use ws:// on loopback")
+    host = str(parsed.hostname or "").strip().strip("[]").lower()
+    if host == "localhost":
+        loopback = True
+    else:
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+    if not loopback:
+        raise RuntimeError("Rejected non-loopback DevTools WebSocket URL")
+    try:
+        port = int(parsed.port or 0)
+    except ValueError as exc:
+        raise RuntimeError("DevTools WebSocket has invalid port") from exc
+    if not (1 <= port <= 65535):
+        raise RuntimeError("DevTools WebSocket has missing/invalid port")
+    if expected_port is not None and port != int(expected_port):
+        raise RuntimeError("DevTools WebSocket port does not match DevToolsActivePort")
+    if not str(parsed.path or "").startswith("/devtools/"):
+        raise RuntimeError("DevTools WebSocket has unexpected path")
+    return str(ws_url)
 
 
 def _hide_process_windows(root_pid):
@@ -954,6 +1151,9 @@ def _listener_pid_for_port(port):
             local, state, pid = parts[1], parts[3].upper(), parts[4]
             if state != "LISTENING" or not local.endswith(needle):
                 continue
+            local_host = local.rsplit(":", 1)[0].strip("[]").lower()
+            if local_host not in {"127.0.0.1", "::1"}:
+                continue
             try:
                 return int(pid)
             except ValueError:
@@ -963,21 +1163,68 @@ def _listener_pid_for_port(port):
     return None
 
 
-def _wait_for_devtools(port, process, timeout=10.0):
-    """Wait for DevTools and tolerate Chromium's normal launcher handoff.
+def _network_helper_pid_matches_state(pid, state):
+    """Verify a discovered Windows listener is this exact Tekzite helper.
 
-    v9.6 keeps the polling loop genuinely lightweight. Chromium is already
-    launched far off-screen, so repeatedly taking a Toolhelp process snapshot
-    and enumerating every top-level window on *each* DevTools miss only slows
-    startup. Hide once before polling and once after DevTools becomes live,
-    while checking the loopback endpoint at a tight cadence. The successful
-    /json/version payload is returned so later browser-CDP setup can reuse its
-    websocket URL without another HTTP round trip.
+    PID and port alone are not identities: both can be reused after a crash.
+    Each helper launch receives a 128-bit random command-line token. A listener
+    found through netstat is eligible for taskkill only when CIM confirms the
+    same token, port and expected helper executable/script.
+    """
+    if os.name != "nt" or not state:
+        return False
+    try:
+        pid = int(pid)
+        port = int(state.get("port"))
+    except (TypeError, ValueError):
+        return False
+    token = str(state.get("instance_token") or "").strip()
+    if pid <= 0 or pid == os.getpid() or len(token) < 16:
+        return False
+    script = (
+        f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}'; "
+        "if ($p -and $p.CommandLine -and $p.Name) { "
+        "Write-Output $p.Name; Write-Output $p.CommandLine }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            timeout=4, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return False
+    lines = (result.stdout or "").splitlines()
+    if len(lines) < 2:
+        return False
+    name = lines[0].strip().lower()
+    command_line = " ".join(lines[1:]).strip()
+    lower = command_line.lower()
+    if token not in command_line:
+        return False
+    if not (f"--port {port}" in lower or f"--port={port}" in lower):
+        return False
+    mode = str(state.get("mode") or "")
+    if mode == "exe":
+        return name == "tekzite-network.exe" or "tekzite-network.exe" in lower
+    if mode == "python":
+        return name.startswith("python") and "tekzite_network.py" in lower
+    return False
+
+
+def _wait_for_devtools(profile_dir, process, timeout=10.0):
+    """Wait for Chromium's OS-assigned loopback DevTools endpoint.
+
+    Chromium is launched with ``--remote-debugging-port=0``. It writes the
+    selected port into ``DevToolsActivePort`` inside Tekzite's dedicated profile.
+    Tekzite validates that the listener belongs to Chromium using this exact
+    profile before registering the port with the process-local loopback policy.
     """
     deadline = time.monotonic() + timeout
     last_error = None
     clean_exit_seen = False
     exit_code = None
+    registered_port = None
     try:
         _hide_process_windows(process.pid)
     except Exception:
@@ -987,12 +1234,45 @@ def _wait_for_devtools(port, process, timeout=10.0):
         if rc is not None:
             exit_code = int(rc)
             if exit_code != 0:
-                raise RuntimeError(
-                    f"Chromium bridge exited early with code {exit_code}"
-                )
+                if registered_port:
+                    revoke_loopback_port(registered_port)
+                raise RuntimeError(f"Chromium bridge exited early with code {exit_code}")
             clean_exit_seen = True
+
+        active = _read_devtools_active_port(profile_dir)
+        if not active:
+            time.sleep(0.01)
+            continue
+        port, browser_path = active
         try:
+            if os.name == "nt":
+                listener_pid = _listener_pid_for_port(port)
+                if not listener_pid:
+                    raise RuntimeError("DevToolsActivePort has no loopback listener yet")
+                # Normal launch: the browser process itself owns the listener,
+                # avoiding an expensive CIM scan on the startup fast path.
+                if int(listener_pid) != int(getattr(process, "pid", 0) or 0):
+                    profile_pids = set(_profile_chromium_pids(profile_dir))
+                    if listener_pid not in profile_pids:
+                        raise RuntimeError(
+                            "DevToolsActivePort listener is not Chromium using Tekzite's profile"
+                        )
+            if registered_port != port:
+                if registered_port:
+                    revoke_loopback_port(registered_port)
+                if not allow_loopback_port(port, "Chromium DevTools/CDP (tab control, input, zoom and diagnostics)", owner="chromium"):
+                    raise RuntimeError("Could not register Chromium DevTools loopback port")
+                registered_port = int(port)
+
             version_info = _devtools_json(port, "/json/version", timeout=0.20)
+            if not isinstance(version_info, dict):
+                raise RuntimeError("Chromium DevTools version endpoint returned invalid JSON")
+            ws_url = str(version_info.get("webSocketDebuggerUrl") or "")
+            if not ws_url and browser_path:
+                ws_url = f"ws://127.0.0.1:{int(port)}{browser_path}"
+            version_info["webSocketDebuggerUrl"] = _validate_devtools_ws_url(
+                ws_url, expected_port=port
+            )
             if not clean_exit_seen:
                 try:
                     _hide_process_windows(process.pid)
@@ -1003,17 +1283,21 @@ def _wait_for_devtools(port, process, timeout=10.0):
                 "handoff": bool(clean_exit_seen),
                 "exit_code": exit_code,
                 "adopted_pid": adopted_pid,
-                "version": version_info if isinstance(version_info, dict) else {},
+                "port": int(port),
+                "version": version_info,
             }
         except Exception as exc:
             last_error = exc
             time.sleep(0.01)
+
+    if registered_port:
+        revoke_loopback_port(registered_port)
     if clean_exit_seen:
         raise RuntimeError(
-            "Chromium launcher exited cleanly with code 0, but no DevTools "
+            "Chromium launcher exited cleanly with code 0, but no verified DevTools "
             "endpoint appeared after handoff"
         ) from last_error
-    raise RuntimeError("Timed out waiting for Chromium DevTools") from last_error
+    raise RuntimeError("Timed out waiting for verified Chromium DevTools") from last_error
 
 
 class _StdlibWebSocket:
@@ -1031,9 +1315,7 @@ class _StdlibWebSocket:
         import struct
         from urllib.parse import urlparse
 
-        parsed = urlparse(str(ws_url))
-        if parsed.scheme not in ("ws", "wss"):
-            raise RuntimeError(f"Unsupported DevTools WebSocket URL: {ws_url}")
+        parsed = urlparse(_validate_devtools_ws_url(str(ws_url)))
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or (443 if parsed.scheme == "wss" else 80)
         path = parsed.path or "/"
@@ -1144,6 +1426,12 @@ class _StdlibWebSocket:
                 length = self._struct.unpack("!H", self._read_exact(2))[0]
             elif length == 127:
                 length = self._struct.unpack("!Q", self._read_exact(8))[0]
+            if opcode >= 0x8 and (not fin or length > 125):
+                self.close()
+                raise ConnectionError("Invalid oversized/fragmented DevTools control frame")
+            if length > MAX_CDP_WEBSOCKET_FRAME_BYTES:
+                self.close()
+                raise ConnectionError("DevTools WebSocket frame exceeded Tekzite safety limit")
             mask = self._read_exact(4) if masked else None
             payload = self._read_exact(length) if length else b""
             if mask:
@@ -1164,9 +1452,15 @@ class _StdlibWebSocket:
                 fragments = bytearray(payload)
                 text_message = False
             elif opcode == 0x0:
+                if not fragments:
+                    self.close()
+                    raise ConnectionError("Unexpected DevTools continuation frame")
                 fragments.extend(payload)
             else:
                 continue
+            if len(fragments) > MAX_CDP_WEBSOCKET_MESSAGE_BYTES:
+                self.close()
+                raise ConnectionError("DevTools WebSocket message exceeded Tekzite safety limit")
 
             if fin:
                 data = bytes(fragments)
@@ -1715,11 +2009,12 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
         # Two attempts per executable. The second one is a deliberately clean
         # retry after terminating any partial process and clearing stale locks.
         for attempt in (1, 2):
-            port = _free_loopback_port()
-            allow_loopback_port(port, "Chromium DevTools/CDP (tab control, input, zoom and diagnostics)", owner="chromium")
+            # Let Chromium choose an ephemeral debugging port. This removes the
+            # bind-close-rebind TOCTOU window from Tekzite's old free-port probe.
+            port = 0
             _CHROMIUM_LAUNCH_DEBUG.update({
                 "attempts": int(_CHROMIUM_LAUNCH_DEBUG.get("attempts", 0)) + 1,
-                "executable": executable, "port": port, "profile": profile,
+                "executable": executable, "port": None, "profile": profile,
             })
             process = None
             try:
@@ -1753,6 +2048,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     # Give Windows a beat to release file/process handles from
                     # the failed first helper before relaunching the same profile.
                     time.sleep(0.15)
+                _clear_devtools_active_port(profile)
                 _apply_privacy_profile_preferences(profile)
                 launch_x, launch_y, launch_w, launch_h = (-32000, -32000, 800, 600)
                 if launch_geometry:
@@ -1767,17 +2063,16 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                 _CHROMIUM_LAUNCH_DEBUG["private_profile"] = bool(os.environ.get("TEKZITE_PRIVATE_MODE") == "1")
                 command = [
                     executable,
-                    f"--remote-debugging-port={port}",
+                    "--remote-debugging-port=0",
                     "--remote-debugging-address=127.0.0.1",
-                    "--remote-allow-origins=*",
                     f"--user-data-dir={profile}",
                     "--no-first-run", "--no-default-browser-check",
                     "--disable-save-password-bubble", "--disable-translate",
                     "--disable-search-engine-choice-screen",
-                    "--disable-sync", "--disable-component-update",
+                    "--disable-sync",
                     "--disable-background-networking", "--disable-breakpad",
                     "--disable-crash-reporter", "--disable-domain-reliability",
-                    "--disable-client-side-phishing-detection", "--disable-default-apps",
+                    "--disable-default-apps",
                     "--disable-logging", "--metrics-recording-only", "--no-pings",
                     "--disable-hyperlink-auditing", "--disable-preconnect",
                     "--disable-features=EdgeFirstRunExperience,msEdgeSidebarV2,AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion,BrowsingTopics,InterestCohortAPI,SharedStorageAPI,FencedFrames,AttributionReporting,PrivateAggregationApi,FedCm,WebBluetooth,WebUSB,WebSerial,WebHID,IdleDetection,WebNFC,Prerender2,SpeculationRulesPrefetchProxy",
@@ -1839,7 +2134,11 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                 )
                 original_pid = int(process.pid)
                 devtools_started = time.monotonic()
-                wait_info = _wait_for_devtools(port, process, timeout=timeout) or {}
+                wait_info = _wait_for_devtools(profile, process, timeout=timeout) or {}
+                port = int(wait_info.get("port") or 0)
+                if not (1 <= port <= 65535):
+                    raise RuntimeError("Chromium did not publish a valid DevToolsActivePort")
+                _CHROMIUM_LAUNCH_DEBUG["port"] = port
                 _CHROMIUM_LAUNCH_DEBUG["devtools_ready_ms"] = round(
                     (time.monotonic() - devtools_started) * 1000.0, 2
                 )
@@ -1900,7 +2199,8 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     _clear_profile_owner(profile, getattr(process, "pid", None))
                 except Exception:
                     pass
-                revoke_loopback_port(port)
+                if port:
+                    revoke_loopback_port(port)
                 if attempt == 1:
                     # A failed Chromium may not have written Tekzite's owner PID
                     # yet, so clear its private singleton locks before retry 2.
@@ -2167,83 +2467,124 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
     return target_id
 
 
-def activate_embedded_chromium_target(target_id: str):
-    """Activate an already loaded Chromium tab without navigating it again.
+def _devtools_target_http_command(session, command: str, target_id: str, timeout: float = 0.45):
+    """Run a DevTools /json target command without browser WebSocket locks.
 
-    v7.5 uses the persistent browser CDP channel as the fast path. A synchronous
-    /json/list round-trip on every tab click made switching visibly laggy and is
-    unnecessary: Target.activateTarget itself is authoritative. Only fall back to
-    the target listing if Chromium rejects the activation.
+    Chromium exposes activate/close as loopback HTTP endpoints. Using them for
+    tab lifecycle changes keeps the hot close/switch path away from Tekzite's
+    shared browser-level CDP socket, its Python lock, and any queued protocol
+    events. The call is designed for a worker thread and has a short hard timeout.
+    """
+    if not session or not target_id:
+        return False
+    try:
+        port = int(session.get("port") or 0)
+    except Exception:
+        return False
+    if not (1 <= port <= 65535):
+        return False
+    command = str(command or "").strip().lower()
+    if command not in {"activate", "close"}:
+        return False
+    encoded = quote(str(target_id), safe="")
+    url = f"http://127.0.0.1:{port}/json/{command}/{encoded}"
+    try:
+        with _stdlib_urlopen(url, timeout=max(0.10, float(timeout))) as response:
+            # Consume only a tiny response body. Chromium normally returns a
+            # short plain-text acknowledgement for these endpoints.
+            response.read(4096)
+        return True
+    except Exception:
+        return False
+
+
+def activate_embedded_chromium_target(target_id: str):
+    """Activate an already-loaded Chromium target without touching shared CDP.
+
+    v10.5.32 uses Chromium's loopback /json/activate endpoint as the primary
+    path. The previous browser-WebSocket Target.activateTarget call could sit
+    behind protocol traffic/locks while an active tab was being closed. Even in
+    a Python worker that contention could make the entire app *feel* frozen.
+    This path is independent, bounded, and never acquires _EDGE_SESSION_LOCK in
+    the normal running-browser case.
     """
     if not target_id:
         return False
-    session = _start_persistent_chromium_session(timeout=12)
+
+    session = _EDGE_SESSION
+    if not session:
+        # Cold/recovery fallback only. Normal tab switching always has a live
+        # session by the time a Chromium target exists.
+        try:
+            session = _start_persistent_chromium_session(timeout=3.0)
+        except Exception:
+            return False
+
+    process = session.get("process") if isinstance(session, dict) else None
     try:
-        _browser_cdp_call(
-            session, "Target.activateTarget", {"targetId": target_id}, message_id=103,
-            timeout=1.5,
-        )
+        if process is not None and process.poll() is not None:
+            return False
     except Exception:
+        pass
+
+    activated = _devtools_target_http_command(session, "activate", target_id, timeout=0.35)
+    if not activated:
+        # One lock-free existence probe + retry handles the rare moment where
+        # DevTools is responsive but the target list has just changed.
         try:
-            pages = _devtools_json(session["port"], "/json/list", timeout=0.75)
+            pages = _devtools_json(session["port"], "/json/list", timeout=0.30)
+            if not any(str(p.get("id") or "") == str(target_id) for p in pages):
+                return False
         except Exception:
             return False
-        if not any(p.get("id") == target_id for p in pages):
-            return False
-        try:
-            _browser_cdp_call(
-                session, "Target.activateTarget", {"targetId": target_id}, message_id=103,
-                timeout=1.5,
-            )
-        except Exception:
-            return False
+        activated = _devtools_target_http_command(session, "activate", target_id, timeout=0.45)
+    if not activated:
+        return False
+
     session["target_id"] = target_id
-    # v8.3: Target.activateTarget can complete before Windows/DWM has presented
-    # the new compositor frame. Give the already-existing native source a cheap
-    # repaint pulse without resizing/reparenting it. This keeps the v7.5 fast
-    # path cheap while avoiding the visible old-tab frame that could linger
-    # behind Tekzite's tab chrome.
+    session["tab_switch_http_activate"] = True
+    session["tab_switch_fast_path_count"] = int(session.get("tab_switch_fast_path_count", 0)) + 1
+
+    # Keep repaint asynchronous. No DwmFlush/UpdateWindow/RDW_UPDATENOW.
     if os.name == "nt" and session.get("presentation_mode") != "software":
         try:
-            import ctypes
-            from ctypes import wintypes
             user32 = _typed_user32()
             render = _as_hwnd(session.get("render_hwnd") or 0)
             owner = _as_hwnd(session.get("embedded_hwnd") or 0)
             RDW_INVALIDATE = 0x0001
             RDW_ALLCHILDREN = 0x0080
-            RDW_UPDATENOW = 0x0100
-            flags = RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW
+            flags = RDW_INVALIDATE | RDW_ALLCHILDREN
             for hwnd in (render, owner):
                 if hwnd and user32.IsWindow(hwnd):
                     user32.RedrawWindow(hwnd, None, None, flags)
-                    user32.UpdateWindow(hwnd)
-            try:
-                ctypes.windll.dwmapi.DwmFlush()
-                session["tab_switch_dwm_flush"] = True
-            except Exception:
-                session["tab_switch_dwm_flush"] = False
+            session["tab_switch_repaint_async"] = True
+            session["tab_switch_dwm_flush"] = False
         except Exception as exc:
             session["tab_switch_present_error"] = str(exc)
-    session["tab_switch_fast_path_count"] = int(session.get("tab_switch_fast_path_count", 0)) + 1
     return True
 
 
 def close_embedded_chromium_target(target_id: str):
-    """Close one Chromium page target while keeping the helper process alive."""
+    """Close one Chromium target without using Tekzite's shared CDP socket."""
     if not target_id:
         return False
-    session = _start_persistent_chromium_session(timeout=12)
-    _close_persistent_page_cdp_channels(session, target_id=target_id)
-    try:
-        result = _browser_cdp_call(
-            session, "Target.closeTarget", {"targetId": target_id}, message_id=104
-        )
-    except Exception:
+    session = _EDGE_SESSION
+    if not session:
         return False
-    if session.get("target_id") == target_id:
-        session.pop("target_id", None)
-    return bool(result.get("success", True))
+
+    # Close Tekzite's cached page sockets first. This is local bookkeeping and
+    # prevents stale per-target lanes from being reused after Chromium closes it.
+    try:
+        _close_persistent_page_cdp_channels(session, target_id=target_id)
+    except Exception:
+        pass
+
+    ok = _devtools_target_http_command(session, "close", target_id, timeout=0.50)
+    if ok:
+        if session.get("target_id") == target_id:
+            session.pop("target_id", None)
+        session["tab_close_http"] = True
+    return bool(ok)
 
 def fetch_rendered_dom(url: str, timeout: int = 30):
     """Render *url* in Tekzite's persistent, real Chromium compatibility session.
@@ -3571,6 +3912,13 @@ def embedded_chromium_debug_report():
     lines.append(f"dwm_input_transform_error: {session.get('dwm_input_transform_error')}")
     lines.append(f"dwm_input_zoom_factor: {session.get('dwm_input_zoom_factor')}")
     lines.append(f"dwm_input_zoom_active: {session.get('dwm_input_zoom_active')}")
+    lines.append(f"dwm_input_css_scale_x: {session.get('dwm_input_css_scale_x')}")
+    lines.append(f"dwm_input_css_scale_y: {session.get('dwm_input_css_scale_y')}")
+    lines.append(f"dwm_input_device_pixel_ratio: {session.get('dwm_input_device_pixel_ratio')}")
+    lines.append(f"dwm_input_viewport_css: {session.get('dwm_input_viewport_css')}")
+    lines.append(f"dwm_input_render_pixels: {session.get('dwm_input_render_pixels')}")
+    lines.append(f"dwm_input_scale_source: {session.get('dwm_input_scale_source')}")
+    lines.append(f"dwm_input_metrics_error: {session.get('dwm_input_metrics_error')}")
     lines.append(f"dwm_zoom_percent: {session.get('dwm_zoom_percent')}")
     lines.append(f"preferences_zoom_percent: {session.get('preferences_zoom_percent')}")
     lines.append(f"page_zoom_strategy: {session.get('page_zoom_strategy')}")
@@ -4265,6 +4613,33 @@ def _park_chromium_top_level_presenters(session, source_hwnd=0, passes=1, settle
 
 
 
+def _dwm_input_offset_for_crop(crop_left, crop_top, render_offset):
+    """Translate DWM destination pixels into the RenderWidgetHost origin.
+
+    The DWM thumbnail can deliberately keep a previously committed crop while
+    Chromium is settling on a new native-chrome height.  In that state the
+    visible page is shifted inside the thumbnail even though CDP coordinates
+    still start at the RenderWidgetHost's (0, 0).  The correction is therefore
+    ``source_crop_origin - render_host_origin``.
+
+    This is the exact symptom behind clicks landing *below* the visible target:
+    when the renderer starts lower than the active crop, the Y correction is
+    negative, so the visible cursor position maps back up to the real DOM point.
+    """
+    if not render_offset:
+        return 0.0, 0.0
+    try:
+        render_x, render_y = float(render_offset[0]), float(render_offset[1])
+        dx = float(crop_left) - render_x
+        dy = float(crop_top) - render_y
+        # Ignore obviously stale HWND geometry instead of making input unusable.
+        if abs(dx) > 240.0 or abs(dy) > 360.0:
+            return 0.0, 0.0
+        return dx, dy
+    except Exception:
+        return 0.0, 0.0
+
+
 def _resize_existing_dwm_thumbnail_fast(session, width: int, height: int):
     """Fast steady-state DWM resize path.
 
@@ -4346,6 +4721,18 @@ def _resize_existing_dwm_thumbnail_fast(session, width: int, height: int):
         # frame turns a cheap geometry update into a CPU/GPU pipeline stall.
         session["dwm_thumbnail_destination_rect"] = (0, 0, width, height)
         session["dwm_thumbnail_source_rect"] = (0, chrome_h, width, chrome_h + height)
+        # v10.5.5: keep pointer hit testing anchored to the *actual* renderer
+        # origin, not merely to the currently committed crop.  A navigation can
+        # temporarily keep an older crop while Chromium reports a new toolbar
+        # height; without this correction, clicking a visible input may hit the
+        # element below it and only work when the cursor is placed above it.
+        cached_render_offset = (
+            session.get("dwm_source_render_offset_after_expand")
+            or session.get("dwm_source_render_offset")
+        )
+        session["dwm_input_offset"] = _dwm_input_offset_for_crop(
+            0, chrome_h, cached_render_offset
+        )
         session["dwm_thumbnail_pixel_contract"] = (width, height)
         session["dwm_fast_resize_count"] = int(session.get("dwm_fast_resize_count") or 0) + 1
         session["dwm_last_resize_path"] = "fast"
@@ -4598,6 +4985,7 @@ def _position_native_chromium_overlay(session, width: int, height: int):
         # no usable source-local RenderWidgetHost.
         source_render_measurement = _measure_source_render_host()
         render = render_w = render_h = 0
+        source_render_x = None
         source_render_y = None
         if source_render_measurement:
             _, _, _, render, render_w, render_h, source_render_x, source_render_y = source_render_measurement
@@ -4608,7 +4996,19 @@ def _position_native_chromium_overlay(session, width: int, height: int):
         session["dwm_render_size_before_chrome_expand"] = (render_w, render_h) if render_w and render_h else None
 
         candidate_chrome_h = previous_chrome_h
-        if source_render_y is not None and 0 < int(source_render_y) <= 160:
+        # v10.5.3: Chromium's native UI can be substantially taller than the
+        # old 160 px guard on high-DPI systems or when Chromium exposes a full
+        # browser-style window instead of the compact app frame.  The old cap
+        # rejected a perfectly valid ~180-220 px RenderWidgetHost offset, which
+        # made DWM mirror Chromium's tab strip + omnibox inside Tekzite.
+        #
+        # Keep a conservative sanity ceiling, but derive it from the available
+        # viewport and leave room for a real page surface.  _live_render_host_crop
+        # already treats top insets up to 360 px as plausible, so use the same
+        # upper bound here rather than a conflicting smaller threshold.
+        chrome_inset_limit = min(360, max(160, int(height) - 150))
+        session["dwm_chrome_inset_limit"] = int(chrome_inset_limit)
+        if source_render_y is not None and 0 < int(source_render_y) <= chrome_inset_limit:
             candidate_chrome_h = int(source_render_y)
             session["dwm_chrome_measurement"] = "source-render-offset"
         elif render_h:
@@ -4616,7 +5016,7 @@ def _position_native_chromium_overlay(session, width: int, height: int):
             # the renderer should match the viewport.  Only infer from a
             # shortfall when we have no established lock yet.
             shortfall = int(height) - int(render_h)
-            if previous_chrome_h == 0 and 0 < shortfall <= 160:
+            if previous_chrome_h == 0 and 0 < shortfall <= chrome_inset_limit:
                 candidate_chrome_h = shortfall
                 session["dwm_chrome_measurement"] = "source-render-shortfall"
         else:
@@ -4678,10 +5078,22 @@ def _position_native_chromium_overlay(session, width: int, height: int):
                 session["dwm_source_render_hwnd"] = render_after
                 session["dwm_source_render_offset_after_expand"] = (ox_after, oy_after)
                 session["dwm_render_size_after_chrome_expand"] = (rw_after, rh_after)
+                source_render_x, source_render_y = ox_after, oy_after
         target_src_h = final_target_src_h
 
         source_crop = (0, int(chrome_h), 0, 0)
         crop_top = int(chrome_h)
+        render_offset_for_input = (
+            (source_render_x, source_render_y)
+            if source_render_x is not None and source_render_y is not None
+            else None
+        )
+        session["dwm_input_render_origin"] = render_offset_for_input
+        session["dwm_input_crop_origin"] = (0, crop_top)
+        session["dwm_input_offset"] = _dwm_input_offset_for_crop(
+            0, crop_top, render_offset_for_input
+        )
+        session["dwm_input_alignment_mode"] = "crop-minus-render-origin"
         session["dwm_source_crop"] = source_crop
         session["dwm_source_hwnd"] = source
         session["dwm_destination_hwnd"] = destination
@@ -5169,6 +5581,19 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
         _wait_for_embedded_chromium_input_ready(
             session, session.get("target_id"), timeout=1.2
         )
+        # v10.5.6: DWM source/destination coordinates are native window pixels,
+        # while CDP mouse coordinates are CSS viewport pixels.  On a scaled
+        # Windows desktop (or any non-1.0 Chromium device scale), treating those
+        # as the same space makes the hit point drift downward: a control can
+        # only be clicked by aiming above it.  Capture the live renderer/CSS
+        # ratio before the first visible frame so pointer mapping is correct on
+        # the very first click.
+        try:
+            _refresh_dwm_input_metrics(
+                session, session.get("target_id"), timeout=0.8
+            )
+        except Exception:
+            pass
         # v9.0: make the first visible page immediately typeable as well as
         # clickable. Focus the page's natural search/text control while the
         # DWM source is still hidden, using the already-warmed critical lane.
@@ -5792,13 +6217,30 @@ def _clear_embedded_chromium_device_metrics(session=None, target_id: str = None,
         return False
 
 
-def set_embedded_chromium_presentation(mode: str, target_id: str = None):
-    """Select one authoritative presentation path for the active Chromium tab."""
-    session = _EDGE_SESSION or _start_persistent_chromium_session()
+def set_embedded_chromium_presentation(mode: str, target_id: str = None, defer_io: bool = False):
+    """Select the authoritative presentation path for the active Chromium tab.
+
+    ``defer_io=True`` is the GUI-thread fast path. It updates the already-live
+    Chromium session state without opening CDP channels, clearing metrics or
+    starting a helper. The caller can queue a normal call on a worker afterward.
+    This keeps Tk responsive during active-tab close/switch handoffs.
+    """
     mode = "software" if str(mode).lower() == "software" else "native"
+    if defer_io:
+        session = _EDGE_SESSION
+        if session is not None:
+            session["presentation_mode"] = mode
+            session["presentation_target_id"] = target_id
+            if mode == "native":
+                session["device_metrics_clear_deferred"] = True
+        return mode
+
+    session = _EDGE_SESSION or _start_persistent_chromium_session()
     session["presentation_mode"] = mode
+    session["presentation_target_id"] = target_id
     if mode == "native":
         _clear_embedded_chromium_device_metrics(session, target_id=target_id)
+        session["device_metrics_clear_deferred"] = False
     return mode
 
 
@@ -5940,7 +6382,13 @@ def set_embedded_chromium_zoom(percent: int = 100, target_id: str = None, timeou
     session["page_zoom_site_specific_hacks"] = False
     session["page_zoom_new_document_script"] = False
     session["page_zoom_deferred_while_loading"] = False
-    return _apply_native_chromium_zoom_extension(session, percent, timeout=max(3, timeout))
+    applied = _apply_native_chromium_zoom_extension(session, percent, timeout=max(3, timeout))
+    if applied and session.get("presentation_mode") == "native":
+        try:
+            _refresh_dwm_input_metrics(session, target_id=target_id, timeout=min(1.0, max(0.3, float(timeout))))
+        except Exception:
+            pass
+    return applied
 
 def _software_viewport_state(session, target_id, timeout, purpose="capture"):
     result = _persistent_page_cdp_call(
@@ -6155,7 +6603,7 @@ def validate_and_recover_embedded_chromium_frame(target_id: str = None, timeout:
 
 
 def get_embedded_chromium_dwm_input_offset():
-    """Return the live DWM-to-CDP pointer coordinate correction."""
+    """Return live correction from the visible DWM crop to CDP page origin."""
     session = _EDGE_SESSION or {}
     try:
         x, y = session.get("dwm_input_offset") or (0, 0)
@@ -6166,43 +6614,152 @@ def get_embedded_chromium_dwm_input_offset():
 
 
 
-def get_embedded_chromium_input_zoom_factor():
-    """Return the native Chromium zoom factor used for DWM -> CDP input mapping.
+def _refresh_dwm_input_metrics(session, target_id=None, timeout: float = 1.0):
+    """Cache the live native-pixel -> CSS-pixel transform for DWM input.
 
-    Chromium's DWM surface is presented in physical pixels, while CDP mouse and
-    elementFromPoint coordinates are expressed in CSS viewport pixels. Once the
-    v7 native zoom extension is confirmed active, divide visible DWM coordinates
-    by this factor before sending input. If native zoom has not been verified,
-    return 1.0 so input never gets mis-scaled speculatively.
+    DWM thumbnail rectangles and Win32 RenderWidgetHost geometry are expressed
+    in native window pixels. CDP Input.dispatchMouseEvent and elementFromPoint
+    are expressed in CSS viewport pixels. Windows display scaling and Chromium
+    page zoom can therefore make a visible y=350 correspond to, for example,
+    CSS y=280. Using the saved browser-zoom percentage alone cannot recover that
+    relationship because it does not include the Windows/Chromium device scale.
+
+    Prefer the ratio measured from the actual RenderWidgetHost dimensions to
+    window.innerWidth/innerHeight. devicePixelRatio is retained as a robust
+    fallback and diagnostic. No DOM is modified.
     """
+    if not session or not session.get("port"):
+        return 1.0, 1.0
+    target_id = str(target_id or session.get("target_id") or "") or None
+    try:
+        result = _persistent_page_cdp_call(
+            session,
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "(() => ({iw: window.innerWidth || 0, ih: window.innerHeight || 0, "
+                    "dpr: window.devicePixelRatio || 1, "
+                    "vv: (window.visualViewport && window.visualViewport.scale) || 1}))()"
+                ),
+                "returnByValue": True,
+            },
+            target_id=target_id,
+            timeout=max(0.25, float(timeout)),
+            purpose="input",
+        )
+        value = dict(((result or {}).get("result") or {}).get("value") or {})
+        iw = float(value.get("iw") or 0.0)
+        ih = float(value.get("ih") or 0.0)
+        dpr = float(value.get("dpr") or 1.0)
+        vv = float(value.get("vv") or 1.0)
+
+        render_size = (
+            session.get("dwm_render_size_after_chrome_expand")
+            or session.get("dwm_source_render_size")
+            or session.get("render_host_embedded_size")
+        )
+        rw = rh = 0.0
+        if render_size:
+            try:
+                rw, rh = float(render_size[0]), float(render_size[1])
+            except Exception:
+                rw = rh = 0.0
+
+        sx = (rw / iw) if rw > 0.0 and iw > 0.0 else 0.0
+        sy = (rh / ih) if rh > 0.0 and ih > 0.0 else 0.0
+
+        # A sane desktop scale is comfortably inside this range. Reject stale
+        # HWND measurements rather than letting one bad geometry sample make
+        # the whole page unclickable.
+        def sane(v):
+            return 0.5 <= float(v) <= 4.0
+
+        if not sane(sx):
+            sx = dpr if sane(dpr) else 1.0
+        if not sane(sy):
+            sy = dpr if sane(dpr) else sx
+
+        # If one native dimension includes a transient compositor decoration,
+        # the two ratios can diverge. devicePixelRatio is the browser's own
+        # effective CSS/native scale and is safer than an obviously asymmetric
+        # pair. Browser zoom is already represented in devicePixelRatio, so it
+        # must not be multiplied by the saved zoom percentage again.
+        if sane(dpr):
+            denom = max(abs(sx), abs(sy), 1e-6)
+            if abs(sx - sy) / denom > 0.12:
+                sx = sy = dpr
+
+        session["dwm_input_viewport_css"] = (iw, ih)
+        session["dwm_input_device_pixel_ratio"] = dpr
+        session["dwm_input_visual_viewport_scale"] = vv
+        session["dwm_input_render_pixels"] = (rw, rh)
+        session["dwm_input_css_scale_x"] = float(sx)
+        session["dwm_input_css_scale_y"] = float(sy)
+        session["dwm_input_scale_source"] = "render-host/css-viewport" if rw and rh and iw and ih else "devicePixelRatio"
+        session["dwm_input_metrics_error"] = None
+        return float(sx), float(sy)
+    except Exception as exc:
+        session["dwm_input_metrics_error"] = f"{type(exc).__name__}: {exc}"
+        return get_embedded_chromium_input_scale()
+
+
+def get_embedded_chromium_input_scale():
+    """Return cached native-DWM-pixel -> CSS-pixel scale for pointer input."""
     session = _EDGE_SESSION or {}
     try:
-        if not bool(session.get("native_zoom_extension_loaded")):
-            session["dwm_input_zoom_factor"] = 1.0
-            session["dwm_input_zoom_active"] = False
-            return 1.0
-        percent = max(50, min(300, int(session.get("default_page_zoom_percent") or 100)))
-        factor = float(percent) / 100.0
-        session["dwm_input_zoom_factor"] = factor
-        session["dwm_input_zoom_active"] = True
-        return factor
+        sx = float(session.get("dwm_input_css_scale_x") or 0.0)
+        sy = float(session.get("dwm_input_css_scale_y") or 0.0)
+        if 0.5 <= sx <= 4.0 and 0.5 <= sy <= 4.0:
+            session["dwm_input_zoom_factor"] = (sx + sy) / 2.0
+            session["dwm_input_zoom_active"] = abs(sx - 1.0) > 1e-6 or abs(sy - 1.0) > 1e-6
+            return sx, sy
     except Exception:
-        session["dwm_input_zoom_factor"] = 1.0
-        session["dwm_input_zoom_active"] = False
-        return 1.0
+        pass
+
+    # Conservative fallback for an early event that arrives before the first
+    # live metrics sample.  This keeps old native-zoom behavior while avoiding
+    # speculative DPI scaling.
+    try:
+        if bool(session.get("native_zoom_extension_loaded")):
+            percent = max(50, min(300, int(session.get("default_page_zoom_percent") or 100)))
+            factor = float(percent) / 100.0
+        else:
+            factor = 1.0
+    except Exception:
+        factor = 1.0
+    session["dwm_input_zoom_factor"] = factor
+    session["dwm_input_zoom_active"] = abs(factor - 1.0) > 1e-6
+    return factor, factor
+
+
+def get_embedded_chromium_input_zoom_factor():
+    """Compatibility scalar for diagnostics and older callers.
+
+    New DWM input uses get_embedded_chromium_input_scale() so X/Y can be mapped
+    independently.  Return their mean here to preserve the historical API.
+    """
+    sx, sy = get_embedded_chromium_input_scale()
+    return (float(sx) + float(sy)) / 2.0
 
 
 def dispatch_embedded_chromium_mouse(event_type: str, x: float, y: float, *,
                                      button: str = "none", buttons: int = None,
                                      delta_x: float = 0.0, delta_y: float = 0.0,
-                                     click_count: int = 1,
+                                     click_count: int = 0, modifiers: int = 0,
                                      target_id: str = None, timeout: int = 3,
                                      purpose: str = "input"):
-    """Forward pointer/wheel input over the tab's persistent CDP channel."""
+    """Forward pointer/wheel input over the tab's persistent CDP channel.
+
+    v10.5.7 keeps CDP gesture metadata faithful to Chromium: mouseMoved uses
+    clickCount=0, actual presses/releases provide their real single/double/triple
+    count, and wheel modifier bits survive the DWM/Tk bridge.
+    """
     session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
         return False
     params = {"type": str(event_type), "x": float(x), "y": float(y)}
+    if modifiers:
+        params["modifiers"] = int(modifiers)
     if event_type == "mouseWheel":
         params.update({"deltaX": float(delta_x), "deltaY": float(delta_y)})
     else:
@@ -6261,12 +6818,12 @@ def get_embedded_chromium_context(x: float, y: float, *, target_id: str = None, 
       return {{
         tag: el ? String(el.tagName || '').toLowerCase() : '',
         text: el ? String(el.innerText || el.textContent || '').trim().slice(0, 500) : '',
-        href: a ? String(a.href || '') : '',
-        image_src: img ? String(img.currentSrc || img.src || '') : '',
+        href: a ? String(a.href || '').slice(0, 32768) : '',
+        image_src: img ? String(img.currentSrc || img.src || '').slice(0, 8192) : '',
         selected_text: sel.slice(0, 5000),
         editable: !!(el && (el.isContentEditable || /^(INPUT|TEXTAREA)$/.test(el.tagName || ''))),
-        page_url: String(location.href || ''),
-        page_title: String(document.title || '')
+        page_url: String(location.href || '').slice(0, 32768),
+        page_title: String(document.title || '').slice(0, 1024)
       }};
     }})()"""
     result = _persistent_page_cdp_call(
@@ -6275,7 +6832,13 @@ def get_embedded_chromium_context(x: float, y: float, *, target_id: str = None, 
         target_id=target_id, timeout=timeout,
     )
     value = (((result or {}).get("result") or {}).get("value"))
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return {}
+    value["href"] = str(value.get("href") or "")[:MAX_PAGE_URL_CHARS]
+    value["image_src"] = str(value.get("image_src") or "")[:MAX_FAVICON_URL_CHARS]
+    value["page_url"] = str(value.get("page_url") or "")[:MAX_PAGE_URL_CHARS]
+    value["page_title"] = str(value.get("page_title") or "")[:MAX_PAGE_TITLE_CHARS]
+    return value
 
 
 def focus_embedded_chromium_point(x: float, y: float, *, target_id: str = None, timeout: int = 3):
@@ -6350,11 +6913,11 @@ def get_embedded_chromium_site_info(*, target_id: str = None, timeout: int = 5):
       try { localCount = localStorage.length; } catch (_) {}
       try { sessionCount = sessionStorage.length; } catch (_) {}
       return {
-        title: String(document.title || ''),
-        url: String(location.href || ''),
-        origin: String(location.origin || ''),
+        title: String(document.title || '').slice(0, 1024),
+        url: String(location.href || '').slice(0, 32768),
+        origin: String(location.origin || '').slice(0, 4096),
         scheme: String(location.protocol || '').replace(':', ''),
-        host: String(location.hostname || ''),
+        host: String(location.hostname || '').slice(0, 1024),
         localStorageEntries: Number(localCount || 0),
         sessionStorageEntries: Number(sessionCount || 0),
         cookieEnabled: !!navigator.cookieEnabled,
@@ -6369,6 +6932,10 @@ def get_embedded_chromium_site_info(*, target_id: str = None, timeout: int = 5):
     info = (((result or {}).get("result") or {}).get("value"))
     if not isinstance(info, dict):
         info = {}
+    info["title"] = str(info.get("title") or "")[:MAX_PAGE_TITLE_CHARS]
+    info["url"] = str(info.get("url") or "")[:MAX_PAGE_URL_CHARS]
+    info["origin"] = str(info.get("origin") or "")[:MAX_ORIGIN_CHARS]
+    info["host"] = str(info.get("host") or "")[:MAX_HOST_CHARS]
 
     url = str(info.get("url") or "")
     origin = str(info.get("origin") or "")
@@ -6473,10 +7040,10 @@ def get_embedded_chromium_page_state(*, target_id: str = None, include_favicon: 
     expr = r'''(() => {
       const icon = document.querySelector('link[rel~="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]');
       return {
-        title: String(document.title || ''),
-        url: String(location.href || ''),
-        readyState: String(document.readyState || ''),
-        favicon: icon ? String(icon.href || '') : ((location.protocol === 'http:' || location.protocol === 'https:') ? String(new URL('/favicon.ico', location.href)) : ''),
+        title: String(document.title || '').slice(0, 1024),
+        url: String(location.href || '').slice(0, 32768),
+        readyState: String(document.readyState || '').slice(0, 32),
+        favicon: (icon ? String(icon.href || '') : ((location.protocol === 'http:' || location.protocol === 'https:') ? String(new URL('/favicon.ico', location.href)) : '')).slice(0, 8192),
         audible: !!Array.from(document.querySelectorAll('audio,video')).find(m => !m.paused && !m.ended && m.readyState > 1)
       };
     })()'''
@@ -6488,6 +7055,9 @@ def get_embedded_chromium_page_state(*, target_id: str = None, include_favicon: 
     value = (((result or {}).get('result') or {}).get('value'))
     if not isinstance(value, dict):
         return {}
+    value['title'] = str(value.get('title') or '')[:MAX_PAGE_TITLE_CHARS]
+    value['url'] = str(value.get('url') or '')[:MAX_PAGE_URL_CHARS]
+    value['favicon'] = str(value.get('favicon') or '')[:MAX_FAVICON_URL_CHARS]
     if include_favicon and value.get('favicon'):
         fav_expr = r'''(async () => {
           try {
@@ -6495,11 +7065,33 @@ def get_embedded_chromium_page_state(*, target_id: str = None, include_favicon: 
             if (!el || !el.href) return '';
             const r = await fetch(el.href, {credentials:'include', cache:'force-cache'});
             if (!r.ok) return '';
-            const b = await r.blob();
-            if (b.size > 524288) return '';
-            const ab = await b.arrayBuffer();
+            const declared = Number(r.headers.get('content-length') || 0);
+            if (Number.isFinite(declared) && declared > 524288) return '';
+            let bytes;
+            if (r.body && r.body.getReader) {
+              const reader = r.body.getReader();
+              const chunks = [];
+              let total = 0;
+              while (true) {
+                const part = await reader.read();
+                if (part.done) break;
+                const value = part.value || new Uint8Array();
+                total += value.byteLength;
+                if (total > 524288) {
+                  try { await reader.cancel(); } catch (_) {}
+                  return '';
+                }
+                chunks.push(value);
+              }
+              bytes = new Uint8Array(total);
+              let offset = 0;
+              for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+            } else {
+              const b = await r.blob();
+              if (b.size > 524288) return '';
+              bytes = new Uint8Array(await b.arrayBuffer());
+            }
             let binary = '';
-            const bytes = new Uint8Array(ab);
             for (let i=0; i<bytes.length; i+=0x8000) binary += String.fromCharCode(...bytes.subarray(i, i+0x8000));
             return btoa(binary);
           } catch (_) { return ''; }
@@ -6617,7 +7209,7 @@ def get_embedded_chromium_layout_snapshot(timeout: int = 10, max_elements: int =
           }
           const bodyStyle = document.body ? getComputedStyle(document.body) : null;
           return {
-            url: location.href, title: document.title || '',
+            url: String(location.href || '').slice(0, 32768), title: String(document.title || '').slice(0, 1024),
             viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
             devicePixelRatio: window.devicePixelRatio || 1,
             scrollX: window.scrollX || 0, scrollY: window.scrollY || 0,
@@ -6693,10 +7285,9 @@ def _close_embedded_chromium_unlocked(clear_profile=False):
         profile = session.get("profile") or ""
         _clear_profile_owner(profile, getattr(process, "pid", None))
         if clear_profile and profile:
-            try:
-                shutil.rmtree(profile, ignore_errors=True)
-            except Exception:
-                pass
+            session["profile_cleanup_succeeded"] = bool(remove_profile_tree(profile))
+            if not session["profile_cleanup_succeeded"]:
+                session["profile_cleanup_error"] = "profile directory remained after retry cleanup"
         if session_loopback_port:
             revoke_loopback_port(session_loopback_port)
     if clear_profile:

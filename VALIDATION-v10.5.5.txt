@@ -1,0 +1,13 @@
+Tekzite Browser v10.5.5 validation
+
+Focus: DWM pointer-to-DOM vertical alignment.
+
+The visible DWM thumbnail can temporarily use a committed crop that differs from
+Chromium's current RenderWidgetHost origin. v10.5.5 maps destination coordinates
+with: pagePhysical = destination + cropOrigin - renderOrigin, then converts to CSS
+coordinates using the active native Chromium zoom factor.
+
+Expected Windows behavior:
+- clicking directly on a visible text input focuses that input;
+- the user no longer needs to place the cursor above the field;
+- hover, drag, context menus and CSS cursor probing use the same transform.

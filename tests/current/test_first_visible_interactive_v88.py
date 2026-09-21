@@ -5,7 +5,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 def test_release_is_v88():
-    assert 'BROWSER_VERSION = "10.5.2"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.32"' in MAIN
 
 def test_hidden_startup_proves_real_input_roundtrip():
     assert 'def _wait_for_embedded_chromium_input_ready' in NET
