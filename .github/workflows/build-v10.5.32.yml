@@ -27,7 +27,7 @@ jobs:
         shell: pwsh
         run: |
           $exe = Get-Item dist/TekziteBrowser.exe
-          if ($exe.VersionInfo.FileVersion -ne '10.5.32.0') { throw "Unexpected version: $($exe.VersionInfo.FileVersion)" }
+          if ($exe.VersionInfo.FileVersion -ne '10.5.32') { throw "Unexpected version: $($exe.VersionInfo.FileVersion)" }
           $bytes = [IO.File]::ReadAllBytes($exe.FullName)
           $pe = [BitConverter]::ToInt32($bytes, 60)
           if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) { throw "Not an x64 executable" }
