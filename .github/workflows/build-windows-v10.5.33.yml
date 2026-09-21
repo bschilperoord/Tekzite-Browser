@@ -52,8 +52,11 @@ jobs:
         shell: pwsh
         run: |
           python -m py_compile main.py engine/net.py browser_features.py
-          python -c "import pathlib; t=pathlib.Path('engine/net.py').read_text(encoding='utf-8-sig'); assert 'wintypes.HRESULT' not in t; assert 'HRESULT = getattr(_ctypes_wintypes' in t"
-          python -c "import pathlib; t=pathlib.Path('main.py').read_text(encoding='utf-8-sig'); assert 'BROWSER_VERSION = \"10.5.33\"' in t"
+          $netText = Get-Content "engine/net.py" -Raw
+          if ($netText.Contains("wintypes.HRESULT")) { throw "wintypes.HRESULT remains in engine/net.py" }
+          if (-not $netText.Contains("HRESULT = getattr(_ctypes_wintypes")) { throw "HRESULT compatibility alias is missing" }
+          $mainText = Get-Content "main.py" -Raw
+          if (-not $mainText.Contains('BROWSER_VERSION = "10.5.33"')) { throw "BROWSER_VERSION was not updated" }
 
       - name: Build Windows executable
         shell: pwsh
