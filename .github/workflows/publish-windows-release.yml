@@ -30,7 +30,6 @@ jobs:
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
             "exists=true" >> $env:GITHUB_OUTPUT
-            Write-Host "Release $tag already exists; nothing to publish."
           } else {
             "exists=false" >> $env:GITHUB_OUTPUT
           }
@@ -41,9 +40,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $partFiles = Get-ChildItem ".release\v10.5.42.patch.b64.*" | Sort-Object Name
+          if ($partFiles.Count -ne 8) { throw "Expected 8 release patch chunks, found $($partFiles.Count)" }
+          $builder = [System.Text.StringBuilder]::new()
+          foreach ($part in $partFiles) {
+            [void]$builder.Append((Get-Content -Raw $part.FullName).Trim())
+          }
           $gzipPath = ".release\v10.5.42.patch.gz"
           $patchPath = ".release\v10.5.42.patch"
-          if (-not (Test-Path $gzipPath)) { throw "Release patch payload is missing: $gzipPath" }
+          [System.IO.File]::WriteAllBytes($gzipPath, [Convert]::FromBase64String($builder.ToString()))
 
           $input = [System.IO.File]::OpenRead($gzipPath)
           $output = [System.IO.File]::Create($patchPath)
@@ -126,10 +131,7 @@ jobs:
           Compress-Archive -Path ".\$exeName" -DestinationPath ".\$zipName" -CompressionLevel Optimal
           $exeHash = (Get-FileHash ".\$exeName" -Algorithm SHA256).Hash.ToLowerInvariant()
           $zipHash = (Get-FileHash ".\$zipName" -Algorithm SHA256).Hash.ToLowerInvariant()
-          @(
-            "$exeHash  $exeName",
-            "$zipHash  $zipName"
-          ) | Set-Content ".\SHA256SUMS.txt" -Encoding ascii
+          @("$exeHash  $exeName", "$zipHash  $zipName") | Set-Content ".\SHA256SUMS.txt" -Encoding ascii
           "exe=$exeName" >> $env:GITHUB_OUTPUT
           "zip=$zipName" >> $env:GITHUB_OUTPUT
 
@@ -152,11 +154,11 @@ jobs:
           Windows x64 release of Tekzite Browser v$version.
 
           Highlights:
-          - Detects Tekzite's effective Windows HTTP/HTTPS default-browser handler correctly, including Applications-style and versioned executable handlers.
-          - Registers Tekzite with Windows Default Apps for HTTP, HTTPS, .htm and .html and handles URLs passed in by Windows.
-          - Shows live default-browser status in Settings.
-          - Keeps all Tekzite-owned dialogs centered consistently on screen.
-          - Includes the deterministic DWM viewport resize fixes from v10.5.38.
+          - Correct effective Windows default-browser detection for HTTP and HTTPS.
+          - Windows Default Apps registration and URL handoff support.
+          - Live default-browser status in Settings.
+          - Screen-centered Tekzite-owned dialogs.
+          - Deterministic DWM viewport resizing retained.
 
           The Windows executable is built natively on GitHub's windows-latest runner using the repository's hash-locked PyInstaller toolchain.
           "@
