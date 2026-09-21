@@ -1,0 +1,208 @@
+name: Publish v10.5.33
+
+on:
+  push:
+    branches:
+      - build-v10.5.33-windows
+    paths:
+      - .github/workflows/publish-v10.5.33.yml
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Apply v10.5.33 source release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $path = "engine/net.py"
+          $content = Get-Content $path -Raw
+          $anchor = "from loopback_policy import allow_loopback_port, revoke_loopback_port, snapshot as loopback_policy_snapshot"
+          $insert = "`n`n# ctypes.wintypes does not expose HRESULT on every supported Python build`n# (notably some packaged Windows/Python combinations). HRESULT is always a`n# signed 32-bit LONG, so keep one stable local alias instead of depending on`n# that optional wintypes attribute at runtime.`nimport ctypes as _ctypes`ntry:`n    from ctypes import wintypes as _ctypes_wintypes`n    HRESULT = getattr(_ctypes_wintypes, `"HRESULT`", _ctypes.c_int32)`nexcept Exception:`n    HRESULT = _ctypes.c_int32`n"
+          if (-not $content.Contains("HRESULT = getattr(_ctypes_wintypes")) {
+            if (-not $content.Contains($anchor)) { throw "HRESULT insertion anchor not found" }
+            $content = $content.Replace($anchor, $anchor + $insert)
+          }
+          $content = $content.Replace("wintypes.HRESULT", "HRESULT")
+          Set-Content -Path $path -Value $content -Encoding UTF8
+
+          $main = Get-Content "main.py" -Raw
+          $main = $main.Replace('BROWSER_VERSION = "10.5.32"', 'BROWSER_VERSION = "10.5.33"')
+          Set-Content "main.py" $main -Encoding UTF8
+
+          $versionFiles = @(
+            "tekzite_version_info.txt",
+            "tekzite_browser.manifest",
+            "installer/TekziteBrowser.iss",
+            "installer/README.txt",
+            "chromium_zoom_extension/manifest.json"
+          )
+          foreach ($file in $versionFiles) {
+            $text = Get-Content $file -Raw
+            $text = $text.Replace("10.5.32", "10.5.33")
+            Set-Content -Path $file -Value $text -Encoding UTF8
+          }
+
+          $readme = Get-Content "README.md" -Raw
+          $readme = $readme.Replace("v10.5.32 UltraSpeed", "v10.5.33 UltraSpeed")
+          Set-Content "README.md" $readme -Encoding UTF8
+
+          Get-ChildItem "tests/current" -File -Filter "*.py" | ForEach-Object {
+            $t = Get-Content $_.FullName -Raw
+            if ($t.Contains("10.5.32")) {
+              $t = $t.Replace("10.5.32", "10.5.33")
+              Set-Content $_.FullName $t -Encoding UTF8
+            }
+          }
+
+          $changelog = Get-Content "CHANGELOG.md" -Raw
+          if (-not $changelog.StartsWith("# Tekzite Browser v10.5.33")) {
+            $entry = @"
+# Tekzite Browser v10.5.33
+
+## Windows packaged-build HRESULT compatibility
+
+- Fixes the Windows packaged executable failing to load pages with ``AttributeError: module 'ctypes.wintypes' has no attribute 'HRESULT'``.
+- Uses a stable signed 32-bit HRESULT compatibility alias when ``ctypes.wintypes.HRESULT`` is unavailable.
+- Applies the alias to DWM thumbnail register/update/unregister/flush calls.
+- Preserves the v10.5.32 close-then-new-tab latency behavior.
+
+"@
+            Set-Content "CHANGELOG.md" ($entry + $changelog) -Encoding UTF8
+          }
+
+          @"
+Tekzite Browser v10.5.33 validation
+
+Focus: Windows packaged-build HRESULT compatibility.
+
+Checks
+- engine/net.py no longer references wintypes.HRESULT.
+- HRESULT is represented as signed 32-bit when ctypes.wintypes lacks the alias.
+- DWM register/update/unregister/flush restypes use the compatibility alias.
+- Existing DWM and browser tests continue to pass.
+"@ | Set-Content "VALIDATION-v10.5.33.txt" -Encoding UTF8
+
+          @'
+from pathlib import Path
+import ctypes
+
+import main
+import engine.net as net
+
+ROOT = Path(__file__).resolve().parents[2]
+NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
+
+
+def test_release_version():
+    assert main.BROWSER_VERSION == "10.5.33"
+
+
+def test_hresult_compat_type_is_always_32_bit():
+    assert ctypes.sizeof(net.HRESULT) == 4
+
+
+def test_no_direct_wintypes_hresult_dependency_remains():
+    assert "wintypes.HRESULT" not in NET
+
+
+def test_dwm_calls_use_compat_hresult_alias():
+    assert "DwmRegisterThumbnail.restype = HRESULT" in NET
+    assert "DwmUpdateThumbnailProperties.restype = HRESULT" in NET
+    assert "DwmUnregisterThumbnail.restype = HRESULT" in NET
+    assert "DwmFlush.restype = HRESULT" in NET
+'@ | Set-Content "tests/current/test_v10533_hresult_compat.py" -Encoding UTF8
+
+      - name: Install test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
+          python -m pip install --only-binary=:all: -r requirements-dev.txt
+
+      - name: Validate v10.5.33
+        shell: pwsh
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m py_compile main.py browser_features.py engine/net.py
+          python -m pytest -q tests/current
+          node tests/current/test_extension_features.cjs
+
+      - name: Commit and push v10.5.33
+        shell: pwsh
+        run: |
+          git config user.name "bschilperoord"
+          git config user.email "144562000+bschilperoord@users.noreply.github.com"
+          git add -A
+          git commit -m "Release Tekzite Browser v10.5.33"
+          git push origin HEAD:main
+          git tag -a v10.5.33 -m "Tekzite Browser v10.5.33"
+          git push origin v10.5.33
+
+      - name: Download verified Windows build
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          gh run download 35647619278 --repo "$env:GITHUB_REPOSITORY" --name "Tekzite-Browser-v10.5.33-Windows-x64" --dir release-assets
+          Get-ChildItem release-assets
+
+      - name: Verify release assets
+        shell: pwsh
+        run: |
+          $exe = "release-assets\Tekzite-Browser-v10.5.33-Windows-x64.exe"
+          $sum = "release-assets\SHA256SUMS.txt"
+          if (-not (Test-Path $exe)) { throw "Windows EXE is missing" }
+          if (-not (Test-Path $sum)) { throw "SHA256SUMS.txt is missing" }
+          $expected = ((Get-Content $sum -Raw).Trim() -split "\s+")[0].ToLower()
+          $actual = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "SHA256 mismatch: $actual != $expected" }
+          Write-Host "Verified SHA256: $actual"
+          if ($actual -ne "9d617048c755025c342b2546030b1c193deb6e6f38c946d83aa2ae1e3c89ecbf") {
+            throw "Build hash differs from the tested v10.5.33 executable"
+          }
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @"
+Tekzite Browser v10.5.33 for Windows x64.
+
+This release fixes the packaged Windows error:
+AttributeError: module 'ctypes.wintypes' has no attribute 'HRESULT'
+
+The DWM integration now uses a portable signed 32-bit HRESULT alias when ctypes.wintypes does not provide one. The v10.5.32 close/new-tab latency fix is preserved.
+
+Windows executable SHA-256:
+9d617048c755025c342b2546030b1c193deb6e6f38c946d83aa2ae1e3c89ecbf
+
+The executable is currently unsigned.
+"@
+          gh release create v10.5.33 `
+            "release-assets\Tekzite-Browser-v10.5.33-Windows-x64.exe" `
+            "release-assets\SHA256SUMS.txt" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --verify-tag `
+            --title "Tekzite Browser v10.5.33" `
+            --notes $notes
