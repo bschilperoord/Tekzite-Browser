@@ -6,7 +6,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version_1053():
-    assert 'BROWSER_VERSION = "10.5.38"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.42"' in MAIN
 
 
 def test_dwm_crop_no_longer_rejects_normal_browser_chrome_above_160px():

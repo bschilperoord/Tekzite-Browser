@@ -17,7 +17,7 @@ from browser_state import load_bookmarks, load_session, read_json, session_snaps
 from PIL import Image, ImageTk, ImageGrab, ImageDraw, ImageFont
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote_plus, urlsplit, urlunsplit, parse_qsl, urlencode
+from urllib.parse import quote, quote_plus, urlsplit, urlunsplit, parse_qsl, urlencode
 from privacy_core import strip_tracking_parameters, upgrade_to_https
 import loopback_policy
 
@@ -319,6 +319,318 @@ def _state_root_for_profile(profile=None):
     return root if profile == "Default" else root / "Profiles" / profile
 
 
+DEFAULT_BROWSER_REGISTERED_NAME = "Tekzite Browser"
+DEFAULT_BROWSER_CLIENT_KEY = "TekziteBrowser"
+DEFAULT_BROWSER_URL_PROGID = "TekziteBrowserURL"
+DEFAULT_BROWSER_HTML_PROGID = "TekziteBrowserHTML"
+
+
+def _requested_launch_target(argv=None):
+    """Return a URL/file target supplied by Windows shell activation.
+
+    Windows launches a registered desktop browser with the selected URL or HTML
+    file as a positional argument.  Keep Tekzite's own switches out of this path
+    so profiles/private mode continue to work normally.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    skip_next = False
+    for item in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+        if raw == "--profile":
+            skip_next = True
+            continue
+        if raw.startswith("--profile=") or raw in {"--private", "--register-browser"}:
+            continue
+        if raw.startswith("--"):
+            continue
+        lowered = raw.lower()
+        if lowered.startswith(("http://", "https://", "file://")):
+            return raw
+        try:
+            candidate = Path(raw).expanduser()
+            if candidate.is_file() and candidate.suffix.lower() in {".htm", ".html"}:
+                return candidate.resolve().as_uri()
+        except Exception:
+            pass
+    return None
+
+
+def _browser_shell_command(executable=None, script_path=None, *, frozen=None, include_target=True):
+    """Build the command Windows stores for Tekzite URL/file activation."""
+    executable = str(executable or sys.executable)
+    if frozen is None:
+        frozen = bool(getattr(sys, "frozen", False))
+    parts = [f'"{executable}"']
+    if not frozen:
+        script_path = str(script_path or Path(__file__).resolve())
+        parts.append(f'"{script_path}"')
+    if include_target:
+        parts.append('"%1"')
+    return " ".join(parts)
+
+
+def _tekzite_default_browser_registry_plan(executable=None, script_path=None, *, frozen=None):
+    """Return HKCU registry values required for Windows Default Apps."""
+    executable = str(executable or sys.executable)
+    client = rf"Software\Clients\StartMenuInternet\{DEFAULT_BROWSER_CLIENT_KEY}"
+    capabilities = client + r"\Capabilities"
+    classes = r"Software\Classes"
+    icon = f'"{executable}",0'
+    open_target = _browser_shell_command(executable, script_path, frozen=frozen, include_target=True)
+    open_browser = _browser_shell_command(executable, script_path, frozen=frozen, include_target=False)
+    app_exe_name = Path(executable).name or "TekziteBrowser.exe"
+    app_key = rf"{classes}\Applications\{app_exe_name}"
+
+    entries = [
+        (client, "", DEFAULT_BROWSER_REGISTERED_NAME),
+        (client + r"\DefaultIcon", "", icon),
+        (client + r"\shell\open\command", "", open_browser),
+        (capabilities, "ApplicationName", DEFAULT_BROWSER_REGISTERED_NAME),
+        (capabilities, "ApplicationDescription", "Tekzite Browser - Chromium rendered, privacy-focused Windows browser."),
+        (capabilities, "ApplicationIcon", icon),
+        (capabilities + r"\FileAssociations", ".htm", DEFAULT_BROWSER_HTML_PROGID),
+        (capabilities + r"\FileAssociations", ".html", DEFAULT_BROWSER_HTML_PROGID),
+        (capabilities + r"\URLAssociations", "http", DEFAULT_BROWSER_URL_PROGID),
+        (capabilities + r"\URLAssociations", "https", DEFAULT_BROWSER_URL_PROGID),
+        (capabilities + r"\StartMenu", "StartMenuInternet", DEFAULT_BROWSER_CLIENT_KEY),
+        (r"Software\RegisteredApplications", DEFAULT_BROWSER_REGISTERED_NAME, capabilities),
+        (rf"{classes}\{DEFAULT_BROWSER_URL_PROGID}", "", "Tekzite Browser URL"),
+        (rf"{classes}\{DEFAULT_BROWSER_URL_PROGID}", "URL Protocol", ""),
+        (rf"{classes}\{DEFAULT_BROWSER_URL_PROGID}\DefaultIcon", "", icon),
+        (rf"{classes}\{DEFAULT_BROWSER_URL_PROGID}\shell\open\command", "", open_target),
+        (rf"{classes}\{DEFAULT_BROWSER_HTML_PROGID}", "", "Tekzite Browser HTML Document"),
+        (rf"{classes}\{DEFAULT_BROWSER_HTML_PROGID}\DefaultIcon", "", icon),
+        (rf"{classes}\{DEFAULT_BROWSER_HTML_PROGID}\shell\open\command", "", open_target),
+        (app_key, "FriendlyAppName", DEFAULT_BROWSER_REGISTERED_NAME),
+        (app_key + r"\shell\open\command", "", open_target),
+        (app_key + r"\SupportedTypes", ".htm", ""),
+        (app_key + r"\SupportedTypes", ".html", ""),
+    ]
+    return entries
+
+
+def _register_tekzite_default_browser(executable=None):
+    """Register Tekzite as an available per-user browser on Windows."""
+    if os.name != "nt":
+        raise OSError("Default-browser registration is only available on Windows.")
+    import winreg
+
+    frozen = bool(getattr(sys, "frozen", False))
+    executable = str(executable or sys.executable)
+    for key_path, value_name, value_data in _tekzite_default_browser_registry_plan(
+        executable, Path(__file__).resolve(), frozen=frozen
+    ):
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, str(value_data))
+
+    # Tell Explorer that new association choices are available.
+    try:
+        import ctypes
+        SHCNE_ASSOCCHANGED = 0x08000000
+        SHCNF_IDLIST = 0x0000
+        ctypes.windll.shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+    except Exception:
+        pass
+    return executable
+
+
+def _windows_user_choice_progid(association, *, winreg_module=None):
+    """Return Windows' current per-user ProgId for a URL/file association.
+
+    This is deliberately read-only. Windows protects UserChoice with a hash and
+    expects the user to make the final default-app selection in Settings.
+    """
+    association = str(association or "").strip().lower()
+    if not association:
+        return None
+    if winreg_module is None:
+        if os.name != "nt":
+            return None
+        import winreg as winreg_module
+
+    if association in {"http", "https"}:
+        key_path = (
+            "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\"
+            + association
+            + "\\UserChoice"
+        )
+    elif association in {".htm", ".html"}:
+        key_path = (
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\"
+            + association
+            + "\\UserChoice"
+        )
+    else:
+        raise ValueError(f"Unsupported browser association: {association}")
+
+    try:
+        with winreg_module.OpenKey(winreg_module.HKEY_CURRENT_USER, key_path, 0, winreg_module.KEY_READ) as key:
+            value, _kind = winreg_module.QueryValueEx(key, "ProgId")
+    except (FileNotFoundError, OSError):
+        return None
+    value = str(value or "").strip()
+    return value or None
+
+
+def _windows_effective_association_executable(association):
+    """Return the executable Windows Shell currently uses for an association.
+
+    UserChoice's ProgId is not a stable identity for a desktop browser. Windows
+    can legitimately store an ``Applications\\some-browser.exe`` ProgId (or
+    another app-specific ProgId) even when the browser was registered through
+    Default Apps. Ask the Shell for the *effective executable* as the primary
+    signal and keep UserChoice only as diagnostic/fallback information.
+    """
+    if os.name != "nt":
+        return None
+    association = str(association or "").strip().lower()
+    if association not in {"http", "https", ".htm", ".html"}:
+        raise ValueError(f"Unsupported browser association: {association}")
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        ASSOCF_NONE = 0x00000000
+        ASSOCSTR_EXECUTABLE = 2
+        shlwapi = ctypes.WinDLL("shlwapi", use_last_error=True)
+        fn = shlwapi.AssocQueryStringW
+        fn.argtypes = [
+            wintypes.DWORD, wintypes.DWORD, wintypes.LPCWSTR,
+            wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+        ]
+        fn.restype = ctypes.c_long
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        hr = int(fn(ASSOCF_NONE, ASSOCSTR_EXECUTABLE, association, "open", buf, ctypes.byref(size)))
+        if hr != 0:
+            return None
+        value = str(buf.value or "").strip().strip('"')
+        return value or None
+    except Exception:
+        return None
+
+
+def _looks_like_tekzite_executable(path):
+    """Recognize installed and versioned Tekzite Windows executable names."""
+    try:
+        raw = str(path or "").strip().strip('"').replace("\\", "/")
+        name = raw.rsplit("/", 1)[-1].lower()
+    except Exception:
+        return False
+    compact = re.sub(r"[^a-z0-9]+", "", name)
+    return compact.startswith("tekzitebrowser") and compact.endswith("exe")
+
+
+def _tekzite_progid_matches(progid, *, executable=None):
+    """Return True for both Tekzite's stable ProgIds and Windows app ProgIds."""
+    value = str(progid or "").strip()
+    if not value:
+        return False
+    lowered = value.lower()
+    if lowered in {DEFAULT_BROWSER_URL_PROGID.lower(), DEFAULT_BROWSER_HTML_PROGID.lower()}:
+        return True
+    if lowered.startswith("applications\\"):
+        candidate = value.split("\\")[-1]
+        if _looks_like_tekzite_executable(candidate):
+            return True
+        if executable and candidate.lower() == Path(str(executable)).name.lower():
+            return True
+    return False
+
+
+def _tekzite_default_browser_status(*, winreg_module=None, executable_resolver=None, executable=None):
+    """Describe whether Windows currently routes web links to Tekzite.
+
+    The effective Shell handler is authoritative. The raw UserChoice ProgId is
+    retained for diagnostics because Windows 11 may represent the same browser
+    with a different ProgId than the one Tekzite registered itself with.
+    """
+    supported = os.name == "nt" or winreg_module is not None or executable_resolver is not None
+    if not supported:
+        return {
+            "supported": False,
+            "is_default": False,
+            "http": None,
+            "https": None,
+            "html": None,
+            "htm": None,
+        }
+
+    values = {
+        name: _windows_user_choice_progid(name, winreg_module=winreg_module)
+        for name in ("http", "https", ".html", ".htm")
+    }
+    resolver = executable_resolver or _windows_effective_association_executable
+    effective = {}
+    for name in ("http", "https", ".html", ".htm"):
+        try:
+            effective[name] = resolver(name)
+        except Exception:
+            effective[name] = None
+
+    current_executable = str(executable or sys.executable)
+
+    def association_is_tekzite(name):
+        # Preferred path: ask the Windows Shell which executable would actually
+        # be launched. This also handles Applications\TekziteBrowser.exe and
+        # versioned standalone release EXEs.
+        handler_exe = effective.get(name)
+        if handler_exe and _looks_like_tekzite_executable(handler_exe):
+            return True
+        try:
+            if handler_exe and os.path.normcase(os.path.realpath(handler_exe)) == os.path.normcase(os.path.realpath(current_executable)):
+                return True
+        except Exception:
+            pass
+        # Fallback for test environments and systems where Shell association
+        # lookup is unavailable. Do not require one exact UserChoice ProgId.
+        return _tekzite_progid_matches(values.get(name), executable=current_executable)
+
+    http_default = association_is_tekzite("http")
+    https_default = association_is_tekzite("https")
+    html_default = association_is_tekzite(".html")
+    htm_default = association_is_tekzite(".htm")
+    return {
+        "supported": True,
+        "is_default": bool(http_default and https_default),
+        "http": values["http"],
+        "https": values["https"],
+        "html": values[".html"],
+        "htm": values[".htm"],
+        "http_executable": effective["http"],
+        "https_executable": effective["https"],
+        "html_executable": effective[".html"],
+        "htm_executable": effective[".htm"],
+        "http_default": http_default,
+        "https_default": https_default,
+        "html_default": html_default,
+        "htm_default": htm_default,
+    }
+
+
+def _default_apps_settings_uri():
+    return "ms-settings:defaultapps?registeredAppUser=" + quote(DEFAULT_BROWSER_REGISTERED_NAME, safe="")
+
+
+def _open_tekzite_default_apps_settings():
+    """Open Windows 11 Default Apps directly on Tekzite's registered entry."""
+    if os.name != "nt":
+        raise OSError("Default Apps settings are only available on Windows.")
+    uri = _default_apps_settings_uri()
+    try:
+        os.startfile(uri)
+    except Exception:
+        # Older Windows builds may not understand registeredAppUser. The generic
+        # Default Apps page still lets the user search for Tekzite Browser.
+        os.startfile("ms-settings:defaultapps")
+    return uri
+
+
 def _preferences_path():
     base = _state_root_for_profile()
     try:
@@ -454,7 +766,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.38"
+BROWSER_VERSION = "10.5.42"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -1266,6 +1578,7 @@ class BrowserApp(BrowserFeatures):
         self._profile_name = _requested_profile_name()
         os.environ["TEKZITE_BROWSER_PROFILE"] = self._profile_name
         self._private_mode = "--private" in sys.argv[1:]
+        self._external_launch_target = _requested_launch_target()
         self._private_profile_dir = None
         self._privacy_profile_dir = None
         # Clean abandoned private/lockdown trees from crashed prior sessions.
@@ -2013,13 +2326,21 @@ class BrowserApp(BrowserFeatures):
         self._schedule_page_state_poll(initial=True)
 
         startup_mode = getattr(self, "preferences", DEFAULT_PREFERENCES).get("startup", "homepage")
+        external_target = getattr(self, "_external_launch_target", None)
         startup_action = (
-            (lambda: self.navigate_to(self._homepage_url(), add_history=True))
-            if startup_mode == "homepage" else self._focus_address
+            (lambda target=external_target: self.navigate_to(target, add_history=True, reuse_existing=False))
+            if external_target else
+            ((lambda: self.navigate_to(self._homepage_url(), add_history=True))
+             if startup_mode == "homepage" else self._focus_address)
         )
-        # v9.2: start Chromium/homepage preparation on the first Tk idle turn.
-        # The old fixed 250 ms chrome-paint delay was pure startup latency.
-        self.root.after_idle(lambda: self._feature_startup(lambda: self._restore_startup_tabs(startup_action)))
+        # Shell activation must win over session restore. A Windows http/https
+        # click should open exactly the requested URL, never an old session.
+        if external_target:
+            self.root.after_idle(lambda: self._feature_startup(startup_action))
+        else:
+            # v9.2: start Chromium/homepage preparation on the first Tk idle turn.
+            # The old fixed 250 ms chrome-paint delay was pure startup latency.
+            self.root.after_idle(lambda: self._feature_startup(lambda: self._restore_startup_tabs(startup_action)))
 
     def _restore_startup_tabs(self, fallback):
         if getattr(self, "_private_mode", False) or self.preferences.get("privacy_lockdown", False):
@@ -2307,6 +2628,42 @@ class BrowserApp(BrowserFeatures):
         title = re.sub(r"\s*[—-]\s*v\d+(?:\.\d+){1,3}\s*$", "", title).strip()
         return title or "Tekzite"
 
+    def _screen_center_geometry(self, win, width=None, height=None, margin=16):
+        """Return a deterministic screen-centered geometry for an app dialog.
+
+        Tekzite dialogs are frameless, so relying on Tk/Windows default placement
+        can scatter otherwise identical windows around the desktop. Keep all
+        app-owned dialogs in one coordinate space: measure in Tk pixels, clamp
+        the requested size to the visible screen, then center that final box.
+        """
+        try:
+            win.update_idletasks()
+            screen_w = max(1, int(win.winfo_screenwidth()))
+            screen_h = max(1, int(win.winfo_screenheight()))
+            if width is None:
+                width = max(1, int(win.winfo_width()), int(win.winfo_reqwidth()))
+            if height is None:
+                height = max(1, int(win.winfo_height()), int(win.winfo_reqheight()))
+            width = min(max(1, int(width)), max(1, screen_w - int(margin) * 2))
+            height = min(max(1, int(height)), max(1, screen_h - int(margin) * 2))
+            x = max(int(margin), (screen_w - width) // 2)
+            y = max(int(margin), (screen_h - height) // 2)
+            return f"{width}x{height}+{x}+{y}"
+        except Exception:
+            width = max(1, int(width or 640))
+            height = max(1, int(height or 420))
+            return f"{width}x{height}"
+
+    def _center_dialog_on_screen(self, win, width=None, height=None, margin=16):
+        """Center a Tekzite-owned dialog using the shared Settings placement."""
+        geometry = self._screen_center_geometry(win, width, height, margin)
+        try:
+            win.geometry(geometry)
+            win._tekzite_screen_center_geometry = geometry
+        except Exception:
+            pass
+        return geometry
+
     def _bind_frameless_dialog_drag(self, win, *handles):
         """Let Tekzite-owned frameless dialogs move from their in-window header.
 
@@ -2497,11 +2854,13 @@ class BrowserApp(BrowserFeatures):
                     return
                 if getattr(w, "_tekzite_branded_dialog", False):
                     self._apply_about_style_to_dialog(w)
-                # Some dialogs, notably Settings, need to finish a custom
-                # monitor/root-relative layout before motion captures geometry.
-                # They opt out here and start the same animation themselves once
-                # their final size is locked.
+                # v10.5.39: every ordinary Tekzite dialog is positioned by one
+                # shared screen-center path after its final header/content size
+                # is known, but before the opening animation captures geometry.
+                # Settings opts out because it has a larger custom size; its
+                # layout path calls the exact same centering helper explicitly.
                 if getattr(w, "_tekzite_auto_animate", True):
+                    self._center_dialog_on_screen(w)
                     self._animate_toplevel_in(w, duration=duration, slide=slide)
             except Exception:
                 pass
@@ -8760,6 +9119,28 @@ class BrowserApp(BrowserFeatures):
         refresh()
         return "break"
 
+    def _make_tekzite_default_browser(self, parent=None, refresh_callback=None):
+        if os.name != "nt":
+            self._show_message("info", "Default Browser", "Default-browser registration is available on Windows only.", parent=parent or self.root)
+            return "break"
+        try:
+            _register_tekzite_default_browser()
+            uri = _open_tekzite_default_apps_settings()
+            self.status_var.set("Tekzite registered with Windows Default Apps — confirm Set default in Windows Settings")
+            if callable(refresh_callback):
+                try:
+                    (parent or self.root).after(750, refresh_callback)
+                except Exception:
+                    pass
+            return uri
+        except Exception as exc:
+            self._show_message(
+                "error", "Default Browser",
+                f"Tekzite could not register with Windows Default Apps:\n{exc}",
+                parent=parent or self.root,
+            )
+            return "break"
+
     def show_preferences(self):
         # Settings owns its final geometry because it intentionally occupies most
         # of the browser height. Delay automatic motion until that geometry is
@@ -8952,6 +9333,73 @@ class BrowserApp(BrowserFeatures):
         tk.Label(outer, text="Off is the privacy-first default. Full can include destination hosts and plain-HTTP paths.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w")
 
+        section("Default browser")
+        tk.Label(outer, text="Register Tekzite for web links and HTML files, then choose it in Windows Default Apps.",
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)),
+                 wraplength=560, justify="left").pack(anchor="w", pady=(0, 5))
+        default_browser_status_var = tk.StringVar(value="Checking Windows default browser…" if os.name == "nt" else "Default-browser detection is available on Windows only.")
+        default_browser_status_label = tk.Label(
+            outer, textvariable=default_browser_status_var, fg=self.ui["muted"], bg=self.ui["bg"],
+            font=(self._ui_font_family, self._font_size(9), "bold"), wraplength=560, justify="left"
+        )
+        default_browser_status_label.pack(anchor="w", pady=(0, 7))
+        default_browser_button = tk.Button(
+            outer, text="Make Tekzite default browser…",
+            bg=self.ui["accent"], fg="#ffffff", activebackground=self.ui["accent_hover"],
+            activeforeground="#ffffff", relief="flat", bd=0, padx=16, pady=7, cursor="hand2"
+        )
+        default_browser_button.pack(anchor="w", pady=(0, 4))
+
+        def refresh_default_browser_status():
+            try:
+                if not win.winfo_exists():
+                    return
+                status = _tekzite_default_browser_status()
+                if not status.get("supported"):
+                    default_browser_status_var.set("Default-browser detection is available on Windows only.")
+                    default_browser_button.configure(text="Make Tekzite default browser…", state="disabled", cursor="arrow")
+                    return
+                if status.get("is_default"):
+                    default_browser_status_var.set("✓ Tekzite is your default browser for HTTP and HTTPS.")
+                    default_browser_status_label.configure(fg=self.ui["accent_hover"])
+                    default_browser_button.configure(text="Tekzite is the default browser", state="disabled", cursor="arrow")
+                else:
+                    http_ok = bool(status.get("http_default"))
+                    https_ok = bool(status.get("https_default"))
+                    if http_ok or https_ok:
+                        missing = "HTTPS" if http_ok else "HTTP"
+                        default_browser_status_var.set(f"Tekzite is only partially set as default. {missing} still uses another browser.")
+                    else:
+                        default_browser_status_var.set("Tekzite is not currently the default browser.")
+                    default_browser_status_label.configure(fg=self.ui["muted"])
+                    default_browser_button.configure(text="Make Tekzite default browser…", state="normal", cursor="hand2")
+            except Exception:
+                default_browser_status_var.set("Could not read the current Windows default-browser association.")
+                default_browser_status_label.configure(fg=self.ui["muted"])
+                default_browser_button.configure(text="Open Windows Default Apps…", state="normal", cursor="hand2")
+
+        default_browser_button.configure(
+            command=lambda: self._make_tekzite_default_browser(parent=win, refresh_callback=refresh_default_browser_status)
+        )
+        tk.Label(outer, text="Windows requires your confirmation. Tekzite asks the Windows Shell which app actually handles HTTP/HTTPS and updates this status when you return from Default Apps.",
+                 fg=self.ui["muted_dim"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)),
+                 wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
+
+        # Refresh immediately, whenever Settings regains focus after Windows
+        # Default Apps, and briefly in the background in case the focus event is
+        # swallowed by the frameless/native DWM window arrangement.
+        refresh_default_browser_status()
+        win.bind("<FocusIn>", lambda _event: refresh_default_browser_status(), add="+")
+        def poll_default_browser_status():
+            try:
+                if not win.winfo_exists():
+                    return
+                refresh_default_browser_status()
+                win.after(1200, poll_default_browser_status)
+            except Exception:
+                return
+        win.after(1200, poll_default_browser_status)
+
         section("Downloads & updates")
         tk.Checkbutton(outer, text="Ask where to save each download (restart required)", variable=download_prompt,
                        bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
@@ -9059,11 +9507,6 @@ class BrowserApp(BrowserFeatures):
 
                 screen_w = max(1, int(win.winfo_screenwidth()))
                 screen_h = max(1, int(win.winfo_screenheight()))
-                root_x = int(self.root.winfo_rootx())
-                root_y = int(self.root.winfo_rooty())
-                root_w = max(1, int(self.root.winfo_width()))
-                root_h = max(1, int(self.root.winfo_height()))
-
                 requested_w = max(dialog_width, int(shell.winfo_reqwidth()) + 2)
                 # Keep a predictable large footprint on every open. 88% leaves
                 # breathing room around the frameless shell while 1120 remains
@@ -9072,17 +9515,14 @@ class BrowserApp(BrowserFeatures):
                 dialog_w = min(requested_w, max(560, screen_w - 64))
                 dialog_h = min(requested_h, max(620, screen_h - 64))
 
-                # Prefer centering over the browser, but clamp the final box to
-                # the Tk screen so a partly off-screen browser cannot drag the
-                # Settings dialog outside the visible desktop.
-                if root_w < 320 or root_h < 240:
-                    center_x = screen_w // 2
-                    center_y = screen_h // 2
-                else:
-                    center_x = root_x + root_w // 2
-                    center_y = root_y + root_h // 2
-                x = max(16, min(center_x - dialog_w // 2, screen_w - dialog_w - 16))
-                y = max(16, min(center_y - dialog_h // 2, screen_h - dialog_h - 16))
+                # v10.5.39: Settings and every other Tekzite dialog now share
+                # the same true screen-center placement instead of mixing
+                # browser-relative and Windows-default positions.
+                centered = self._screen_center_geometry(win, dialog_w, dialog_h, 16)
+                match = re.match(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)$", centered)
+                if not match:
+                    raise ValueError("could not resolve screen-centered Settings geometry")
+                dialog_w, dialog_h, x, y = map(int, match.groups())
             except Exception:
                 dialog_w, dialog_h = dialog_width, 820
                 x, y = 40, 40

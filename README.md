@@ -2,9 +2,28 @@
 
 Tekzite Browser is an experimental Windows desktop browser shell built in Python/Tk around a real Chromium renderer. Tekzite keeps its own tabs, omnibox, menus, preferences and interaction layer while Chromium handles web standards, JavaScript, media, cookies, canvas, WebGL and page rendering.
 
-> **Current release:** v10.5.38 UltraSpeed for Windows  
+> **Current release:** v10.5.42 UltraSpeed for Windows  
 > **Platform:** Windows 10/11  
 > **Status:** experimental, actively developed
+
+## New in v10.5.42
+
+- Fixes default-browser detection when Windows represents Tekzite with an `Applications\...exe` or other effective ProgID instead of the literal `TekziteBrowserURL` ProgID.
+- Uses the Windows Shell's effective association executable for HTTP/HTTPS as the primary detection signal, with the read-only `UserChoice` ProgId retained as a fallback/diagnostic.
+- Recognizes both installed `TekziteBrowser.exe` and versioned standalone Tekzite release executables.
+
+## New in v10.5.41
+
+- Detects the real Windows HTTP/HTTPS default-browser associations from the per-user `UserChoice` registry state.
+- Settings shows whether Tekzite is fully default, partially assigned, or not default, and updates automatically after returning from Windows Default Apps.
+- Detection is read-only; Windows retains control of the final default-app choice.
+
+## New in v10.5.40
+
+- Registers Tekzite as an available Windows browser for HTTP, HTTPS, .htm and .html using per-user Default Apps registration.
+- Adds a **Make Tekzite default browser…** control in Settings that opens Windows 11 directly to Tekzite Browser in Default Apps for user confirmation.
+- Accepts web URLs and local HTML files passed by Windows on the command line and gives those shell-activation targets priority over ordinary startup/session restore.
+- Adds equivalent per-user browser registration to the Inno Setup installer and notifies Windows that associations changed.
 
 ## Highlights
 
@@ -214,6 +233,12 @@ Bookmarks and session addresses are stored locally alongside preferences, separa
 Build on Windows with `powershell -ExecutionPolicy Bypass -File .\build_windows.ps1`, or run `python main.py` after installing requirements.
 
 
+
+## New in v10.5.39
+
+- Centers every Tekzite-owned dialog on the screen using one shared geometry helper before its opening animation begins.
+- Settings now uses the same screen-center helper while retaining its larger deterministic size, scrollbar and pinned footer.
+- Removes inconsistent browser-relative/default dialog placement without changing the native file/color picker behavior.
 
 ## New in v10.5.38
 

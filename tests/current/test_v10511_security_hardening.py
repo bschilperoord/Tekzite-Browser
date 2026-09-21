@@ -16,7 +16,7 @@ SECURITY = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.38"
+    assert main.BROWSER_VERSION == "10.5.42"
 
 
 def test_stale_pid_requires_profile_chromium_verification():

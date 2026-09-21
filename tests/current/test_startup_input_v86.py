@@ -13,5 +13,5 @@ def test_input_channel_is_prewarmed_before_native_open_returns():
 
 
 def test_release_version_is_87():
-    assert 'BROWSER_VERSION = "10.5.38"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.42"' in MAIN
 

@@ -1,3 +1,40 @@
+# Tekzite Browser v10.5.42
+
+## Effective Windows default-browser detection
+
+- Stops assuming the HTTP/HTTPS `UserChoice` ProgId must literally equal `TekziteBrowserURL`.
+- Queries the Windows Shell for the executable that actually owns each effective association.
+- Recognizes Windows `Applications\...exe` ProgIds and versioned standalone Tekzite executables.
+- Keeps `UserChoice` read-only and uses it only as a fallback/diagnostic signal.
+
+# Tekzite Browser v10.5.41
+
+## Default-browser detection
+
+- Reads Windows' actual per-user HTTP and HTTPS `UserChoice` ProgIds to detect whether Tekzite is currently the default browser.
+- Settings now shows a live default-browser state instead of assuming that opening Default Apps succeeded.
+- Detects partial configurations when only HTTP or HTTPS is assigned to Tekzite.
+- Refreshes the state immediately, when Settings regains focus, and periodically while the Settings dialog remains open.
+- Keeps association detection read-only; Windows still owns and protects the final default-app choice.
+
+# Tekzite Browser v10.5.40
+
+## Windows default-browser integration
+
+- Registers Tekzite with Windows Default Apps for HTTP, HTTPS, .htm and .html without attempting to bypass Windows user-choice protection.
+- Adds a Settings button that performs per-user registration, sends an association-change notification, and opens Tekzite's Windows 11 Default Apps page for confirmation.
+- Handles Windows shell activation by consuming URL/HTML targets from argv and opening them instead of restoring an unrelated previous session.
+- Extends the Inno Setup installer with the same per-user browser capabilities/ProgID registration and `ChangesAssociations=yes`.
+
+# Tekzite Browser v10.5.39
+
+## Screen-centered dialogs
+
+- Adds one shared Tk-coordinate screen-centering helper for Tekzite-owned dialogs.
+- Applies centering after the shared About-style header and dialog body have established their final requested size, then starts the opening animation from that centered position.
+- Moves Settings onto the same screen-center geometry path while preserving its deterministic large footprint, scrollbar and pinned Save/Cancel footer.
+- Keeps native Windows file/folder/color pickers native and parented to their centered Tekzite dialog.
+
 # Tekzite Browser v10.5.38
 
 ## Deterministic DWM viewport resizing

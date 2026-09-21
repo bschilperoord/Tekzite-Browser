@@ -12,7 +12,7 @@ NET = (ROOT / 'engine' / 'net.py').read_text(encoding='utf-8')
 
 
 def test_v101_release_number():
-    assert main.BROWSER_VERSION == '10.5.38'
+    assert main.BROWSER_VERSION == '10.5.42'
 
 
 def test_extension_entries_are_normalized_and_deduplicated(tmp_path):

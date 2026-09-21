@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_is_v1041():
-    assert main.BROWSER_VERSION == "10.5.38"
+    assert main.BROWSER_VERSION == "10.5.42"
 
 
 def test_visual_polish_defaults_use_aurora_preset():
