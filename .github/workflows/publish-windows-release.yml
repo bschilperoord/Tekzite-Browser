@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  TARGET_VERSION: "10.5.38"
+  TARGET_VERSION: "10.5.42"
 
 jobs:
   publish:
@@ -36,13 +36,13 @@ jobs:
           }
           exit 0
 
-      - name: Apply v10.5.38 source update
+      - name: Apply v10.5.42 source update
         if: steps.release_check.outputs.exists != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $gzipPath = ".release\v10.5.38.logic.patch.gz"
-          $patchPath = ".release\v10.5.38.logic.patch"
+          $gzipPath = ".release\v10.5.42.patch.gz"
+          $patchPath = ".release\v10.5.42.patch"
           if (-not (Test-Path $gzipPath)) { throw "Release patch payload is missing: $gzipPath" }
 
           $input = [System.IO.File]::OpenRead($gzipPath)
@@ -55,131 +55,14 @@ jobs:
             $input.Dispose()
           }
 
-          git apply --reject -p2 --ignore-space-change --ignore-whitespace $patchPath
-          Get-ChildItem -Path . -Recurse -Filter "*.rej" -ErrorAction SilentlyContinue | Remove-Item -Force
+          git apply --check --ignore-space-change --ignore-whitespace $patchPath
+          if ($LASTEXITCODE -ne 0) { throw "v10.5.42 source patch does not apply cleanly" }
+          git apply --ignore-space-change --ignore-whitespace $patchPath
+          if ($LASTEXITCODE -ne 0) { throw "v10.5.42 source patch failed" }
           Remove-Item ".release" -Recurse -Force
 
-          @'
-          from pathlib import Path
-          import re
-
-          # These three files differ slightly from the intermediate source ZIP
-          # used to make the patch. Update their release metadata explicitly so
-          # the published v10.5.33 Windows compatibility fixes remain intact.
-          installer_readme_path = Path("installer/README.txt")
-          installer_readme = installer_readme_path.read_text(encoding="utf-8")
-          installer_readme = installer_readme.replace(
-              "Tekzite-Browser-Setup-10.5.33.exe",
-              "Tekzite-Browser-Setup-10.5.38.exe",
-          )
-          installer_readme_path.write_text(installer_readme, encoding="utf-8")
-
-          startup_test_path = Path("tests/current/test_startup_input_v86.py")
-          startup_test = startup_test_path.read_text(encoding="utf-8")
-          startup_test = startup_test.replace(
-              'BROWSER_VERSION = "10.5.33"',
-              'BROWSER_VERSION = "10.5.38"',
-          )
-          startup_test_path.write_text(startup_test, encoding="utf-8")
-
-          stability_test_path = Path("tests/current/test_stability_v1011.py")
-          stability_test = stability_test_path.read_text(encoding="utf-8")
-          replacements = {
-              "main.BROWSER_VERSION == '10.5.33'": "main.BROWSER_VERSION == '10.5.38'",
-              'version="10.5.33.0"': 'version="10.5.38.0"',
-              "extension['version'] == '10.5.33'": "extension['version'] == '10.5.38'",
-              "'filevers=(10, 5, 8, 0)'": "'filevers=(10, 5, 38, 0)'",
-              "u'ProductVersion', u'10.5.33'": "u'ProductVersion', u'10.5.38'",
-          }
-          for old, new in replacements.items():
-              if old not in stability_test:
-                  raise SystemExit(f"Expected release metadata not found in stability test: {old}")
-              stability_test = stability_test.replace(old, new)
-          stability_test_path.write_text(stability_test, encoding="utf-8")
-
-          version_info_path = Path("tekzite_version_info.txt")
-          version_info = version_info_path.read_text(encoding="utf-8")
-          version_info = re.sub(r"filevers=\(10,\s*5,\s*\d+,\s*0\)", "filevers=(10, 5, 38, 0)", version_info)
-          version_info = re.sub(r"prodvers=\(10,\s*5,\s*\d+,\s*0\)", "prodvers=(10, 5, 38, 0)", version_info)
-          version_info = version_info.replace("10.5.33", "10.5.38").replace("10.5.34", "10.5.38")
-          version_info_path.write_text(version_info, encoding="utf-8")
-
-          readme_path = Path("README.md")
-          readme = readme_path.read_text(encoding="utf-8")
-          readme = re.sub(
-              r"> \*\*Current release:\*\* v[0-9.]+ UltraSpeed for Windows",
-              "> **Current release:** v10.5.38 UltraSpeed for Windows",
-              readme,
-              count=1,
-          )
-          readme_section = """## New in v10.5.38
-
-          - Makes the DWM destination rectangle the authoritative Chromium viewport during window resizing.
-          - Fixes maximize/restore/snap cases where Chromium could remain at the old size while Tekzite had already grown, leaving a large white area beside or below the page.
-          - Reconciles DWM size on every non-drag root Configure event while filtering pure moves through the existing viewport cache.
-          - Adds a final delayed resize pass after maximize/restore so Windows and Tk layout settling cannot leave the DWM surface stale.
-
-          ## New in v10.5.37
-
-          - Makes Settings sizing deterministic in Tk coordinate space and keeps its scrollable body with a pinned Save/Cancel footer.
-
-          """
-          if "## New in v10.5.38" not in readme:
-              anchor = "## New in v10.5.32"
-              if anchor not in readme:
-                  raise SystemExit("README release anchor not found")
-              readme = readme.replace(anchor, readme_section + anchor, 1)
-          readme_path.write_text(readme, encoding="utf-8")
-
-          changelog_path = Path("CHANGELOG.md")
-          changelog = changelog_path.read_text(encoding="utf-8")
-          changelog_header = """# Tekzite Browser v10.5.38
-
-          ## Deterministic DWM viewport resizing
-
-          - Treats the committed DWM destination rectangle as the authoritative Chromium viewport during window resize.
-          - Fixes maximize/restore/snap cases where the DWM popup grew before Tk's `edge_host`, leaving Chromium at the old size and exposing a large white remainder.
-          - Root Configure events now request resize reconciliation; pure window moves remain cheap because unchanged viewport sizes are filtered before Chromium is touched.
-          - Adds an immediate and delayed maximize/restore reconciliation pass to catch Windows/Tk layout settling without continuous resize spam.
-
-          # Tekzite Browser v10.5.37
-
-          ## Deterministic Settings sizing
-
-          - Replaces competing Settings sizing paths with one authoritative Tk-screen-space geometry calculation.
-          - Opens Settings at a stable large height (88% of the Tk screen, capped at 1120 px) instead of deriving height from timing-sensitive widget/window measurements.
-          - Centers over the browser but clamps the frameless dialog to the visible Tk screen.
-          - Re-applies the exact final geometry immediately after mapping and after the opening animation so Windows first-map/DPI negotiation cannot leave the dialog shorter on some opens.
-          - Keeps the vertical scrollbar, mouse-wheel scrolling and pinned Save/Cancel footer.
-
-          # Tekzite Browser v10.5.36
-
-          ## Full-height Settings dialog fix
-
-          - Sizes Settings in Tk's own coordinate space relative to the main browser window, avoiding mixed-DPI Win32/Tk work-area mismatches that could collapse the dialog to roughly half-height.
-          - Raises the preferred Settings height to 1120 px and lets it use nearly the full visible browser height with a small vertical margin.
-          - Applies the shared Tekzite dialog header before final sizing and delays the opening animation until the final geometry is locked.
-          - Keeps the vertical scrollbar, mouse-wheel scrolling and pinned Save/Cancel footer.
-
-          # Tekzite Browser v10.5.35
-
-          ## Extra-tall Settings dialog
-
-          - Raises the preferred Settings height from 860 px to 1000 px.
-          - Raises the scrollable Settings canvas height so substantially more controls are visible at once.
-          - Keeps monitor work-area clamping, the vertical scrollbar, mouse-wheel scrolling and pinned Save/Cancel footer intact.
-
-          """
-          if not changelog.startswith("# Tekzite Browser v10.5.38"):
-              changelog = changelog_header + changelog
-          changelog_path.write_text(changelog, encoding="utf-8")
-          '@ | python -
-
-          # Regression tests and version checks below gate the release. README
-          # contains intentional Markdown trailing spaces for hard line breaks.
-
-          $versionLine = Select-String -Path "main.py" -Pattern 'BROWSER_VERSION = "10\.5\.38"' -SimpleMatch:$false
-          if (-not $versionLine) { throw "main.py was not updated to v10.5.38" }
+          $versionLine = Select-String -Path "main.py" -Pattern 'BROWSER_VERSION = "10\.5\.42"' -SimpleMatch:$false
+          if (-not $versionLine) { throw "main.py was not updated to v10.5.42" }
 
       - name: Set up Python
         if: steps.release_check.outputs.exists != 'true'
@@ -210,7 +93,7 @@ jobs:
         if: steps.release_check.outputs.exists != 'true'
         run: node tests/current/test_extension_features.cjs
 
-      - name: Commit v10.5.38 source to main
+      - name: Commit v10.5.42 source to main
         if: steps.release_check.outputs.exists != 'true'
         id: source_commit
         shell: pwsh
@@ -218,12 +101,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Release Tekzite Browser v10.5.38 [skip ci]"
-          if ($LASTEXITCODE -ne 0) { throw "Could not create v10.5.38 source commit" }
+          git commit -m "Release Tekzite Browser v10.5.42 [skip ci]"
+          if ($LASTEXITCODE -ne 0) { throw "Could not create v10.5.42 source commit" }
           $sha = (git rev-parse HEAD).Trim()
           "sha=$sha" >> $env:GITHUB_OUTPUT
           git push origin HEAD:main
-          if ($LASTEXITCODE -ne 0) { throw "Could not push v10.5.38 source commit to main" }
+          if ($LASTEXITCODE -ne 0) { throw "Could not push v10.5.42 source commit to main" }
 
       - name: Build Windows x64 binary
         if: steps.release_check.outputs.exists != 'true'
@@ -269,9 +152,11 @@ jobs:
           Windows x64 release of Tekzite Browser v$version.
 
           Highlights:
-          - Fixes inconsistent DWM/Chromium viewport resizing during maximize, restore, snap and live window resize.
-          - Keeps the DWM destination rectangle authoritative so the webpage fills the browser viewport instead of leaving a white remainder.
-          - Includes the Settings scrolling and deterministic sizing work from v10.5.35-v10.5.37.
+          - Detects Tekzite's effective Windows HTTP/HTTPS default-browser handler correctly, including Applications-style and versioned executable handlers.
+          - Registers Tekzite with Windows Default Apps for HTTP, HTTPS, .htm and .html and handles URLs passed in by Windows.
+          - Shows live default-browser status in Settings.
+          - Keeps all Tekzite-owned dialogs centered consistently on screen.
+          - Includes the deterministic DWM viewport resize fixes from v10.5.38.
 
           The Windows executable is built natively on GitHub's windows-latest runner using the repository's hash-locked PyInstaller toolchain.
           "@
