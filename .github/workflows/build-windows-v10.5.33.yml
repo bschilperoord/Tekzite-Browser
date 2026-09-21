@@ -27,19 +27,7 @@ jobs:
           $path = "engine/net.py"
           $content = Get-Content $path -Raw
           $anchor = "from loopback_policy import allow_loopback_port, revoke_loopback_port, snapshot as loopback_policy_snapshot"
-          $insert = @'
-
-# ctypes.wintypes does not expose HRESULT on every supported Python build
-# (notably some packaged Windows/Python combinations). HRESULT is always a
-# signed 32-bit LONG, so keep one stable local alias instead of depending on
-# that optional wintypes attribute at runtime.
-import ctypes as _ctypes
-try:
-    from ctypes import wintypes as _ctypes_wintypes
-    HRESULT = getattr(_ctypes_wintypes, "HRESULT", _ctypes.c_int32)
-except Exception:
-    HRESULT = _ctypes.c_int32
-'@
+          $insert = "`n`n# ctypes.wintypes does not expose HRESULT on every supported Python build`n# (notably some packaged Windows/Python combinations). HRESULT is always a`n# signed 32-bit LONG, so keep one stable local alias instead of depending on`n# that optional wintypes attribute at runtime.`nimport ctypes as _ctypes`ntry:`n    from ctypes import wintypes as _ctypes_wintypes`n    HRESULT = getattr(_ctypes_wintypes, `"HRESULT`", _ctypes.c_int32)`nexcept Exception:`n    HRESULT = _ctypes.c_int32`n"
           if (-not $content.Contains("HRESULT = getattr(_ctypes_wintypes")) {
             $content = $content.Replace($anchor, $anchor + $insert)
           }
