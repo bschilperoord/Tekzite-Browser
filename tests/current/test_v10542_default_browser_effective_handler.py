@@ -5,7 +5,7 @@ from test_v10541_default_browser_detection import FakeWinreg, _url_path, _file_p
 
 
 def test_release_version_is_10542():
-    assert main.BROWSER_VERSION == "10.5.47"
+    assert main.BROWSER_VERSION == "10.5.54"
 
 
 def test_windows_applications_progid_is_recognized_as_tekzite():
@@ -33,7 +33,7 @@ def test_versioned_release_executable_is_recognized_from_effective_shell_handler
     status = main._tekzite_default_browser_status(
         winreg_module=reg,
         executable_resolver=resolver,
-        executable=r"C:\\Users\\Bas\\Downloads\\Tekzite-Browser-v10.5.47-Windows-x64.exe",
+        executable=r"C:\\Users\\Bas\\Downloads\\Tekzite-Browser-v10.5.54-Windows-x64.exe",
     )
     assert status["http_default"] is True
     assert status["https_default"] is True

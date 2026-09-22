@@ -10,7 +10,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_current_version():
-    assert main.BROWSER_VERSION == "10.5.47"
+    assert main.BROWSER_VERSION == "10.5.54"
 
 
 def test_zoom_normalization():

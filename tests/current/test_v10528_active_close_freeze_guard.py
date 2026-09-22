@@ -8,7 +8,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.47"
+    assert main.BROWSER_VERSION == "10.5.54"
 
 
 def test_active_close_keeps_dwm_mounted_during_immediate_ui_selection():

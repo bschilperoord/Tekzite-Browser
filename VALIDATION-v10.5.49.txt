@@ -1,0 +1,10 @@
+Tekzite Browser v10.5.50 validation
+
+Focus: taskbar minimize/restore must never expose the raw DWM destination window.
+
+- Hide/suspend the separate DWM destination before iconifying the frameless Tk root.
+- Prevent queued DWM reveal/geometry callbacks from remapping the popup while Tekzite is iconic.
+- Reassert the current native Tk root as the DWM popup owner after override-redirect restore.
+- Reassert WS_EX_TOOLWINDOW + WS_EX_NOACTIVATE + WS_EX_LAYERED and clear WS_EX_APPWINDOW.
+- Restore the DWM page only after the real Tekzite root has remapped and its client geometry settles.
+- Preserve Chromium/DWM bootstrap state across minimize/restore.

@@ -12,7 +12,7 @@ from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, simpledialog, filedialog, colorchooser
-from browser_features import BrowserFeatures
+from browser_features import BrowserFeatures, omnibox_suggestions
 from browser_state import load_bookmarks, load_session, read_json, session_snapshot, write_json, valid_url
 from PIL import Image, ImageTk, ImageGrab, ImageDraw, ImageFont
 from io import BytesIO
@@ -36,7 +36,7 @@ from engine.net import (
     set_embedded_chromium_presentation, set_embedded_chromium_zoom, check_embedded_chromium_zoom,
     validate_and_recover_embedded_chromium_frame, record_embedded_surface_probe, record_embedded_native_recovery, sync_embedded_chromium_native_geometry,
     warm_embedded_chromium_io_channels, stop_embedded_chromium_loading,
-    request_embedded_chromium_dwm_recrop, network_engine_debug, privacy_stats,
+    request_embedded_chromium_dwm_recrop, request_embedded_chromium_dwm_reregister, network_engine_debug, privacy_stats,
     cleanup_abandoned_temporary_profiles, remove_profile_tree,
 )
 
@@ -266,6 +266,9 @@ DEFAULT_PREFERENCES = {
     "new_tab": "blank",
     "renderer": "chromium",
     "reuse_open_tabs": True,
+    # v10.5.48: local-only omnibox suggestions. No query is sent to a remote
+    # autocomplete service; suggestions come from Tekzite-owned local/session data.
+    "omnibox_suggestions_enabled": True,
     "show_status_bar": True,
     # v4.68: real native Chromium interaction is the default. The CDP
     # screenshot surface remains available only as an explicit diagnostic mode.
@@ -718,6 +721,7 @@ def load_preferences():
     except Exception:
         prefs["sleeping_tabs_minutes"] = 30
     prefs["sleeping_tabs_enabled"] = bool(prefs.get("sleeping_tabs_enabled", True))
+    prefs["omnibox_suggestions_enabled"] = bool(prefs.get("omnibox_suggestions_enabled", True))
     prefs["download_prompt"] = bool(prefs.get("download_prompt", False))
     prefs["strict_python_loopback"] = bool(prefs.get("strict_python_loopback", True))
     if not isinstance(prefs.get("tab_groups"), dict):
@@ -766,7 +770,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.47"
+BROWSER_VERSION = "10.5.54"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -1526,6 +1530,242 @@ class _AnimatedPopupMenu:
         self._draw()
 
 
+class _OmniboxSuggestionPopup:
+    """Non-activating-looking autocomplete surface rendered above DWM.
+
+    The address Entry keeps keyboard focus.  This popup never calls focus_force,
+    which is essential because Chromium's DWM presenter and Tekzite's omnibox
+    live in separate native focus domains.
+    """
+
+    ICONS = {
+        "bookmark": "★",
+        "tab": "▣",
+        "history": "◷",
+        "recent": "↺",
+        "search": "⌕",
+    }
+
+    def __init__(self, app):
+        self.app = app
+        self.window = None
+        self.canvas = None
+        self.items = []
+        self.selected = -1
+        self.hover = None
+        self.pressed = None
+        self.rows = []
+        self.width = 1
+        self.height = 1
+        self._animation_jobs = []
+
+    @staticmethod
+    def _round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+        return _RoundedChromeButton._round_rect(canvas, x1, y1, x2, y2, radius, **kwargs)
+
+    def is_visible(self):
+        try:
+            return self.window is not None and bool(self.window.winfo_exists()) and self.window.state() != "withdrawn"
+        except Exception:
+            return False
+
+    def _hit(self, y):
+        try:
+            y = int(y)
+        except Exception:
+            return None
+        for index, top, bottom in self.rows:
+            if top <= y < bottom:
+                return index
+        return None
+
+    def _draw(self):
+        if self.canvas is None:
+            return
+        try:
+            c = self.canvas
+            c.delete("all")
+            app = self.app
+            surface = app.ui.get("chrome_2", app.ui["bg"])
+            border = app.ui.get("border_soft", app.ui["border"])
+            hover = app.ui.get("field_focus", app.ui["field"])
+            self._round_rect(c, 1, 1, self.width - 1, self.height - 1,
+                             min(16, max(8, self.height // 4)),
+                             fill=surface, outline=border, width=1)
+            title_font = (app._ui_font_family, app._font_size(10))
+            meta_font = (app._ui_font_family, app._font_size(8))
+            icon_font = ("Segoe UI Symbol", app._font_size(12))
+            left = app._ui_padding(14)
+            for index, top, bottom in self.rows:
+                item = self.items[index]
+                active = index == self.selected or index == self.hover
+                if active:
+                    inset = app._ui_padding(5)
+                    self._round_rect(c, inset, top + 2, self.width - inset, bottom - 2,
+                                     min(12, int((bottom - top) / 2)),
+                                     fill=hover, outline=hover)
+                    c.create_rectangle(inset, top + 11, inset + 2, bottom - 11,
+                                       fill=app.ui["accent"], outline="")
+                cy = (top + bottom) / 2
+                icon = self.ICONS.get(item.get("kind"), "•")
+                c.create_text(left, cy, text=icon, fill=app.ui["accent_hover"],
+                              font=icon_font, anchor="w")
+                tx = left + app._ui_padding(30)
+                title = str(item.get("title") or item.get("value") or "")
+                secondary = str(item.get("secondary") or "")
+                c.create_text(tx, cy - app._ui_padding(8), text=title,
+                              fill=app.ui["text"], font=title_font, anchor="w",
+                              width=max(80, self.width - tx - app._ui_padding(18)))
+                if secondary and secondary != title:
+                    c.create_text(tx, cy + app._ui_padding(10), text=secondary,
+                                  fill=app.ui["muted"], font=meta_font, anchor="w",
+                                  width=max(80, self.width - tx - app._ui_padding(18)))
+        except Exception:
+            pass
+
+    def _on_motion(self, event):
+        index = self._hit(getattr(event, "y", -1))
+        if index != self.hover:
+            self.hover = index
+            self._draw()
+
+    def _on_leave(self, _event=None):
+        if self.hover is not None:
+            self.hover = None
+            self._draw()
+
+    def _on_press(self, event):
+        self.pressed = self._hit(getattr(event, "y", -1))
+        self.app._omnibox_popup_pointer_down = self.pressed is not None
+        if self.pressed is not None:
+            self.hover = self.pressed
+            self._draw()
+        return "break"
+
+    def _on_release(self, event):
+        index = self._hit(getattr(event, "y", -1))
+        pressed = self.pressed
+        self.pressed = None
+        self.app._omnibox_popup_pointer_down = False
+        if index is not None and index == pressed:
+            self.app._activate_omnibox_suggestion(index, navigate=True)
+        else:
+            self._draw()
+        return "break"
+
+    def set_selected(self, index):
+        self.selected = int(index) if 0 <= int(index) < len(self.items) else -1
+        self._draw()
+
+    def show(self, items, selected=-1):
+        self.items = list(items or [])
+        if not self.items:
+            self.hide()
+            return False
+        app = self.app
+        try:
+            app.root.update_idletasks()
+            x = int(app.address_shell.winfo_rootx())
+            y = int(app.address_shell.winfo_rooty() + app.address_shell.winfo_height() + app._ui_padding(3))
+            width = max(360, int(app.address_shell.winfo_width()))
+        except Exception:
+            return False
+        row_h = max(46, app._ui_padding(48))
+        outer = max(6, app._ui_padding(7))
+        height = outer * 2 + row_h * len(self.items)
+        try:
+            screen_w = int(app.root.winfo_screenwidth())
+            screen_h = int(app.root.winfo_screenheight())
+            width = min(width, max(360, screen_w - 8))
+            x = max(4, min(x, screen_w - width - 4))
+            if y + height > screen_h - 4:
+                y = max(4, int(app.address_shell.winfo_rooty()) - height - app._ui_padding(3))
+        except Exception:
+            pass
+        self.width, self.height = width, height
+        self.rows = [(i, outer + i * row_h, outer + (i + 1) * row_h) for i in range(len(self.items))]
+        self.selected = int(selected) if 0 <= int(selected) < len(self.items) else -1
+
+        created = False
+        try:
+            if self.window is None or not self.window.winfo_exists():
+                win = tk.Toplevel(app.root)
+                self.window = win
+                created = True
+                win.overrideredirect(True)
+                try:
+                    win.transient(app.root)
+                    win.attributes("-topmost", True)
+                    win.attributes("-alpha", 0.12 if app._motion_enabled() else 1.0)
+                except Exception:
+                    pass
+                win.configure(bg=app.ui.get("chrome_2", app.ui["bg"]), bd=0, highlightthickness=0)
+                self.canvas = tk.Canvas(
+                    win, bg=app.ui.get("chrome_2", app.ui["bg"]),
+                    highlightthickness=0, bd=0, takefocus=0, cursor="hand2",
+                )
+                self.canvas.pack(fill="both", expand=True)
+                self.canvas.bind("<Motion>", self._on_motion)
+                self.canvas.bind("<Leave>", self._on_leave)
+                self.canvas.bind("<ButtonPress-1>", self._on_press)
+                self.canvas.bind("<ButtonRelease-1>", self._on_release)
+            else:
+                self.window.deiconify()
+            self.window.geometry(f"{width}x{height}+{x}+{y}")
+            self.canvas.configure(width=width, height=height)
+            self._draw()
+            self.window.lift()
+            try:
+                self.window.attributes("-topmost", True)
+            except Exception:
+                pass
+            if created and app._motion_enabled():
+                for step in range(1, 7):
+                    def frame(s=step, base_y=y):
+                        try:
+                            if self.window is None or not self.window.winfo_exists():
+                                return
+                            t = s / 6.0
+                            eased = 1.0 - (1.0 - t) ** 3
+                            yy = int(base_y - (1.0 - eased) * 7)
+                            self.window.geometry(f"{self.width}x{self.height}+{x}+{yy}")
+                            self.window.attributes("-alpha", max(0.12, min(1.0, eased)))
+                        except Exception:
+                            pass
+                    self._animation_jobs.append(app.root.after(step * 10, frame))
+            else:
+                try:
+                    self.window.attributes("-alpha", 1.0)
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            self.hide()
+            return False
+
+    def hide(self):
+        for job in tuple(self._animation_jobs):
+            try:
+                self.app.root.after_cancel(job)
+            except Exception:
+                pass
+        self._animation_jobs.clear()
+        self.app._omnibox_popup_pointer_down = False
+        win = self.window
+        self.window = None
+        self.canvas = None
+        self.items = []
+        self.rows = []
+        self.hover = None
+        self.pressed = None
+        self.selected = -1
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+
 class BrowserApp(BrowserFeatures):
     def _write_stability_log(self, heading, details):
         """Best-effort local diagnostics without turning an error into a crash."""
@@ -1680,6 +1920,15 @@ class BrowserApp(BrowserFeatures):
         self._window_rounding_signature = None
         self._dwm_host_region_signature = None
         self._address_focused = False
+        # v10.5.48 local omnibox autocomplete state. The popup is created only
+        # while the real Entry owns focus and never performs remote lookups.
+        self._omnibox_suggestion_popup = None
+        self._omnibox_suggestions = []
+        self._omnibox_suggestion_index = -1
+        self._omnibox_suggestion_after_id = None
+        self._omnibox_popup_pointer_down = False
+        self._omnibox_recent_inputs = []
+        self._omnibox_update_suspended = False
         # v8.1: lightweight Tk-side animation state. Animations are intentionally
         # confined to Tekzite chrome; Chromium/DWM remains completely untouched.
         self._ui_animation_serial = 0
@@ -1831,6 +2080,32 @@ class BrowserApp(BrowserFeatures):
         self._dwm_surface_ready = False
         self._dwm_host_visible = False
         self._dwm_host_alpha = None
+        # v10.5.50: minimizing the frameless Tk root must also suppress the
+        # separate DWM destination popup.  Otherwise a queued geometry/reveal
+        # callback can remap the owned popup while the real Tekzite window is
+        # iconic, leaving the raw presentation surface in front on taskbar
+        # restore.  Keep this separate from _dwm_surface_ready so Chromium does
+        # not have to re-bootstrap after every minimize/restore cycle.
+        self._dwm_host_suspended_for_minimize = False
+        # v10.5.50: taskbar restore is a cold DWM recovery, not merely a popup
+        # remap.  Windows can retain the destination HWND while silently dropping
+        # the live thumbnail composition after an override-redirect/iconify cycle.
+        # Keep the destination hidden until a fresh thumbnail registration has
+        # succeeded and the compositor has been flushed.
+        self._dwm_restore_recovery_after_id = None
+        self._dwm_restore_recovery_count = 0
+        self._dwm_restore_recovery_success = None
+        # v10.5.54: Tk can transiently report a frameless root as ``withdrawn``
+        # during the override-redirect -> iconify -> restore wrapper handoff.
+        # Track the taskbar round-trip explicitly so a withdrawn root is
+        # deiconified and retried instead of being mistaken for a successful
+        # restore and disappearing while the Python process keeps running.
+        self._taskbar_restore_pending = False
+        self._taskbar_restore_after_id = None
+        self._taskbar_restore_watchdog_id = None
+        self._taskbar_restore_attempts = 0
+        self._taskbar_restore_geometry = None
+        self._dwm_host_owner_hwnd = None
         self._dwm_reveal_pending = False
         self._dwm_reveal_after_id = None
         self._dwm_host_rect = None
@@ -2061,7 +2336,7 @@ class BrowserApp(BrowserFeatures):
         self.address_text_host.bind("<Configure>", lambda _e: self._schedule_address_preview_render(), add="+")
         self.address_preview.bind("<Button-1>", self._activate_address_preview)
         self.address_preview.bind("<Button-3>", self._show_address_preview_context_menu)
-        self.url_var.trace_add("write", lambda *_args: self._schedule_address_preview_render())
+        self.url_var.trace_add("write", self._on_omnibox_text_changed)
 
         self.bookmark_button = tk.Button(
             self.address_inner, text="☆", command=self._toggle_current_bookmark, fg=self.ui["muted"], bg=self.ui["field"],
@@ -2070,7 +2345,11 @@ class BrowserApp(BrowserFeatures):
             padx=self._ui_padding(7), pady=1,
         )
         self.bookmark_button.pack(side="right", padx=(0, self._ui_padding(4)))
-        self.address.bind("<Return>", lambda event: self.navigate())
+        self.address.bind("<Return>", self._on_omnibox_return)
+        self.address.bind("<Down>", lambda event: self._move_omnibox_suggestion(1))
+        self.address.bind("<Up>", lambda event: self._move_omnibox_suggestion(-1))
+        self.address.bind("<Tab>", self._accept_omnibox_suggestion)
+        self.address.bind("<Escape>", lambda event: self._hide_omnibox_suggestions(return_break=True))
         self.address.bind("<FocusIn>", lambda event: self._set_address_shell_focus(True))
         self.address.bind("<FocusOut>", lambda event: self._set_address_shell_focus(False))
         self.address.bind("<Button-1>", self._on_address_pointer_down, add="+")
@@ -3288,6 +3567,166 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             pass
 
+    def _on_omnibox_text_changed(self, *_args):
+        self._schedule_address_preview_render()
+        if getattr(self, "_omnibox_update_suspended", False):
+            return
+        if getattr(self, "_address_focus_active", False):
+            self._schedule_omnibox_suggestions()
+
+    def _schedule_omnibox_suggestions(self, delay_ms=28):
+        if not self.preferences.get("omnibox_suggestions_enabled", True):
+            self._hide_omnibox_suggestions()
+            return
+        try:
+            if self._omnibox_suggestion_after_id is not None:
+                self.root.after_cancel(self._omnibox_suggestion_after_id)
+        except Exception:
+            pass
+        try:
+            self._omnibox_suggestion_after_id = self.root.after(
+                max(0, int(delay_ms)), self._refresh_omnibox_suggestions
+            )
+        except Exception:
+            self._omnibox_suggestion_after_id = None
+
+    def _refresh_omnibox_suggestions(self):
+        self._omnibox_suggestion_after_id = None
+        try:
+            if (not self.preferences.get("omnibox_suggestions_enabled", True)
+                    or not self._address_focus_active
+                    or self.root.focus_get() is not self.address):
+                self._hide_omnibox_suggestions()
+                return False
+        except Exception:
+            if not self._address_focus_active:
+                self._hide_omnibox_suggestions()
+                return False
+        query = str(self.url_var.get() or "").strip()
+        items = omnibox_suggestions(
+            query,
+            visits=getattr(self, "visits", []),
+            bookmarks=getattr(self, "bookmarks", []),
+            tabs=getattr(self, "tabs", []),
+            recent_inputs=getattr(self, "_omnibox_recent_inputs", []),
+            limit=6,
+        )
+        self._omnibox_suggestions = items
+        if not items:
+            self._hide_omnibox_suggestions()
+            return False
+        current_value = None
+        if 0 <= self._omnibox_suggestion_index < len(items):
+            current_value = items[self._omnibox_suggestion_index].get("value")
+        if current_value:
+            self._omnibox_suggestion_index = next(
+                (i for i, item in enumerate(items) if item.get("value") == current_value), -1
+            )
+        else:
+            self._omnibox_suggestion_index = -1
+        popup = self._omnibox_suggestion_popup
+        if popup is None:
+            popup = _OmniboxSuggestionPopup(self)
+            self._omnibox_suggestion_popup = popup
+        return bool(popup.show(items, self._omnibox_suggestion_index))
+
+    def _hide_omnibox_suggestions(self, return_break=False):
+        try:
+            if self._omnibox_suggestion_after_id is not None:
+                self.root.after_cancel(self._omnibox_suggestion_after_id)
+        except Exception:
+            pass
+        self._omnibox_suggestion_after_id = None
+        popup = getattr(self, "_omnibox_suggestion_popup", None)
+        if popup is not None:
+            popup.hide()
+        self._omnibox_suggestions = []
+        self._omnibox_suggestion_index = -1
+        return "break" if return_break else None
+
+    def _hide_omnibox_suggestions_if_inactive(self):
+        if getattr(self, "_omnibox_popup_pointer_down", False):
+            try:
+                self.root.after(80, self._hide_omnibox_suggestions_if_inactive)
+            except Exception:
+                pass
+            return
+        try:
+            if self.root.focus_get() is self.address:
+                return
+        except Exception:
+            pass
+        self._hide_omnibox_suggestions()
+
+    def _move_omnibox_suggestion(self, direction):
+        if not self.preferences.get("omnibox_suggestions_enabled", True):
+            return None
+        if not self._omnibox_suggestions:
+            self._refresh_omnibox_suggestions()
+        items = self._omnibox_suggestions
+        if not items:
+            return "break"
+        direction = 1 if int(direction) >= 0 else -1
+        current = int(self._omnibox_suggestion_index)
+        if current < 0:
+            current = -1 if direction > 0 else 0
+        current = (current + direction) % len(items)
+        self._omnibox_suggestion_index = current
+        popup = getattr(self, "_omnibox_suggestion_popup", None)
+        if popup is not None:
+            popup.set_selected(current)
+        return "break"
+
+    def _remember_omnibox_input(self, value):
+        value = str(value or "").strip()[:32768]
+        if not value:
+            return
+        rows = [row for row in getattr(self, "_omnibox_recent_inputs", []) if str(row).casefold() != value.casefold()]
+        self._omnibox_recent_inputs = [value] + rows[:99]
+
+    def _activate_omnibox_suggestion(self, index, *, navigate=False):
+        try:
+            item = self._omnibox_suggestions[int(index)]
+        except Exception:
+            return "break"
+        value = str(item.get("value") or "").strip()
+        if not value:
+            return "break"
+        self._omnibox_update_suspended = True
+        try:
+            self.url_var.set(value)
+            self.address.icursor(tk.END)
+            self.address.selection_clear()
+        finally:
+            self._omnibox_update_suspended = False
+        self._omnibox_suggestion_index = int(index)
+        self._hide_omnibox_suggestions()
+        if navigate:
+            self._remember_omnibox_input(value)
+            self._release_address_focus_for_navigation()
+            self.navigate_to(value, add_history=True)
+        else:
+            try:
+                self.address.focus_set()
+            except Exception:
+                pass
+        return "break"
+
+    def _accept_omnibox_suggestion(self, event=None):
+        if not self._omnibox_suggestions:
+            return None
+        index = self._omnibox_suggestion_index
+        if index < 0:
+            index = 0
+        return self._activate_omnibox_suggestion(index, navigate=False)
+
+    def _on_omnibox_return(self, event=None):
+        if self._omnibox_suggestions and self._omnibox_suggestion_index >= 0:
+            return self._activate_omnibox_suggestion(self._omnibox_suggestion_index, navigate=True)
+        self._hide_omnibox_suggestions()
+        self.navigate()
+        return "break"
+
     def _set_address_shell_focus(self, focused):
         self._address_focused = bool(focused)
         self._redraw_address_shell()
@@ -3935,6 +4374,7 @@ class BrowserApp(BrowserFeatures):
             value = ""
         if value:
             self.url_var.set(value)
+            self._remember_omnibox_input(value)
             self._release_address_focus_for_navigation()
             self.navigate_to(value, add_history=True)
         return "break"
@@ -5276,7 +5716,7 @@ class BrowserApp(BrowserFeatures):
             user32.CreateWindowExW.restype = wintypes.HWND
             hwnd = user32.CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
-                "STATIC", "Tekzite DWM Surface", WS_POPUP,
+                "STATIC", "", WS_POPUP,
                 0, 0, 1, 1,
                 wintypes.HWND(owner), None, None, None,
             )
@@ -5317,6 +5757,7 @@ class BrowserApp(BrowserFeatures):
             self._dwm_host_wndproc = _dwm_host_proc
             self._dwm_host_original_wndproc = old_proc
             self._dwm_host = hwnd_i
+            self._dwm_host_owner_hwnd = owner
             self._dwm_host_size = (1, 1)
             self._dwm_host_region_signature = None
             self._dwm_host_visible = False
@@ -5327,6 +5768,242 @@ class BrowserApp(BrowserFeatures):
             self._dwm_host = None
             self._dwm_host_size = (1, 1)
             raise
+
+    def _repair_dwm_host_owner_and_style(self, hwnd=None):
+        """Keep the raw DWM popup owned by the current Tekzite top-level HWND.
+
+        Toggling ``overrideredirect`` for taskbar minimize/restore can change the
+        native Tk wrapper relationship on Windows.  If the DWM popup keeps the
+        old owner, Windows may treat it as an independent top-level window and
+        surface it ahead of Tekzite when the taskbar button is clicked.
+
+        Reassert both ownership and the non-activating tool-window style.  This
+        operation never focuses or raises the DWM popup.
+        """
+        if os.name != "nt":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
+            self._dwm_user32 = user32
+            hwnd_i = int(hwnd or self._dwm_host or 0)
+            if not hwnd_i or not user32.IsWindow(wintypes.HWND(hwnd_i)):
+                return False
+
+            self.root.update_idletasks()
+            inner = int(self.root.winfo_id())
+            GA_ROOT = 2
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            owner = int(user32.GetAncestor(wintypes.HWND(inner), GA_ROOT) or inner)
+            if not owner:
+                return False
+
+            GWLP_HWNDPARENT = -8
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_NOACTIVATE = 0x08000000
+            user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+            user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+            user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.GetWindowLongW.restype = ctypes.c_long
+            user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+            user32.SetWindowLongW.restype = ctypes.c_long
+
+            user32.SetWindowLongPtrW(
+                wintypes.HWND(hwnd_i), GWLP_HWNDPARENT, ctypes.c_ssize_t(owner)
+            )
+            exstyle = int(user32.GetWindowLongW(wintypes.HWND(hwnd_i), GWL_EXSTYLE))
+            wanted = (exstyle | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED) & ~WS_EX_APPWINDOW
+            if wanted != exstyle:
+                user32.SetWindowLongW(wintypes.HWND(hwnd_i), GWL_EXSTYLE, wanted)
+
+            # Commit style/owner changes without activating, moving or changing
+            # the z-order of the presentation surface.
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+            user32.SetWindowPos(
+                wintypes.HWND(hwnd_i), wintypes.HWND(0), 0, 0, 0, 0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            )
+            self._dwm_host_owner_hwnd = owner
+            return True
+        except Exception:
+            return False
+
+    def _destroy_dwm_host_for_taskbar(self):
+        """Destroy the transient DWM destination before/after taskbar minimize.
+
+        A DWM thumbnail is bound to a specific destination HWND.  Reusing that
+        HWND across Tk's override-redirect -> iconify -> restore transition can
+        leave DWM with a numerically valid but visually detached destination.
+        v10.5.54 deliberately gives every restore a brand-new destination HWND.
+        """
+        hwnd_i = int(self._dwm_host or 0)
+        if not hwnd_i:
+            return False
+        destroyed = False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
+            self._dwm_user32 = user32
+            hwnd = wintypes.HWND(hwnd_i)
+            if user32.IsWindow(hwnd):
+                SW_HIDE = 0
+                try:
+                    user32.ShowWindow(hwnd, SW_HIDE)
+                except Exception:
+                    pass
+                user32.DestroyWindow.argtypes = [wintypes.HWND]
+                user32.DestroyWindow.restype = wintypes.BOOL
+                destroyed = bool(user32.DestroyWindow(hwnd))
+        except Exception:
+            destroyed = False
+        self._dwm_host = None
+        self._dwm_host_owner_hwnd = None
+        self._dwm_host_size = (1, 1)
+        self._dwm_host_rect = None
+        self._dwm_host_region_signature = None
+        self._dwm_host_visible = False
+        self._dwm_host_alpha = None
+        self._dwm_host_wndproc = None
+        self._dwm_host_original_wndproc = None
+        return destroyed
+
+    def _suspend_dwm_host_for_minimize(self):
+        """Retire the DWM destination before Windows iconifies Tekzite."""
+        self._dwm_host_suspended_for_minimize = True
+        self._cancel_dwm_host_reveal()
+        if self._dwm_restore_recovery_after_id is not None:
+            try:
+                self.root.after_cancel(self._dwm_restore_recovery_after_id)
+            except Exception:
+                pass
+            self._dwm_restore_recovery_after_id = None
+        if self._dwm_geometry_after_id is not None:
+            try:
+                self.root.after_cancel(self._dwm_geometry_after_id)
+            except Exception:
+                pass
+            self._dwm_geometry_after_id = None
+        self._dwm_pending_resize = False
+        self._destroy_dwm_host_for_taskbar()
+
+    def _restore_dwm_host_after_taskbar(self):
+        """Create a new DWM destination and reattach Chromium after restore."""
+        try:
+            if str(self.root.state()) == "iconic":
+                return False
+        except Exception:
+            return False
+
+        self._apply_frameless_app_style()
+        if not (self._embedded_mode and self._chromium_dwm_mode):
+            self._dwm_host_suspended_for_minimize = False
+            return True
+
+        self._dwm_host_suspended_for_minimize = True
+        self._dwm_reveal_pending = False
+        self._dwm_restore_recovery_success = None
+        if self._dwm_restore_recovery_after_id is not None:
+            try:
+                self.root.after_cancel(self._dwm_restore_recovery_after_id)
+            except Exception:
+                pass
+        try:
+            # Give Tk one layout beat to finish restoring its native wrapper.
+            self._dwm_restore_recovery_after_id = self.root.after(
+                55, self._recover_dwm_host_after_taskbar, 1
+            )
+        except Exception:
+            self._dwm_restore_recovery_after_id = None
+            return False
+        return True
+
+    def _recover_dwm_host_after_taskbar(self, attempt=1):
+        """Attach the live Chromium session to a fresh DWM destination HWND."""
+        self._dwm_restore_recovery_after_id = None
+        try:
+            if str(self.root.state()) == "iconic":
+                self._dwm_restore_recovery_after_id = self.root.after(
+                    90, self._recover_dwm_host_after_taskbar, attempt
+                )
+                return False
+        except Exception:
+            return False
+
+        if not (self._embedded_mode and self._chromium_dwm_mode):
+            self._dwm_host_suspended_for_minimize = False
+            return False
+
+        ok = False
+        try:
+            self.root.update_idletasks()
+            # A failed previous attempt must not poison the next one.
+            if self._dwm_host:
+                self._destroy_dwm_host_for_taskbar()
+
+            host = int(self._ensure_dwm_host())
+            self._repair_dwm_host_owner_and_style(host)
+            self._dwm_surface_ready = False
+            host_size = self._sync_dwm_host_geometry(show=False, transparent=True)
+            if host_size is None:
+                host_size = (
+                    max(1, int(self.content_frame.winfo_width())),
+                    max(1, int(self.content_frame.winfo_height())),
+                )
+            w, h = max(1, int(host_size[0])), max(1, int(host_size[1]))
+
+            # attach_embedded_chromium updates engine.session['embedded_parent']
+            # to this new HWND, primes Chromium's DComp source, and registers a
+            # thumbnail against the new destination before anything is shown.
+            request_embedded_chromium_dwm_reregister()
+            attach_embedded_chromium(host, w, h)
+            self._dwm_last_chromium_viewport = (w, h)
+            self._dwm_surface_ready = True
+            self._dwm_host_suspended_for_minimize = False
+            self._dwm_reveal_pending = True
+            # Re-arm the proven keyboard/input lane before this new destination
+            # is ever made visible, matching the normal startup reveal contract.
+            self._arm_dwm_input_surface()
+            self._sync_dwm_host_geometry(show=True, transparent=True)
+            self._schedule_dwm_host_reveal(delay=65)
+            ok = True
+        except Exception:
+            self._dwm_surface_ready = False
+            self._dwm_host_suspended_for_minimize = True
+            self._destroy_dwm_host_for_taskbar()
+            ok = False
+
+        self._dwm_restore_recovery_count += 1
+        self._dwm_restore_recovery_success = bool(ok)
+        if not ok:
+            if int(attempt) < 4:
+                try:
+                    delay = 95 + (int(attempt) * 65)
+                    self._dwm_restore_recovery_after_id = self.root.after(
+                        delay, self._recover_dwm_host_after_taskbar, int(attempt) + 1
+                    )
+                except Exception:
+                    self._dwm_restore_recovery_after_id = None
+            return False
+
+        # Confirm exact geometry again after Tk/DWM have both consumed the new
+        # destination. These are resize-only and never re-use the old HWND.
+        try:
+            self.root.after(120, lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
+            self.root.after(280, lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
+        except Exception:
+            pass
+        self._schedule_dwm_pointer_bridge(delay=1)
+        return True
 
     def _sync_dwm_host_geometry(self, show=False, transparent=False):
         """Pin the raw DWM destination over Tekzite's content viewport.
@@ -5388,9 +6065,20 @@ class BrowserApp(BrowserFeatures):
                 except Exception:
                     pass
 
-            # Startup rule: the raw DWM destination remains completely hidden
-            # until _show_embedded_host marks the Chromium surface ready.
-            should_show = bool(show and self._dwm_surface_ready)
+            # Startup/restore rule: the raw DWM destination remains completely
+            # hidden until Chromium is ready, and it must never be remapped while
+            # Tekzite itself is iconic.  A queued geometry callback can otherwise
+            # resurrect this separate popup after the real taskbar window hides.
+            root_iconic = False
+            try:
+                root_iconic = str(self.root.state()) == "iconic"
+            except Exception:
+                pass
+            should_show = bool(
+                show and self._dwm_surface_ready
+                and not self._dwm_host_suspended_for_minimize
+                and not root_iconic
+            )
             if should_show and not self._dwm_host_visible:
                 SW_SHOWNOACTIVATE = 4
                 user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOWNOACTIVATE)
@@ -6818,9 +7506,14 @@ class BrowserApp(BrowserFeatures):
         self._dwm_keyboard_sink_focused = False
         self._stop_dwm_keyboard_poll()
         self._cancel_embedded_surface_wakes()
+        self._schedule_omnibox_suggestions(35)
 
     def _on_address_focus_out(self, event=None):
         self._address_focus_active = False
+        try:
+            self.root.after(90, self._hide_omnibox_suggestions_if_inactive)
+        except Exception:
+            self._hide_omnibox_suggestions()
 
     def _schedule_embedded_pointer_focus_watch(self):
         """Watch native Chromium mouse-downs that Tk cannot see.
@@ -6910,6 +7603,7 @@ class BrowserApp(BrowserFeatures):
     def _release_address_focus_for_navigation(self):
         """Release omnibox ownership once its URL has been committed."""
         self._address_focus_active = False
+        self._hide_omnibox_suggestions()
         self._cancel_embedded_surface_wakes()
         try:
             self.root.focus_set()
@@ -7554,7 +8248,23 @@ class BrowserApp(BrowserFeatures):
         self._schedule_live_reflow()
 
     def _on_window_map(self, event=None):
-        """Reflow after restore/deiconify once Tk has remapped the viewport."""
+        """Reflow and repair native DWM ownership after restore/deiconify."""
+        if self._taskbar_restore_pending:
+            # Mapping is evidence that the Tk wrapper is returning, but the
+            # override-redirect remap can still take one more beat. Let the
+            # visibility watchdog finish the restore contract.
+            try:
+                if self._taskbar_restore_watchdog_id is None:
+                    self._taskbar_restore_watchdog_id = self.root.after(
+                        25, self._ensure_root_visible_after_taskbar, 1
+                    )
+            except Exception:
+                pass
+        elif self._dwm_host_suspended_for_minimize:
+            try:
+                self.root.after_idle(self._restore_dwm_host_after_taskbar)
+            except Exception:
+                self._restore_dwm_host_after_taskbar()
         if self._current_document is None:
             return
         try:
@@ -7989,20 +8699,46 @@ class BrowserApp(BrowserFeatures):
             button.pack(side="left", padx=(0, self._ui_padding(2)), pady=self._ui_padding(4))
 
 
+    def _current_native_root_hwnd(self):
+        """Return the current Win32 top-level HWND backing the Tk root.
+
+        Windows can replace Tk's native wrapper when Tekzite temporarily drops
+        override-redirect in order to iconify.  Never assume a cached HWND from
+        before minimize is still the window the user can see afterwards.
+        """
+        if sys.platform != "win32":
+            return 0
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = self._native_drag_user32 or ctypes.windll.user32
+            inner = int(self.root.winfo_id())
+            GA_ROOT = 2
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            return int(user32.GetAncestor(wintypes.HWND(inner), GA_ROOT) or inner)
+        except Exception:
+            return 0
+
+    def _invalidate_native_window_drag_target(self):
+        """Drop cached Win32 drag state after a native Tk wrapper transition."""
+        self._native_drag_hwnd = 0
+        self._native_drag_last_xy = None
+        self._native_drag_dwm_offset = None
+
     def _prewarm_native_window_drag(self):
-        """Resolve/cache the Win32 drag path before the user starts moving."""
+        """Resolve/cache the *current* Win32 drag path before the user starts moving."""
         if sys.platform != "win32":
             return False
         try:
             import ctypes
             from ctypes import wintypes
             user32 = ctypes.windll.user32
+            self._native_drag_user32 = user32
             self.root.update_idletasks()
-            inner = int(self.root.winfo_id())
-            GA_ROOT = 2
-            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
-            user32.GetAncestor.restype = wintypes.HWND
-            hwnd = int(user32.GetAncestor(wintypes.HWND(inner), GA_ROOT) or inner)
+            hwnd = int(self._current_native_root_hwnd() or 0)
+            if not hwnd:
+                raise RuntimeError("Tekzite native root HWND is unavailable")
             user32.SetWindowPos.argtypes = [
                 wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                 ctypes.c_int, ctypes.c_int, wintypes.UINT,
@@ -8017,7 +8753,6 @@ class BrowserApp(BrowserFeatures):
             user32.DeferWindowPos.restype = wintypes.HANDLE
             user32.EndDeferWindowPos.argtypes = [wintypes.HANDLE]
             user32.EndDeferWindowPos.restype = wintypes.BOOL
-            self._native_drag_user32 = user32
             self._native_drag_hwnd = hwnd
             return bool(hwnd)
         except Exception:
@@ -8029,7 +8764,13 @@ class BrowserApp(BrowserFeatures):
         """Move Tekzite and its DWM destination together without Tk geometry churn."""
         if sys.platform != "win32":
             return False
-        if not self._native_drag_hwnd or self._native_drag_user32 is None:
+        # v10.5.54: minimizing a frameless Tk window can replace its native
+        # top-level wrapper. Refresh the cached HWND whenever it no longer
+        # matches the currently visible Tekzite root, otherwise the old code
+        # could move only the freshly recreated DWM destination.
+        live_hwnd = self._current_native_root_hwnd()
+        if (not self._native_drag_hwnd or self._native_drag_user32 is None
+                or not live_hwnd or int(self._native_drag_hwnd) != int(live_hwnd)):
             if not self._prewarm_native_window_drag():
                 return False
         try:
@@ -8062,6 +8803,9 @@ class BrowserApp(BrowserFeatures):
                         hdwp, wintypes.HWND(int(self._native_drag_hwnd)), wintypes.HWND(0),
                         x, y, 0, 0, flags,
                     )
+                # If the Tekzite root could not be queued, abort the whole
+                # batch. Never let the DWM surface become the only window that
+                # moves.
                 if hdwp:
                     hdwp = user32.DeferWindowPos(
                         hdwp, wintypes.HWND(int(self._dwm_host)), wintypes.HWND(0),
@@ -8072,18 +8816,22 @@ class BrowserApp(BrowserFeatures):
                     self._dwm_host_rect = (dwm_x, dwm_y, dwm_w, dwm_h)
                     self._native_drag_last_xy = (x, y)
                     return True
-            user32.SetWindowPos(
+            root_moved = bool(user32.SetWindowPos(
                 wintypes.HWND(int(self._native_drag_hwnd)), wintypes.HWND(0),
                 x, y, 0, 0, flags,
-            )
+            ))
+            if not root_moved:
+                self._invalidate_native_window_drag_target()
+                return False
             if has_dwm:
                 if self._dwm_host_rect != (dwm_x, dwm_y, dwm_w, dwm_h):
-                    user32.SetWindowPos(
+                    dwm_moved = bool(user32.SetWindowPos(
                         wintypes.HWND(int(self._dwm_host)), wintypes.HWND(0),
                         dwm_x, dwm_y, dwm_w, dwm_h,
                         flags,
-                    )
-                    self._dwm_host_rect = (dwm_x, dwm_y, dwm_w, dwm_h)
+                    ))
+                    if dwm_moved:
+                        self._dwm_host_rect = (dwm_x, dwm_y, dwm_w, dwm_h)
             self._native_drag_last_xy = (x, y)
             return True
         except Exception:
@@ -8098,11 +8846,10 @@ class BrowserApp(BrowserFeatures):
         self._window_drag_active = True
         self._window_drag_pending_xy = None
         self._native_drag_last_xy = None
-        # v9.8: all native setup is normally pre-warmed on startup. Capture the
-        # already-known DWM offset once so live drag frames can move both HWNDs
-        # together without waiting for a Tk Configure -> DWM follow-up pass.
-        if not self._native_drag_hwnd or self._native_drag_user32 is None:
-            self._prewarm_native_window_drag()
+        # v10.5.54: refresh once at every drag start. The Tk top-level HWND can
+        # change across taskbar minimize/restore, so a pre-minimize cache is not
+        # safe even when it is non-zero.
+        self._prewarm_native_window_drag()
         if self._dwm_host_rect is not None:
             try:
                 self._native_drag_dwm_offset = (
@@ -8206,21 +8953,183 @@ class BrowserApp(BrowserFeatures):
             self.root.after_idle(lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
             self.root.after(70, lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
 
+    def _schedule_taskbar_restore_check(self, delay=120):
+        if self._taskbar_restore_after_id is not None:
+            try:
+                self.root.after_cancel(self._taskbar_restore_after_id)
+            except Exception:
+                pass
+        try:
+            self._taskbar_restore_after_id = self.root.after(
+                max(20, int(delay)), self._restore_frameless_after_minimize
+            )
+        except Exception:
+            self._taskbar_restore_after_id = None
+
+    def _ensure_root_visible_after_taskbar(self, attempt=1):
+        """Fail-safe for Tk wrapper races after taskbar restore.
+
+        A restored override-redirect root must be both non-iconic and mapped.
+        Windows/Tk can briefly leave it withdrawn while the Python process is
+        healthy.  Never accept that as a completed restore.
+        """
+        self._taskbar_restore_watchdog_id = None
+        if not self._taskbar_restore_pending:
+            return True
+        try:
+            if not bool(self.root.winfo_exists()):
+                return False
+            state = str(self.root.state())
+            viewable = bool(self.root.winfo_viewable())
+        except Exception:
+            if int(attempt) < 8:
+                try:
+                    self._taskbar_restore_watchdog_id = self.root.after(
+                        80, self._ensure_root_visible_after_taskbar, int(attempt) + 1
+                    )
+                except Exception:
+                    pass
+            return False
+
+        if state == "iconic":
+            # The user has not restored the taskbar window yet.
+            self._schedule_taskbar_restore_check(100)
+            return False
+
+        if state == "withdrawn" or not viewable:
+            try:
+                self.root.deiconify()
+                if self._taskbar_restore_geometry:
+                    self.root.geometry(self._taskbar_restore_geometry)
+                self.root.update_idletasks()
+            except Exception:
+                pass
+            if int(attempt) < 8:
+                try:
+                    self._taskbar_restore_watchdog_id = self.root.after(
+                        70, self._ensure_root_visible_after_taskbar, int(attempt) + 1
+                    )
+                except Exception:
+                    pass
+            return False
+
+        # The Tk root is genuinely back. Reassert the taskbar identity one more
+        # time after mapping, then the DWM restore may safely proceed.
+        try:
+            self.root.overrideredirect(True)
+            self.root.update_idletasks()
+            self._apply_frameless_app_style()
+            self._invalidate_native_window_drag_target()
+            self._prewarm_native_window_drag()
+        except Exception:
+            if int(attempt) < 8:
+                try:
+                    self._taskbar_restore_watchdog_id = self.root.after(
+                        70, self._ensure_root_visible_after_taskbar, int(attempt) + 1
+                    )
+                except Exception:
+                    pass
+            return False
+
+        self._taskbar_restore_pending = False
+        self._taskbar_restore_attempts = 0
+        self._taskbar_restore_geometry = None
+        self._restore_dwm_host_after_taskbar()
+        return True
+
     def _minimize_window(self):
         # Tk cannot iconify an override-redirect window directly on Windows.
-        self.root.overrideredirect(False)
-        self.root.iconify()
-        self.root.after(120, self._restore_frameless_after_minimize)
+        # Retire the transient DWM destination first, then temporarily expose a
+        # normal Tk wrapper for the taskbar. v10.5.54 explicitly tracks the
+        # entire round-trip so a transient withdrawn state cannot strand the app.
+        self._suspend_dwm_host_for_minimize()
+        self._invalidate_native_window_drag_target()
+        self._taskbar_restore_pending = True
+        self._taskbar_restore_attempts = 0
+        try:
+            self._taskbar_restore_geometry = self.root.geometry()
+        except Exception:
+            self._taskbar_restore_geometry = None
+        if self._taskbar_restore_watchdog_id is not None:
+            try:
+                self.root.after_cancel(self._taskbar_restore_watchdog_id)
+            except Exception:
+                pass
+            self._taskbar_restore_watchdog_id = None
+        try:
+            self.root.overrideredirect(False)
+            self.root.iconify()
+        except Exception:
+            # If iconify itself races with Tk, immediately repair visibility
+            # instead of leaving the root in a half-withdrawn wrapper state.
+            try:
+                self.root.deiconify()
+            except Exception:
+                pass
+        self._schedule_taskbar_restore_check(120)
 
     def _restore_frameless_after_minimize(self):
-        try:
-            if self.root.state() != "iconic":
-                self.root.overrideredirect(True)
-                self._apply_frameless_app_style()
-                return
-        except Exception:
+        self._taskbar_restore_after_id = None
+        if not self._taskbar_restore_pending:
             return
-        self.root.after(120, self._restore_frameless_after_minimize)
+        self._taskbar_restore_attempts += 1
+        try:
+            if not bool(self.root.winfo_exists()):
+                return
+            state = str(self.root.state())
+        except Exception:
+            # A transient Tcl/Win32 wrapper error is not a reason to abandon the
+            # restore loop. The old implementation returned here permanently.
+            self._schedule_taskbar_restore_check(100)
+            return
+
+        if state == "iconic":
+            self._schedule_taskbar_restore_check(100)
+            return
+
+        if state == "withdrawn":
+            try:
+                self.root.deiconify()
+                if self._taskbar_restore_geometry:
+                    self.root.geometry(self._taskbar_restore_geometry)
+            except Exception:
+                pass
+            self._schedule_taskbar_restore_check(70)
+            return
+
+        try:
+            self.root.overrideredirect(True)
+            self.root.update_idletasks()
+            self._apply_frameless_app_style()
+        except Exception:
+            self._schedule_taskbar_restore_check(80)
+            return
+
+        # If Tk is already genuinely mapped after the frameless wrapper swap,
+        # finish immediately. Otherwise the watchdog owns completion. This also
+        # preserves v10.5.53's guarantee that the native drag HWND is refreshed
+        # before the fresh DWM destination is created.
+        try:
+            viewable = bool(self.root.winfo_viewable())
+        except Exception:
+            viewable = False
+        if viewable:
+            self._invalidate_native_window_drag_target()
+            self._prewarm_native_window_drag()
+            self._taskbar_restore_pending = False
+            self._taskbar_restore_attempts = 0
+            self._taskbar_restore_geometry = None
+            self._restore_dwm_host_after_taskbar()
+            return
+
+        # Do not declare success until the root is actually mapped. Changing
+        # override-redirect can itself trigger one more native wrapper remap.
+        try:
+            self._taskbar_restore_watchdog_id = self.root.after(
+                35, self._ensure_root_visible_after_taskbar, 1
+            )
+        except Exception:
+            self._ensure_root_visible_after_taskbar(1)
 
     def _toggle_fullscreen(self):
         self._fullscreen = not self._fullscreen
@@ -8990,6 +9899,8 @@ class BrowserApp(BrowserFeatures):
         self.customization = _normalized_customization(self.preferences.get("customization"))
         self._apply_customization_runtime()
         self._apply_quiet_mode()
+        if not self.preferences.get("omnibox_suggestions_enabled", True):
+            self._hide_omnibox_suggestions()
         from engine import features
         if features.net._EDGE_SESSION:
             self._feature_async(features.configure, lambda _: None)
@@ -9623,6 +10534,7 @@ class BrowserApp(BrowserFeatures):
         chromium_presentation = tk.StringVar(value=getattr(self, "preferences", DEFAULT_PREFERENCES).get("chromium_presentation", "native"))
         auto_fallback = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("auto_chromium_fallback", True)))
         reuse_tabs = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("reuse_open_tabs", True)))
+        omnibox_suggestions_enabled = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("omnibox_suggestions_enabled", True)))
         status_bar = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("show_status_bar", True)))
         network_diagnostics = tk.StringVar(value=str(getattr(self, "preferences", DEFAULT_PREFERENCES).get("network_diagnostics", "off")))
         strict_python_loopback = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("strict_python_loopback", True)))
@@ -9651,6 +10563,13 @@ class BrowserApp(BrowserFeatures):
         entry = tk.Entry(outer, textvariable=homepage, bg=self.ui["field"], fg=self.ui["text"],
                          insertbackground=self.ui["text"], relief="flat", font=(self._ui_font_family, self._font_size(10)))
         entry.pack(fill="x", ipady=7)
+        tk.Checkbutton(outer, text="Show local address-bar suggestions and autocomplete",
+                       variable=omnibox_suggestions_enabled, bg=self.ui["bg"], fg=self.ui["text"],
+                       selectcolor=self.ui["field"], activebackground=self.ui["bg"],
+                       activeforeground=self.ui["text"]).pack(anchor="w", pady=(9, 2))
+        tk.Label(outer, text="Uses bookmarks, open tabs, session history and Tekzite history only. Typing is not sent to an autocomplete service.",
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)),
+                 wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
 
         quiet_mode = tk.BooleanVar(value=self.preferences.get("quiet_mode", False))
         restore_tabs = tk.BooleanVar(value=self.preferences.get("restore_tabs", True))
@@ -9838,6 +10757,7 @@ class BrowserApp(BrowserFeatures):
                 "chromium_presentation": chromium_presentation.get(),
                 "auto_chromium_fallback": bool(auto_fallback.get()),
                 "reuse_open_tabs": bool(reuse_tabs.get()),
+                "omnibox_suggestions_enabled": bool(omnibox_suggestions_enabled.get()),
                 "show_status_bar": bool(status_bar.get()),
                 "network_diagnostics": network_diagnostics.get(),
                 "strict_python_loopback": bool(strict_python_loopback.get()),
@@ -10168,6 +11088,7 @@ class BrowserApp(BrowserFeatures):
         # v4.83: pressing Enter/Go commits the omnibox. Do not leave its
         # cross-window focus guard latched while the Chromium page loads.
         url = self.url_var.get()
+        self._remember_omnibox_input(url)
         self._release_address_focus_for_navigation()
         self.navigate_to(
             url,
@@ -10637,6 +11558,10 @@ class BrowserApp(BrowserFeatures):
         try:
             if self._page_state_after_id is not None:
                 self.root.after_cancel(self._page_state_after_id)
+        except Exception:
+            pass
+        try:
+            self._hide_omnibox_suggestions()
         except Exception:
             pass
         # Hundreds of small after() callbacks drive animation, frame polling,

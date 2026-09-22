@@ -1,0 +1,14 @@
+Tekzite Browser v10.5.50 validation
+===================================
+
+Fix: cold DWM taskbar restore recovery
+
+Validated:
+- 416 Python tests collected and passed.
+- Chromium extension feature checks passed with mocked Chrome APIs.
+- main.py and engine/net.py compile successfully.
+- Version metadata is aligned at 10.5.50.
+- Raw DWM destination has no visible window text.
+- Taskbar restore keeps the destination suspended until a forced DWM thumbnail re-registration succeeds.
+- Forced re-registration unregisters the previous HTHUMBNAIL, registers a fresh thumbnail and performs DwmFlush before reveal.
+- Failed restore registration retries while keeping the raw destination hidden.

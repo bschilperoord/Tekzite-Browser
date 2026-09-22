@@ -1,3 +1,43 @@
+# v10.5.54 - Drag lock after taskbar restore
+
+- Invalidates the cached native Tekzite HWND before the frameless window is temporarily de-framed for taskbar minimize.
+- Resolves and caches the current Tk top-level HWND again after restore, before the recreated DWM presentation surface is attached.
+- Revalidates the visible Tekzite HWND at every custom title-bar drag start so pre-minimize native handles can never drive post-restore movement.
+- Refuses to move the DWM destination when moving the real Tekzite root fails, preventing the webpage surface from drifting away by itself.
+- Keeps the fresh-destination restore architecture introduced in v10.5.52.
+
+# v10.5.52 - Fresh DWM destination restore
+
+- Destroys the transient DWM destination HWND before Tekzite is iconified.
+- Creates a brand-new hidden destination HWND after taskbar restore instead of reusing compositor state tied to the pre-minimize window.
+- Reattaches the existing Chromium session to the new destination so the engine updates its `embedded_parent` and registers a fresh DWM thumbnail.
+- Keeps the new destination transparent until the attach/registration sequence succeeds, then uses the normal reveal path.
+- Retries with another fresh HWND if restore attachment fails.
+
+# v10.5.51 - Cold DWM taskbar recovery
+
+- Treats minimize/restore as a cold DWM thumbnail recovery instead of only re-owning/remapping the destination popup.
+- Keeps the raw destination hidden while a fresh thumbnail is registered and `DwmFlush()` completes.
+- Reveals the restored page at alpha 0 first, then fades it opaque after a compositor beat.
+- Fails closed and retries if DWM registration is not ready, preventing the naked white destination from appearing.
+- Removes the visible `Tekzite DWM Surface` text from the raw Win32 `STATIC` destination.
+
+# v10.5.49 - DWM taskbar restore ownership
+
+- Hides the separate DWM destination before the frameless Tekzite root is iconified, preventing the presentation popup from becoming the only visible top-level window.
+- Blocks queued DWM reveal/geometry callbacks while Tekzite is minimized.
+- Reasserts the restored Tk root as the DWM popup owner after `overrideredirect` transitions.
+- Reapplies `WS_EX_TOOLWINDOW`, `WS_EX_NOACTIVATE` and `WS_EX_LAYERED` while clearing `WS_EX_APPWINDOW`, keeping the presentation surface out of taskbar/Alt-Tab activation.
+- Remaps and resizes the DWM surface only after the real Tekzite window has returned.
+
+# v10.5.48 - Local omnibox autocomplete
+
+- Adds an animated address-bar suggestion panel that stays above the native DWM webpage without stealing keyboard focus from the real omnibox Entry.
+- Ranks local suggestions from bookmarks, open tabs, per-tab session history, Tekzite browsing history when enabled, and searches/addresses entered during the current session.
+- Adds Up/Down selection, Tab-to-complete, Enter-to-open and Escape-to-dismiss keyboard controls.
+- Keeps autocomplete privacy-first: partial typing is never sent to a remote suggestion service.
+- Adds a Settings switch for local address-bar suggestions.
+
 # Tekzite Browser v10.5.47
 
 ## Foreground-native DWM keyboard bridge

@@ -5,7 +5,7 @@ NET = Path('engine/net.py').read_text(encoding='utf-8')
 
 
 def test_v94_version():
-    assert 'BROWSER_VERSION = "10.5.47"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.54"' in MAIN
 
 
 def test_browser_level_cdp_is_persistent():

@@ -32,6 +32,117 @@ def record_visit(rows, url, title, now=None):
     return [{'url': url, 'title': title, 'visited': now or time.time()}] + [r for r in rows if r.get('url') != url][:4999]
 
 
+def omnibox_suggestions(query, *, visits=None, bookmarks=None, tabs=None, recent_inputs=None, limit=6):
+    """Return ranked, local-only omnibox suggestions.
+
+    The matcher intentionally performs no network I/O.  It combines persistent
+    Tekzite history when available with bookmarks, open tabs, per-tab in-memory
+    history and raw searches/addresses entered during this browser session.
+    """
+    query = str(query or '').strip()
+    if not query:
+        return []
+    needle = query.casefold()
+    try:
+        limit = max(1, min(12, int(limit)))
+    except Exception:
+        limit = 6
+
+    ranked = []
+    seen = set()
+    serial = 0
+
+    def searchable_parts(value, title):
+        value = str(value or '').strip()
+        title = str(title or '').strip()
+        parts = [title, value]
+        try:
+            parsed = urlsplit(value)
+            host = str(parsed.hostname or '')
+            if host:
+                parts.extend([host, host[4:] if host.lower().startswith('www.') else host])
+            if parsed.netloc:
+                tail = parsed.netloc + (parsed.path or '')
+                parts.append(tail)
+        except Exception:
+            pass
+        return [part.casefold() for part in parts if part]
+
+    def match_score(value, title):
+        best = None
+        for part in searchable_parts(value, title):
+            if part == needle:
+                score = 0
+            elif part.startswith(needle):
+                score = 8
+            else:
+                at = part.find(needle)
+                if at < 0:
+                    continue
+                score = 32 + min(24, at)
+            best = score if best is None else min(best, score)
+        return best
+
+    def add(kind, value, title='', source_rank=20, visited=0.0, secondary=''):
+        nonlocal serial
+        value = str(value or '').strip()[:32768]
+        title = str(title or value).strip()[:1024]
+        if not value:
+            return
+        score = match_score(value, title)
+        if score is None:
+            return
+        key = value.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        serial += 1
+        ranked.append((
+            score + int(source_rank),
+            -float(visited or 0.0),
+            serial,
+            {
+                'kind': str(kind),
+                'title': title or value,
+                'value': value,
+                'secondary': str(secondary or value),
+            },
+        ))
+
+    # Raw inputs are useful for repeated searches even in Privacy Lockdown,
+    # where browsing history is deliberately not persisted.
+    for index, value in enumerate(list(recent_inputs or [])[:100]):
+        add('recent', value, value, 2 + min(index, 18), secondary='Recent input')
+
+    for item in list(bookmarks or []):
+        if isinstance(item, dict):
+            add('bookmark', item.get('url'), item.get('title'), 0, secondary=item.get('url'))
+
+    for tab in list(tabs or []):
+        if not isinstance(tab, dict):
+            continue
+        tab_url = tab.get('url')
+        add('tab', tab_url, tab.get('title') or tab_url, 4, secondary=tab_url)
+        for offset, value in enumerate(reversed(list(tab.get('history') or [])[-40:])):
+            add('history', value, value, 11 + min(offset, 16), secondary='This session')
+
+    for item in list(visits or []):
+        if isinstance(item, dict):
+            add('history', item.get('url'), item.get('title'), 8, item.get('visited', 0), item.get('url'))
+
+    ranked.sort(key=lambda row: (row[0], row[1], row[2]))
+    # Always reserve the last slot for the user's literal query. That keeps the
+    # omnibox predictable: suggestions never make the search action disappear.
+    result = [row[3] for row in ranked[:max(0, limit - 1)]]
+    result.append({
+        'kind': 'search',
+        'title': f'Search for “{query[:160]}”',
+        'value': query,
+        'secondary': 'Search',
+    })
+    return result[:limit]
+
+
 def download_progress(item):
     received = max(0, item.get('bytesReceived', 0))
     total = item.get('totalBytes', 0)

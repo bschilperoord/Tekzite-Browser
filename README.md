@@ -2,9 +2,31 @@
 
 Tekzite Browser is an experimental Windows desktop browser shell built in Python/Tk around a real Chromium renderer. Tekzite keeps its own tabs, omnibox, menus, preferences and interaction layer while Chromium handles web standards, JavaScript, media, cookies, canvas, WebGL and page rendering.
 
-> **Current release:** v10.5.47 UltraSpeed for Windows  
+> **Current release:** v10.5.54 UltraSpeed for Windows  
+
+### Drag lock after taskbar restore (v10.5.54)
+
+Tekzite now refreshes the native Tk root HWND after every taskbar restore and again at the start of each custom title-bar drag. The DWM page surface is only moved when the real Tekzite root move succeeds, preventing a recreated DWM destination from drifting away on its own after minimize/restore.
+
+### Fresh DWM destination on taskbar restore (v10.5.52)
+
+Taskbar minimize retires the transient DWM destination HWND completely. On restore Tekzite creates a new hidden destination, reattaches the existing Chromium session to that HWND, registers a fresh thumbnail, and only then reveals the page. This avoids carrying a detached destination across Tk's minimize/restore wrapper transition.
+
+### Cold DWM taskbar recovery (v10.5.51)
+
+Taskbar restore now treats the DWM thumbnail as disposable compositor state. Tekzite keeps the raw destination hidden, forces a new DWM thumbnail registration, flushes the compositor, and only then fades the page surface back in. The internal destination window also has no visible caption text, so a delayed or failed thumbnail can never expose the old `Tekzite DWM Surface` label.
+
+### DWM taskbar restore ownership (v10.5.49)
+
+Tekzite now suspends its separate DWM presentation popup before minimizing the frameless browser window. On taskbar restore, the popup is reattached to the current native Tekzite owner and its non-activating tool-window style is reasserted before the webpage surface is shown again. This prevents the internal DWM surface from appearing as the front window after restore.
+
 > **Platform:** Windows 10/11  
 > **Status:** experimental, actively developed
+
+### Local omnibox autocomplete (v10.5.48)
+
+The address bar now shows instant local suggestions while you type. Results are ranked from bookmarks, open tabs, in-memory tab history, Tekzite history when enabled, and searches/addresses entered in the current session. Arrow keys move through suggestions, Tab accepts a suggestion without navigating, Enter opens the selected suggestion, and Escape closes the panel. Tekzite does not send partial typing to a remote autocomplete service.
+
 
 ## New in v10.5.47
 

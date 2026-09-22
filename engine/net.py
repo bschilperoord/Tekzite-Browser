@@ -4761,6 +4761,19 @@ def request_embedded_chromium_dwm_recrop():
     _EDGE_SESSION["dwm_force_full_recrop"] = True
     return True
 
+def request_embedded_chromium_dwm_reregister():
+    """Force a cold DWM thumbnail registration on the next native resize.
+
+    Minimize/restore can leave a numerically valid HTHUMBNAIL whose visual
+    composition is no longer attached to the destination.  A cold registration
+    plus DwmFlush is the reliable restore boundary.
+    """
+    if not _EDGE_SESSION:
+        return False
+    _EDGE_SESSION["dwm_force_full_recrop"] = True
+    _EDGE_SESSION["dwm_force_reregister"] = True
+    return True
+
 def _position_native_chromium_overlay(session, width: int, height: int):
     """Present Chromium through a DWM thumbnail owned by Tekzite.
 
@@ -5148,11 +5161,12 @@ def _position_native_chromium_overlay(session, width: int, height: int):
         dwmapi.DwmFlush.argtypes = []
         dwmapi.DwmFlush.restype = HRESULT
 
+        force_reregister = bool(session.pop("dwm_force_reregister", False))
         old_thumb = session.get("dwm_thumbnail_handle")
         old_source = _hwnd_int(session.get("dwm_thumbnail_source") or 0)
         old_destination = _hwnd_int(session.get("dwm_thumbnail_destination") or 0)
         thumb = None
-        if old_thumb and old_source == source and old_destination == destination:
+        if old_thumb and old_source == source and old_destination == destination and not force_reregister:
             thumb = HTHUMBNAIL(_hwnd_int(old_thumb))
         else:
             if old_thumb:
@@ -5169,6 +5183,8 @@ def _position_native_chromium_overlay(session, width: int, height: int):
             session["dwm_thumbnail_source"] = source
             session["dwm_thumbnail_destination"] = destination
             session["dwm_thumbnail_registered"] = True
+            if force_reregister:
+                session["dwm_restore_reregister_count"] = int(session.get("dwm_restore_reregister_count") or 0) + 1
 
         DWM_TNP_RECTDESTINATION = 0x00000001
         DWM_TNP_RECTSOURCE = 0x00000002
@@ -5191,7 +5207,7 @@ def _position_native_chromium_overlay(session, width: int, height: int):
         # Only the cold/new-registration path needs a synchronous compositor
         # barrier. Steady-state resizes use _resize_existing_dwm_thumbnail_fast
         # and deliberately avoid DwmFlush() to prevent frame-by-frame stalls.
-        if not old_thumb or old_source != source or old_destination != destination:
+        if force_reregister or not old_thumb or old_source != source or old_destination != destination:
             dwmapi.DwmFlush()
             session["dwm_cold_register_flush_count"] = int(session.get("dwm_cold_register_flush_count") or 0) + 1
         # v9.6: do not hold first reveal behind three 40 ms presenter-settle

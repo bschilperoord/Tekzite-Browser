@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.47"
+    assert main.BROWSER_VERSION == "10.5.54"
 
 
 def test_closed_target_destruction_is_debounced_away_from_plus_click():

@@ -1,0 +1,6 @@
+Tekzite Browser v10.5.48 validation
+
+- Local-only omnibox autocomplete from bookmarks, tabs, session history and Tekzite history.
+- Suggestion popup does not call focus_force and therefore keeps keyboard ownership on the address Entry.
+- Up/Down, Tab, Enter and Escape suggestion controls covered by regression tests.
+- No remote autocomplete/suggestion request path added.

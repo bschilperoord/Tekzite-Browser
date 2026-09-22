@@ -1,0 +1,7 @@
+Tekzite Browser v10.5.54 validation
+
+- Python compile check: PASS
+- Full pytest regression suite: PASS
+- Chromium extension checks: PASS
+- Taskbar restore model: fresh DWM destination HWND on each restore
+- Existing Chromium session is reattached to the new destination before reveal
