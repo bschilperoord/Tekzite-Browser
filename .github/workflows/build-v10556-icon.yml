@@ -15,11 +15,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Apply v10.5.56 source patch
+      - name: Apply v10.5.56 native identity changes
         shell: pwsh
-        run: |
-          git apply --whitespace=nowarn .build/v10.5.56.patch
-          if ($LASTEXITCODE -ne 0) { throw "Could not apply v10.5.56 patch" }
+        run: python .build/apply-v10.5.56.py
 
       - name: Set up Python
         uses: actions/setup-python@v5
