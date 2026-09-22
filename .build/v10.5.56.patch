@@ -1,0 +1,261 @@
+--- a/main.py
++++ b/main.py
+@@ -634,6 +634,54 @@
+     return uri
+ 
+ 
++def _set_windows_app_user_model_id():
++    """Give Tekzite its own Windows taskbar/application identity before Tk maps."""
++    if sys.platform != "win32":
++        return False
++    try:
++        import ctypes
++        app_id = "Tekzite.Browser"
++        shell32 = ctypes.windll.shell32
++        shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [ctypes.c_wchar_p]
++        shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.c_long
++        return int(shell32.SetCurrentProcessExplicitAppUserModelID(app_id)) == 0
++    except Exception:
++        return False
++
++
++def _resource_root():
++    if getattr(sys, "frozen", False):
++        base = getattr(sys, "_MEIPASS", None)
++        if base:
++            return Path(base)
++        try:
++            return Path(sys.executable).resolve().parent
++        except Exception:
++            pass
++    return Path(__file__).resolve().parent
++
++
++def _asset_path(*parts):
++    candidates = []
++    primary = _resource_root()
++    candidates.append(primary.joinpath(*parts))
++    try:
++        executable_root = Path(sys.executable).resolve().parent
++        candidate = executable_root.joinpath(*parts)
++        if candidate not in candidates:
++            candidates.append(candidate)
++    except Exception:
++        pass
++    script_root = Path(__file__).resolve().parent
++    candidate = script_root.joinpath(*parts)
++    if candidate not in candidates:
++        candidates.append(candidate)
++    for candidate in candidates:
++        if candidate.is_file():
++            return candidate
++    return candidates[0]
++
++
+ def _preferences_path():
+     base = _state_root_for_profile()
+     try:
+@@ -770,7 +818,7 @@
+ 
+ 
+ 
+-BROWSER_VERSION = "10.5.54"
++BROWSER_VERSION = "10.5.56"
+ 
+ 
+ def _enable_per_monitor_dpi_awareness():
+@@ -1813,6 +1861,92 @@
+             except Exception:
+                 pass
+ 
++    def _native_root_hwnd(self):
++        if sys.platform != "win32":
++            return 0
++        try:
++            import ctypes
++            from ctypes import wintypes
++            user32 = ctypes.windll.user32
++            self.root.update_idletasks()
++            inner = wintypes.HWND(int(self.root.winfo_id()))
++            GA_ROOT = 2
++            try:
++                user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
++                user32.GetAncestor.restype = wintypes.HWND
++                hwnd = int(user32.GetAncestor(inner, GA_ROOT) or 0)
++            except Exception:
++                hwnd = 0
++            if not hwnd:
++                hwnd = int(user32.GetParent(inner) or int(inner.value or 0))
++            return hwnd
++        except Exception:
++            return 0
++
++    def _apply_native_windows_icon(self):
++        """Force Tekzite's icon onto the actual frameless Win32 wrapper HWND."""
++        if sys.platform != "win32":
++            return False
++        icon_ico = _asset_path("assets", "tekzite.ico")
++        if not icon_ico.is_file():
++            return False
++        try:
++            import ctypes
++            from ctypes import wintypes
++            user32 = ctypes.windll.user32
++            hwnd = int(self._native_root_hwnd() or 0)
++            if not hwnd:
++                return False
++            IMAGE_ICON = 1
++            LR_LOADFROMFILE = 0x0010
++            LR_DEFAULTSIZE = 0x0040
++            WM_SETICON = 0x0080
++            ICON_SMALL = 0
++            ICON_BIG = 1
++            user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
++            user32.LoadImageW.restype = wintypes.HANDLE
++            user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
++            user32.SendMessageW.restype = wintypes.LRESULT
++            big = user32.LoadImageW(None, str(icon_ico), IMAGE_ICON, 256, 256, LR_LOADFROMFILE)
++            small = user32.LoadImageW(None, str(icon_ico), IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
++            if not big:
++                big = user32.LoadImageW(None, str(icon_ico), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
++            if not small:
++                small = user32.LoadImageW(None, str(icon_ico), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
++            self._native_icon_handles = tuple(int(h) for h in (big, small) if h)
++            if big:
++                user32.SendMessageW(wintypes.HWND(hwnd), WM_SETICON, ICON_BIG, int(big))
++            if small:
++                user32.SendMessageW(wintypes.HWND(hwnd), WM_SETICON, ICON_SMALL, int(small))
++            return bool(big or small)
++        except Exception:
++            return False
++
++    def _apply_app_icon(self):
++        """Apply the bundled Tekzite icon to Tk and the native Windows wrapper."""
++        self._app_icon_photo = None
++        self._native_icon_handles = ()
++        icon_png = _asset_path("assets", "tekzite.png")
++        icon_ico = _asset_path("assets", "tekzite.ico")
++        if os.name == "nt":
++            try:
++                if icon_ico.is_file():
++                    self.root.iconbitmap(default=str(icon_ico))
++            except Exception:
++                pass
++        try:
++            if icon_png.is_file():
++                self._app_icon_photo = tk.PhotoImage(file=str(icon_png))
++                self.root.iconphoto(True, self._app_icon_photo)
++        except Exception:
++            self._app_icon_photo = None
++        if sys.platform == "win32":
++            try:
++                self.root.after(1, self._apply_native_windows_icon)
++                self.root.after(40, self._apply_native_windows_icon)
++            except Exception:
++                pass
++
+     def __init__(self):
+         self.browser_version = BROWSER_VERSION
+         self._profile_name = _requested_profile_name()
+@@ -1848,7 +1982,9 @@
+                 os.environ["TEKZITE_CHROMIUM_PROFILE"] = str(profile_dir)
+ 
+         self._dpi_awareness_enabled = _enable_per_monitor_dpi_awareness()
++        self._windows_app_user_model_id_set = _set_windows_app_user_model_id()
+         self.root = tk.Tk()
++        self._apply_app_icon()
+         self.preferences = load_preferences()
+         if not self._private_mode and self.preferences.get("privacy_lockdown", True):
+             # Privacy Lockdown never points Chromium at a persistent profile.
+@@ -8449,6 +8585,7 @@
+             set_long(hwnd, GWL_EXSTYLE, style)
+             self._window_rounding_signature = None
+             self._apply_window_rounding()
++            self._apply_native_windows_icon()
+         except Exception:
+             pass
+ 
+--- a/build_windows.ps1
++++ b/build_windows.ps1
+@@ -80,9 +80,12 @@
+     raise SystemExit("tekzite-network.exe is missing")
+ 
+ extension_dir = project / "chromium_zoom_extension"
++assets_dir = project / "assets"
+ datas = []
+ if extension_dir.is_dir():
+     datas.append((str(extension_dir), "chromium_zoom_extension"))
++if assets_dir.is_dir():
++    datas.append((str(assets_dir), "assets"))
+ 
+ icon_candidate = project / "assets" / "tekzite.ico"
+ icon_path = str(icon_candidate) if icon_candidate.is_file() else None
+--- a/chromium_zoom_extension/manifest.json
++++ b/chromium_zoom_extension/manifest.json
+@@ -1,7 +1,7 @@
+ {
+   "manifest_version": 3,
+   "name": "Tekzite Local Browser Services",
+-  "version": "10.5.54",
++  "version": "10.5.56",
+   "description": "Local browser services and privacy enforcement for Tekzite.",
+   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtU06oQ2a7CIKK9jZGuYne1vM2BwhLzzOBecJzoX7M2Gicl2sfopF3il0TgeGHAJng3OttOxA5PfJLwsbaPZZSGGvhfhutXkvWleeD9BvL10GuH2OBVfHOX4oSTwssYGc7syaMl2DwMQrCyVq/IvtAC5uJCVsqrN0YvULQ2jJDyQBvDbAjvVDBDEeMcADzKmsCXDk+nxOgKVDB+84TOcsdydax4EUdetMz6nINvoCW/6Y12ZlxBIdQYVo0/zIP3oniIydC8QS18h0kKirjMbZKSR9hI1NCB/JHfgweC40AgO7ayGF1ZXOKZsSFRpvBPuYUxvPyvmZk3ERdH1IMxBXnwIDAQAB",
+   "permissions": [
+--- a/installer/TekziteBrowser.iss
++++ b/installer/TekziteBrowser.iss
+@@ -1,5 +1,5 @@
+ #define MyAppName "Tekzite Browser"
+-#define MyAppVersion "10.5.54"
++#define MyAppVersion "10.5.56"
+ #define MyAppPublisher "Tekzite"
+ #define MyAppExeName "TekziteBrowser.exe"
+ 
+--- a/tekzite_browser.manifest
++++ b/tekzite_browser.manifest
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+ <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+-  <assemblyIdentity version="10.5.54.0" processorArchitecture="*" name="Tekzite.Browser" type="win32"/>
++  <assemblyIdentity version="10.5.56.0" processorArchitecture="*" name="Tekzite.Browser" type="win32"/>
+   <description>Tekzite Browser</description>
+   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+     <security>
+--- a/tekzite_version_info.txt
++++ b/tekzite_version_info.txt
+@@ -1,7 +1,7 @@
+ VSVersionInfo(
+   ffi=FixedFileInfo(
+-    filevers=(10, 5, 52, 0),
+-    prodvers=(10, 5, 52, 0),
++    filevers=(10, 5, 56, 0),
++    prodvers=(10, 5, 56, 0),
+     mask=0x3f,
+     flags=0x0,
+     OS=0x40004,
+@@ -15,11 +15,11 @@
+         u'040904B0',
+         [StringStruct(u'CompanyName', u'Tekzite'),
+          StringStruct(u'FileDescription', u'Tekzite Browser'),
+-         StringStruct(u'FileVersion', u'10.5.54'),
++         StringStruct(u'FileVersion', u'10.5.56'),
+          StringStruct(u'InternalName', u'TekziteBrowser'),
+          StringStruct(u'OriginalFilename', u'TekziteBrowser.exe'),
+          StringStruct(u'ProductName', u'Tekzite Browser'),
+-         StringStruct(u'ProductVersion', u'10.5.54')])
++         StringStruct(u'ProductVersion', u'10.5.56')])
+     ]),
+     VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+   ]
+--- a/assets/README.txt
++++ b/assets/README.txt
+@@ -1,6 +1,6 @@
+-Place the Windows application icon here as:
++Bundled Tekzite application icons:
+ 
+-    tekzite.ico
++- tekzite.png  -> runtime Tk window icon source
++- tekzite.ico  -> Windows executable / installer icon
+ 
+-The PyInstaller build works without it. The Inno Setup installer currently expects
+-this icon, so add it before compiling the installer.
++The Windows build and installer both use these files automatically when present.
