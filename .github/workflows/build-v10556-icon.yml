@@ -31,16 +31,12 @@ jobs:
           python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
           New-Item -ItemType Directory -Force -Path assets | Out-Null
           @'
-          import base64
           from pathlib import Path
           from PIL import Image
 
-          payload = Path(".build/tekzite-icon.jpg.b64").read_text(encoding="utf-8")
-          alphabet = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
-          clean = "".join(ch for ch in payload if ch in alphabet)
-          raw = base64.b64decode(clean, validate=False)
-          source = Path("assets/tekzite-source.jpg")
-          source.write_bytes(raw)
+          source = Path(".build/tekzite-icon.jpg")
+          if not source.is_file():
+              raise SystemExit("binary Tekzite icon source is missing")
           src = Image.open(source).convert("RGBA")
           src.save("assets/tekzite.png", optimize=True)
           src.save(
@@ -48,7 +44,7 @@ jobs:
               format="ICO",
               sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)],
           )
-          print(f"Generated Tekzite icon from {len(raw)} bytes")
+          print(f"Generated Tekzite icon from {source.stat().st_size} bytes")
           '@ | python -
           if (-not (Test-Path assets\tekzite.ico)) { throw "tekzite.ico was not generated" }
 
