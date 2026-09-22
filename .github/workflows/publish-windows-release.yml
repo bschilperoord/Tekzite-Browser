@@ -79,7 +79,7 @@ jobs:
             "tests/current/test_startup_input_v86.py.rej"
           )
           foreach ($reject in $rejects) {
-            $relative = [IO.Path]::GetRelativePath((Get-Location).Path, $reject.FullName).Replace("\\", "/")
+            $relative = [IO.Path]::GetRelativePath((Get-Location).Path, $reject.FullName).Replace("\", "/")
             if ($allowedRejects -notcontains $relative) {
               Write-Host "Unexpected patch reject: $relative"
               Get-Content $reject.FullName
