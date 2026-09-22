@@ -70,20 +70,81 @@ jobs:
             $input.Dispose()
           }
 
-          git apply --reject --ignore-space-change --ignore-whitespace $patchPath
+          # The published v10.5.42 tree intentionally lacks four tests that
+          # were present in the local v10.5.42 source bundle, and three old
+          # metadata files still carry earlier release strings. Those seven
+          # paths are handled explicitly below; every code hunk stays strict.
+          git apply --reject --ignore-space-change --ignore-whitespace `
+            --exclude=installer/README.txt `
+            --exclude=tests/current/test_stability_v1011.py `
+            --exclude=tests/current/test_startup_input_v86.py `
+            --exclude=tests/current/test_v10539_screen_centered_dialogs.py `
+            --exclude=tests/current/test_v10540_default_browser.py `
+            --exclude=tests/current/test_v10541_default_browser_detection.py `
+            --exclude=tests/current/test_v10542_default_browser_effective_handler.py `
+            $patchPath
           $applyExit = $LASTEXITCODE
+
           $rejects = @(Get-ChildItem -Path . -Recurse -Filter "*.rej" -ErrorAction SilentlyContinue)
           if ($rejects.Count -gt 0) {
-            Write-Host "Patch rejects:"
+            Write-Host "Unexpected patch rejects:"
             foreach ($reject in $rejects) {
               Write-Host $reject.FullName
               Get-Content $reject.FullName
             }
-            throw "v10.5.47 source patch has $($rejects.Count) rejected hunks"
+            throw "v10.5.47 source patch has unexpected rejected hunks"
           }
           if ($applyExit -ne 0) {
             throw "v10.5.47 source patch failed with exit code $applyExit"
           }
+
+          @'
+          from pathlib import Path
+          import re
+
+          installer = Path("installer/README.txt")
+          body = installer.read_text(encoding="utf-8")
+          body = re.sub(
+              r"Tekzite-Browser-Setup-10\.5\.\d+\.exe",
+              "Tekzite-Browser-Setup-10.5.47.exe",
+              body,
+          )
+          installer.write_text(body, encoding="utf-8")
+
+          stability = Path("tests/current/test_stability_v1011.py")
+          body = stability.read_text(encoding="utf-8")
+          body = re.sub(
+              r"main\.BROWSER_VERSION == '10\.5\.\d+'",
+              "main.BROWSER_VERSION == '10.5.47'",
+              body,
+          )
+          body = re.sub(r'version="10\.5\.\d+\.0"', 'version="10.5.47.0"', body)
+          body = re.sub(
+              r"extension\['version'\] == '10\.5\.\d+'",
+              "extension['version'] == '10.5.47'",
+              body,
+          )
+          body = re.sub(
+              r"filevers=\(10,\s*5,\s*\d+,\s*0\)",
+              "filevers=(10, 5, 47, 0)",
+              body,
+          )
+          body = re.sub(
+              r"u'ProductVersion', u'10\.5\.\d+'",
+              "u'ProductVersion', u'10.5.47'",
+              body,
+          )
+          stability.write_text(body, encoding="utf-8")
+
+          startup = Path("tests/current/test_startup_input_v86.py")
+          body = startup.read_text(encoding="utf-8")
+          body = re.sub(
+              r'BROWSER_VERSION = "10\.5\.\d+"',
+              'BROWSER_VERSION = "10.5.47"',
+              body,
+          )
+          startup.write_text(body, encoding="utf-8")
+          '@ | python -
 
           Remove-Item ".release" -Recurse -Force
 
