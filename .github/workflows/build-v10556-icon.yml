@@ -1,0 +1,93 @@
+name: Build Tekzite Browser v10.5.56 Windows icon test
+
+on:
+  push:
+    branches:
+      - build/v10.5.56-icon
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply v10.5.56 source patch
+        shell: pwsh
+        run: |
+          git apply --whitespace=nowarn .build/v10.5.56.patch
+          if ($LASTEXITCODE -ne 0) { throw "Could not apply v10.5.56 patch" }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Prepare Tekzite application icon
+        shell: pwsh
+        run: |
+          python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
+          New-Item -ItemType Directory -Force -Path assets | Out-Null
+          $jpg = [Convert]::FromBase64String((Get-Content -Raw .build/tekzite-icon.jpg.b64).Trim())
+          [IO.File]::WriteAllBytes((Join-Path $PWD "assets\tekzite-source.jpg"), $jpg)
+          @'
+          from PIL import Image
+          from pathlib import Path
+          src = Image.open(Path("assets/tekzite-source.jpg")).convert("RGBA")
+          src.save("assets/tekzite.png", optimize=True)
+          src.save(
+              "assets/tekzite.ico",
+              format="ICO",
+              sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)],
+          )
+          '@ | python -
+          if (-not (Test-Path assets\tekzite.ico)) { throw "tekzite.ico was not generated" }
+
+      - name: Validate patched source
+        shell: pwsh
+        run: |
+          python -m py_compile main.py browser_features.py engine\net.py
+          python - <<'PY'
+          from pathlib import Path
+          source = Path('main.py').read_text(encoding='utf-8')
+          assert 'BROWSER_VERSION = "10.5.56"' in source
+          assert 'Tekzite.Browser' in source
+          assert 'WM_SETICON' in source
+          assert Path('assets/tekzite.ico').is_file()
+          print('v10.5.56 native identity/icon checks passed')
+          PY
+
+      - name: Build Windows x64 EXE
+        shell: pwsh
+        run: .\build_windows.ps1
+
+      - name: Verify Windows executable metadata
+        shell: pwsh
+        run: |
+          $exe = Get-Item .\dist\TekziteBrowser.exe
+          Write-Host "Product: $($exe.VersionInfo.ProductName)"
+          Write-Host "Version: $($exe.VersionInfo.ProductVersion)"
+          if ($exe.VersionInfo.ProductName -ne "Tekzite Browser") { throw "Unexpected product name" }
+          if ($exe.VersionInfo.ProductVersion -ne "10.5.56") { throw "Unexpected product version" }
+
+      - name: Package build
+        shell: pwsh
+        run: |
+          $name = "Tekzite-Browser-v10.5.56-Windows-x64.exe"
+          Copy-Item .\dist\TekziteBrowser.exe ".\$name" -Force
+          Compress-Archive -Path ".\$name" -DestinationPath ".\Tekzite-Browser-v10.5.56-Windows-x64.zip" -CompressionLevel Optimal
+          Get-FileHash ".\$name" -Algorithm SHA256 | Format-List
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tekzite-Browser-v10.5.56-Windows-x64
+          path: |
+            Tekzite-Browser-v10.5.56-Windows-x64.exe
+            Tekzite-Browser-v10.5.56-Windows-x64.zip
+          if-no-files-found: error
+          compression-level: 0
