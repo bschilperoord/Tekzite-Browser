@@ -6,7 +6,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert 'BROWSER_VERSION = "10.5.42"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.47"' in MAIN
 
 
 def test_dwm_mapping_uses_live_native_to_css_scale():

@@ -9,7 +9,7 @@ def _settings_block():
     return MAIN[MAIN.index("def show_preferences"):MAIN.index("def _raise_toplevel_above_dwm")]
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.42"
+    assert main.BROWSER_VERSION == "10.5.47"
 
 def test_settings_stays_in_tk_coordinate_space():
     block = _settings_block()

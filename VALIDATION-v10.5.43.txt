@@ -1,0 +1,10 @@
+Tekzite Browser v10.5.43 validation
+
+Change:
+- Reclaims Tk keyboard focus on DWM page press.
+- Explicitly focuses the clicked Chromium point on the ordered input lane before subsequent keyboard packets.
+
+Validation:
+- python -m py_compile main.py browser_features.py engine/net.py
+- python -m pytest -q tests/current
+- node tests/current/test_extension_features.cjs

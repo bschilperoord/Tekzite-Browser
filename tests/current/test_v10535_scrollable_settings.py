@@ -11,7 +11,7 @@ def _settings_block():
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.42"
+    assert main.BROWSER_VERSION == "10.5.47"
 
 
 def test_settings_body_has_vertical_scrollbar_and_canvas():

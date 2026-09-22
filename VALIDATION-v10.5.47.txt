@@ -1,0 +1,7 @@
+Tekzite Browser v10.5.47 validation
+
+- DWM page typing no longer depends on Tk KeyPress delivery.
+- Foreground-only GetAsyncKeyState poller is activated only after a real page click.
+- Active Windows keyboard layout is translated with ToUnicodeEx and printable text uses Input.insertText.
+- No raw Python WNDPROC or bootstrap-time keyboard hook is introduced.
+- Native poll stops when the address bar takes keyboard ownership and during shutdown.

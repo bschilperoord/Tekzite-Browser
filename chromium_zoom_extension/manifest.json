@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tekzite Local Browser Services",
-  "version": "10.5.42",
+  "version": "10.5.47",
   "description": "Local browser services and privacy enforcement for Tekzite.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtU06oQ2a7CIKK9jZGuYne1vM2BwhLzzOBecJzoX7M2Gicl2sfopF3il0TgeGHAJng3OttOxA5PfJLwsbaPZZSGGvhfhutXkvWleeD9BvL10GuH2OBVfHOX4oSTwssYGc7syaMl2DwMQrCyVq/IvtAC5uJCVsqrN0YvULQ2jJDyQBvDbAjvVDBDEeMcADzKmsCXDk+nxOgKVDB+84TOcsdydax4EUdetMz6nINvoCW/6Y12ZlxBIdQYVo0/zIP3oniIydC8QS18h0kKirjMbZKSR9hI1NCB/JHfgweC40AgO7ayGF1ZXOKZsSFRpvBPuYUxvPyvmZk3ERdH1IMxBXnwIDAQAB",
   "permissions": [

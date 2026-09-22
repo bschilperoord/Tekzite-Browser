@@ -2,9 +2,37 @@
 
 Tekzite Browser is an experimental Windows desktop browser shell built in Python/Tk around a real Chromium renderer. Tekzite keeps its own tabs, omnibox, menus, preferences and interaction layer while Chromium handles web standards, JavaScript, media, cookies, canvas, WebGL and page rendering.
 
-> **Current release:** v10.5.42 UltraSpeed for Windows  
+> **Current release:** v10.5.47 UltraSpeed for Windows  
 > **Platform:** Windows 10/11  
 > **Status:** experimental, actively developed
+
+## New in v10.5.47
+
+- Replaces the unreliable Tk-only DWM keyboard path with a foreground-only Win32 key-state poller.
+- Translates physical keys through the active Windows keyboard layout and forwards printable text to Chromium with `Input.insertText`.
+- Keeps the safe lazy Tk focus sink, but no longer requires Tk to deliver `KeyPress` events for webpage typing to work.
+- Handles Backspace, Enter, Tab, Delete, arrows, Home/End/PageUp/PageDown and common editing shortcuts on the same ordered Chromium input lane.
+- Adds native keyboard-poller diagnostics while keeping raw Python Win32 callbacks out of bootstrap.
+
+## New in v10.5.46
+
+- Reintroduces the DWM keyboard-sink idea without the unstable raw Win32 subclass used by v10.5.44.
+- Creates the sink lazily only after a real webpage click, so Chromium/DWM bootstrap remains untouched.
+- Uses a Tk-owned native child HWND and Tk's normal key translation, then forwards keys through Tekzite's existing ordered Chromium input lane.
+- Keeps Startpage/input typing support while removing the Python WNDPROC lifetime that could trigger bootstrap errors or a crash.
+- Adds keyboard-sink diagnostics to the Tekzite debug report.
+
+## New in v10.5.45
+
+- Rolls back the experimental v10.5.44 native Win32 DWM keyboard-sink path after bootstrap errors and a crash were observed.
+- Restores the stable v10.5.43 DWM input architecture, including its click-to-focus handling, without the extra native child HWND/WndProc layer.
+- Keeps all v10.5.42 default-browser integration, centered dialogs, and v10.5.38 deterministic DWM viewport resizing intact.
+
+## New in v10.5.43
+
+- Fixes DWM-page text entry on sites such as Startpage by explicitly reclaiming Tekzite keyboard focus on a page click.
+- Queues a Chromium point-focus immediately after the DWM mouse press on the same ordered CDP input lane, so fast keystrokes cannot arrive before the clicked input is focused.
+- Keeps the existing zoom-aware DWM pointer mapping and native Chromium typography path unchanged.
 
 ## New in v10.5.42
 

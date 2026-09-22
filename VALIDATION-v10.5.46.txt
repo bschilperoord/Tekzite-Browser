@@ -1,0 +1,7 @@
+Tekzite Browser v10.5.46 validation
+
+- Safe DWM keyboard sink is Tk-owned and created lazily after page click.
+- No raw keyboard-sink WNDPROC, CreateWindowExW subclass, or bootstrap-time sink creation.
+- Existing v10.5.43 DOM point-focus retained.
+- Full Python regression suite passes.
+- Chromium extension feature checks pass.

@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.42"
+    assert main.BROWSER_VERSION == "10.5.47"
 
 
 def test_animated_popup_menu_replaces_native_popup_primitive():

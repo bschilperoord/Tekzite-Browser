@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.42"
+    assert main.BROWSER_VERSION == "10.5.47"
 
 
 def test_all_animated_toplevels_hide_native_title_bar():

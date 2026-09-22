@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_is_v1050():
-    assert main.BROWSER_VERSION == "10.5.42"
+    assert main.BROWSER_VERSION == "10.5.47"
 
 
 def test_luxe_defaults_enable_soft_tabs_and_traffic_lights():

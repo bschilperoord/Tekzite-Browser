@@ -766,7 +766,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.42"
+BROWSER_VERSION = "10.5.47"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -1802,6 +1802,28 @@ class BrowserApp(BrowserFeatures):
         self._dwm_host_size = (1, 1)
         self._dwm_host_wndproc = None
         self._dwm_host_original_wndproc = None
+        # v10.5.47: keep the safe lazy Tk sink as a focus anchor, but do not
+        # depend on Tk receiving KeyPress events from it.  DWM presentation is a
+        # separate top-level visual mirror and some Windows builds can report
+        # native focus without ever translating that focus into a Tk key event.
+        # A foreground-only GetAsyncKeyState poller now supplies the missing
+        # physical-key path without installing a raw Python WNDPROC.
+        self._dwm_keyboard_sink_widget = None
+        self._dwm_keyboard_sink_hwnd = None
+        self._dwm_keyboard_sink_focused = False
+        self._dwm_keyboard_sink_messages = 0
+        self._dwm_keyboard_sink_chars = 0
+        self._dwm_keyboard_sink_last = None
+        self._dwm_keyboard_sink_create_count = 0
+        self._dwm_keyboard_sink_focus_count = 0
+        self._dwm_keyboard_poll_after_id = None
+        self._dwm_keyboard_poll_active = False
+        self._dwm_keyboard_poll_down = {}
+        self._dwm_keyboard_poll_events = 0
+        self._dwm_keyboard_poll_chars = 0
+        self._dwm_keyboard_poll_last = None
+        self._dwm_keyboard_poll_error = None
+        self._dwm_keyboard_poll_foreground = False
         self._dwm_user32 = None
         # v6.1: keep the raw DWM destination hidden until Chromium has a
         # verified frame, and coalesce move/resize traffic while the user drags
@@ -4859,6 +4881,359 @@ class BrowserApp(BrowserFeatures):
             return False
         return scheme in {"http", "https", "file", "data", "about"}
 
+    def _on_dwm_keyboard_sink_key(self, event):
+        """Consume Tk sink keys while the native DWM poller owns page input.
+
+        v10.5.46 forwarded from this callback, but the user's failing machine
+        demonstrated that Tk can own a focused child HWND without delivering a
+        useful KeyPress stream.  Keep these counters as diagnostics and let the
+        foreground-only native poller be the authoritative DWM keyboard source.
+        """
+        self._dwm_keyboard_sink_messages += 1
+        char = getattr(event, "char", "") or ""
+        keysym = getattr(event, "keysym", "") or ""
+        state = int(getattr(event, "state", 0) or 0)
+        self._dwm_keyboard_sink_last = (keysym, char, state)
+        if char and char.isprintable():
+            self._dwm_keyboard_sink_chars += 1
+        if getattr(self, "_dwm_keyboard_poll_active", False):
+            return "break"
+        return self._on_chromium_surface_key(event)
+
+    @staticmethod
+    def _dwm_keyboard_poll_vks():
+        """Virtual keys worth sampling while a DWM page owns keyboard input."""
+        return (
+            0x08, 0x09, 0x0D, 0x1B, 0x20,
+            0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2E,
+            *range(0x30, 0x5B),       # 0-9 and A-Z
+            *range(0x60, 0x70),       # numpad
+            *range(0x70, 0x7C),       # F1-F12
+            *range(0xBA, 0xC1),       # OEM punctuation
+            *range(0xDB, 0xDF),       # OEM punctuation
+            0xE2,                     # OEM 102 key
+        )
+
+    def _stop_dwm_keyboard_poll(self):
+        after_id = getattr(self, "_dwm_keyboard_poll_after_id", None)
+        self._dwm_keyboard_poll_after_id = None
+        self._dwm_keyboard_poll_active = False
+        self._dwm_keyboard_poll_down = {}
+        if after_id is not None:
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                pass
+
+    def _schedule_dwm_keyboard_poll(self, delay=0):
+        """Start the safe foreground-only native keyboard fallback."""
+        if os.name != "nt" or not (self._embedded_mode and self._chromium_dwm_mode):
+            return False
+        self._dwm_keyboard_poll_active = True
+        if self._dwm_keyboard_poll_after_id is None:
+            try:
+                self._dwm_keyboard_poll_after_id = self.root.after(
+                    max(0, int(delay)), self._poll_dwm_keyboard
+                )
+            except Exception:
+                self._dwm_keyboard_poll_active = False
+                return False
+        return True
+
+    def _dwm_keyboard_modifiers(self, user32):
+        get_async = user32.GetAsyncKeyState
+        control = bool(int(get_async(0x11)) & 0x8000)
+        shift = bool(int(get_async(0x10)) & 0x8000)
+        alt = bool(int(get_async(0x12)) & 0x8000)
+        meta = bool((int(get_async(0x5B)) | int(get_async(0x5C))) & 0x8000)
+        return control, shift, alt, meta
+
+    def _dwm_vk_to_text(self, user32, vk, *, control=False, shift=False, alt=False):
+        """Translate one Windows VK through the active layout without hooks."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            BYTE = ctypes.c_ubyte
+            keyboard_state = (BYTE * 256)()
+            user32.GetKeyboardState.argtypes = [ctypes.POINTER(BYTE)]
+            user32.GetKeyboardState.restype = wintypes.BOOL
+            user32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
+            user32.GetKeyboardLayout.restype = ctypes.c_void_p
+            user32.MapVirtualKeyExW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p]
+            user32.MapVirtualKeyExW.restype = wintypes.UINT
+            user32.ToUnicodeEx.argtypes = [
+                wintypes.UINT, wintypes.UINT, ctypes.POINTER(BYTE), wintypes.LPWSTR,
+                ctypes.c_int, wintypes.UINT, ctypes.c_void_p,
+            ]
+            user32.ToUnicodeEx.restype = ctypes.c_int
+            user32.GetKeyState.argtypes = [ctypes.c_int]
+            user32.GetKeyState.restype = ctypes.c_short
+            if not user32.GetKeyboardState(keyboard_state):
+                return ""
+            # GetKeyboardState reflects the thread queue. The whole reason this
+            # path exists is that the Tk queue can miss DWM-page keys, so stamp
+            # the physical modifier/current-key state into the translation map.
+            keyboard_state[int(vk) & 0xFF] |= 0x80
+            for mod_vk, down in ((0x10, shift), (0x11, control), (0x12, alt)):
+                keyboard_state[mod_vk] = (keyboard_state[mod_vk] & 0x01) | (0x80 if down else 0)
+            if int(user32.GetKeyState(0x14)) & 0x0001:  # Caps Lock
+                keyboard_state[0x14] |= 0x01
+            hkl = user32.GetKeyboardLayout(0)
+            scan = int(user32.MapVirtualKeyExW(int(vk), 0, hkl) or 0)
+            buf = ctypes.create_unicode_buffer(8)
+            # Flag 4 asks modern Windows not to mutate the kernel dead-key
+            # buffer while we translate, which keeps this polling path isolated.
+            count = int(user32.ToUnicodeEx(int(vk), scan, keyboard_state, buf, len(buf), 4, hkl))
+            if count <= 0:
+                return ""
+            return "".join(buf[:count])
+        except Exception:
+            return ""
+
+    def _dispatch_dwm_polled_vk(self, user32, vk):
+        """Translate and forward one physically observed DWM-page key press."""
+        control, shift, alt, meta = self._dwm_keyboard_modifiers(user32)
+        vk = int(vk)
+        self._dwm_keyboard_poll_events += 1
+        self._dwm_keyboard_poll_last = (vk, bool(control), bool(shift), bool(alt), bool(meta))
+
+        # Keep OS/shell combinations out of the browser input bridge.
+        if meta or (alt and vk in {0x09, 0x1B, 0x73}) or (control and vk == 0x1B):
+            return False
+
+        modifiers = (8 if shift else 0) | (2 if control else 0) | (1 if alt else 0) | (4 if meta else 0)
+
+        # Editing shortcuts belong to the focused webpage. Paste uses the same
+        # insertText route as the rest of Tekzite so clipboard text does not
+        # depend on an off-screen Chromium HWND owning the Windows clipboard UI.
+        if control and not alt and 0x41 <= vk <= 0x5A:
+            letter = chr(vk)
+            if letter == "V":
+                try:
+                    text = self.root.clipboard_get()
+                except Exception:
+                    text = ""
+                if text:
+                    self._submit_chromium_input(
+                        dispatch_embedded_chromium_key, text=text, event_type="insertText",
+                        target_id=self._chromium_frame_target_id, refresh=True,
+                    )
+                return True
+            if letter in {"A", "C", "X", "Z", "Y"}:
+                self._submit_chromium_input(
+                    dispatch_embedded_chromium_key, letter.lower(), event_type="keyDown",
+                    modifiers=modifiers, windows_vk=vk, code=f"Key{letter}",
+                    target_id=self._chromium_frame_target_id,
+                )
+                self._submit_chromium_input(
+                    dispatch_embedded_chromium_key, letter.lower(), event_type="keyUp",
+                    modifiers=modifiers, windows_vk=vk, code=f"Key{letter}",
+                    target_id=self._chromium_frame_target_id, refresh=True,
+                )
+                return True
+            return False
+
+        text = self._dwm_vk_to_text(
+            user32, vk, control=control, shift=shift, alt=alt
+        )
+        altgr_text = bool(text and control and alt)
+        if text and all(ch.isprintable() for ch in text) and (not (control or alt) or altgr_text):
+            self._dwm_keyboard_poll_chars += len(text)
+            self._submit_chromium_input(
+                dispatch_embedded_chromium_key, text=text, event_type="insertText",
+                target_id=self._chromium_frame_target_id, refresh=True,
+            )
+            return True
+
+        special = {
+            0x08: ("Backspace", "Backspace"), 0x09: ("Tab", "Tab"),
+            0x0D: ("Enter", "Enter"), 0x1B: ("Escape", "Escape"),
+            0x21: ("PageUp", "PageUp"), 0x22: ("PageDown", "PageDown"),
+            0x23: ("End", "End"), 0x24: ("Home", "Home"),
+            0x25: ("ArrowLeft", "ArrowLeft"), 0x26: ("ArrowUp", "ArrowUp"),
+            0x27: ("ArrowRight", "ArrowRight"), 0x28: ("ArrowDown", "ArrowDown"),
+            0x2E: ("Delete", "Delete"),
+        }
+        if vk in special:
+            key, code = special[vk]
+            self._submit_chromium_input(
+                dispatch_embedded_chromium_key, key, event_type="keyDown",
+                modifiers=modifiers, windows_vk=vk, code=code,
+                target_id=self._chromium_frame_target_id,
+            )
+            self._submit_chromium_input(
+                dispatch_embedded_chromium_key, key, event_type="keyUp",
+                modifiers=modifiers, windows_vk=vk, code=code,
+                target_id=self._chromium_frame_target_id, refresh=True,
+            )
+            return True
+        return False
+
+    def _poll_dwm_keyboard(self):
+        """Poll physical keys only while Tekzite's DWM webpage owns input."""
+        self._dwm_keyboard_poll_after_id = None
+        if not (os.name == "nt" and self._embedded_mode and self._chromium_dwm_mode
+                and self._dwm_surface_ready and self._chromium_page_keyboard_active
+                and not self._address_focus_active):
+            self._dwm_keyboard_poll_active = False
+            self._dwm_keyboard_poll_down = {}
+            return
+        next_delay = 8
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
+            self._dwm_user32 = user32
+            user32.GetForegroundWindow.argtypes = []
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+            user32.GetAsyncKeyState.restype = ctypes.c_short
+
+            foreground = user32.GetForegroundWindow()
+            pid = wintypes.DWORD()
+            if foreground:
+                user32.GetWindowThreadProcessId(foreground, ctypes.byref(pid))
+            ours = bool(foreground and int(pid.value) == int(os.getpid()))
+            self._dwm_keyboard_poll_foreground = ours
+            if not ours:
+                self._dwm_keyboard_poll_down = {}
+                next_delay = 40
+            else:
+                now = time.monotonic()
+                down = self._dwm_keyboard_poll_down
+                for vk in self._dwm_keyboard_poll_vks():
+                    raw = int(user32.GetAsyncKeyState(int(vk))) & 0xFFFF
+                    held = bool(raw & 0x8000)
+                    pressed_since_poll = bool(raw & 0x0001)
+                    if vk not in down:
+                        if held or pressed_since_poll:
+                            self._dispatch_dwm_polled_vk(user32, vk)
+                            if held:
+                                down[vk] = now + 0.42
+                    elif not held:
+                        down.pop(vk, None)
+                    elif now >= float(down.get(vk) or 0.0):
+                        # Match a normal Windows-style repeat closely enough for
+                        # text editing while keeping this loop deterministic.
+                        self._dispatch_dwm_polled_vk(user32, vk)
+                        down[vk] = now + 0.035
+            self._dwm_keyboard_poll_error = None
+        except Exception as exc:
+            self._dwm_keyboard_poll_error = f"{type(exc).__name__}: {exc}"
+            self._dwm_keyboard_poll_active = False
+            self._dwm_keyboard_poll_down = {}
+            return
+        if self._dwm_keyboard_poll_active:
+            try:
+                self._dwm_keyboard_poll_after_id = self.root.after(next_delay, self._poll_dwm_keyboard)
+            except Exception:
+                self._dwm_keyboard_poll_active = False
+
+    def _ensure_dwm_keyboard_sink(self):
+        """Create the DWM keyboard focus target lazily, after a real page click.
+
+        This deliberately uses a normal Tk child rather than v10.5.44's raw
+        STATIC HWND + Python WNDPROC subclass.  Tk owns the native window and
+        its message procedure for the full widget lifetime, removing the crash
+        path while still giving Windows a concrete HWND to focus.
+        """
+        if os.name != "nt" or not (self._embedded_mode and self._chromium_dwm_mode):
+            return None
+        sink = self._dwm_keyboard_sink_widget
+        try:
+            if sink is not None and int(sink.winfo_exists()):
+                return sink
+        except Exception:
+            pass
+        try:
+            sink = tk.Entry(
+                self.edge_host,
+                width=1,
+                bg=self.ui.get("bg", "#000000"),
+                fg=self.ui.get("bg", "#000000"),
+                insertbackground=self.ui.get("bg", "#000000"),
+                highlightthickness=0, bd=0, takefocus=True,
+                exportselection=False,
+            )
+            # Keep the focus target mapped so Windows can focus it, but make it
+            # physically negligible and lower it beneath the interactive plane.
+            sink.place(x=-2, y=-2, width=1, height=1)
+            try:
+                sink.lower()
+            except Exception:
+                pass
+            sink.bind("<KeyPress>", self._on_dwm_keyboard_sink_key)
+            sink.bind("<FocusIn>", lambda _e: setattr(self, "_dwm_keyboard_sink_focused", True))
+            sink.bind("<FocusOut>", lambda _e: setattr(self, "_dwm_keyboard_sink_focused", False))
+            hwnd = int(sink.winfo_id())
+            self._dwm_keyboard_sink_widget = sink
+            self._dwm_keyboard_sink_hwnd = hwnd or None
+            self._dwm_keyboard_sink_create_count += 1
+            return sink
+        except Exception:
+            self._dwm_keyboard_sink_widget = None
+            self._dwm_keyboard_sink_hwnd = None
+            self._dwm_keyboard_sink_focused = False
+            return None
+
+    def _focus_dwm_keyboard_sink(self):
+        """Give a clicked DWM page real Windows focus without touching bootstrap."""
+        if os.name != "nt" or not (self._embedded_mode and self._chromium_dwm_mode):
+            return False
+        if not self._dwm_surface_ready or self._address_focus_active:
+            return False
+        sink = self._ensure_dwm_keyboard_sink()
+        if sink is None:
+            return False
+        try:
+            # Keep Tk's own focus model in sync first so its KeyPress binding
+            # receives translated characters, IME output and keyboard layout.
+            sink.focus_force()
+        except Exception:
+            pass
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
+            self._dwm_user32 = user32
+            user32.SetFocus.argtypes = [wintypes.HWND]
+            user32.SetFocus.restype = wintypes.HWND
+            user32.GetFocus.argtypes = []
+            user32.GetFocus.restype = wintypes.HWND
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+            user32.SetForegroundWindow.restype = wintypes.BOOL
+            user32.SetActiveWindow.argtypes = [wintypes.HWND]
+            user32.SetActiveWindow.restype = wintypes.HWND
+            hwnd = int(self._dwm_keyboard_sink_hwnd or sink.winfo_id())
+            # This runs only in direct response to a page click, so activating
+            # Tekzite here follows normal Windows foreground-focus rules and
+            # cannot race the Chromium bootstrap.
+            inner = int(self.root.winfo_id())
+            top = int(user32.GetAncestor(wintypes.HWND(inner), 2) or inner)  # GA_ROOT
+            user32.SetForegroundWindow(wintypes.HWND(top))
+            user32.SetActiveWindow(wintypes.HWND(top))
+            user32.SetFocus(wintypes.HWND(hwnd))
+            focused = int(user32.GetFocus() or 0)
+            self._dwm_keyboard_sink_focused = focused == hwnd
+            if self._dwm_keyboard_sink_focused:
+                self._dwm_keyboard_sink_focus_count += 1
+            return bool(self._dwm_keyboard_sink_focused)
+        except Exception:
+            # Tk focus is still a useful fallback if Win32 focus introspection
+            # is unavailable on a particular Windows build.
+            try:
+                focused = self.root.focus_get() is sink
+            except Exception:
+                focused = False
+            self._dwm_keyboard_sink_focused = bool(focused)
+            if focused:
+                self._dwm_keyboard_sink_focus_count += 1
+            return bool(focused)
+
     def _ensure_dwm_host(self):
         """Create a raw Win32 top-level popup for DWM thumbnail presentation.
 
@@ -5620,12 +5995,20 @@ class BrowserApp(BrowserFeatures):
         # physical press reaches Tk a moment later.
         if self._chromium_left_button_down:
             return "break"
-        try:
-            (self.edge_host if self._chromium_dwm_mode else self.chromium_surface).focus_set()
-        except Exception:
-            pass
         self._address_focus_active = False
         self._chromium_page_keyboard_active = True
+        try:
+            if self._chromium_dwm_mode:
+                # v10.5.46: the sink is created only as a consequence of this
+                # real user click. Nothing native is added to the bootstrap path.
+                if not self._focus_dwm_keyboard_sink():
+                    self.root.focus_force()
+                    self.edge_host.focus_set()
+                self._schedule_dwm_keyboard_poll(0)
+            else:
+                self.chromium_surface.focus_set()
+        except Exception:
+            pass
         self._cancel_embedded_surface_wakes()
         self._mark_chromium_interaction(1.0)
         x, y = float(x), float(y)
@@ -5653,6 +6036,18 @@ class BrowserApp(BrowserFeatures):
             button="left", buttons=1, click_count=self._chromium_press_click_count,
             target_id=self._chromium_frame_target_id,
         )
+        if self._chromium_dwm_mode:
+            # v10.5.43: DWM is only a visual mirror, so there is no native
+            # Chromium HWND beneath the pointer to establish edit focus for us.
+            # Queue an explicit point-focus on the same ordered CDP input lane
+            # immediately after mousePressed. If the point is an input/textarea/
+            # contenteditable this guarantees Input.insertText has a real target.
+            # Because keyboard packets share this executor, fast typing cannot
+            # overtake the focus operation.
+            self._submit_chromium_input(
+                focus_embedded_chromium_point, x, y,
+                target_id=self._chromium_frame_target_id, timeout=2,
+            )
         return "break"
 
     def _flush_pending_chromium_drag_before_release(self):
@@ -6111,6 +6506,8 @@ class BrowserApp(BrowserFeatures):
         """
         if not (self._chromium_dwm_mode and self._chromium_page_keyboard_active):
             return None
+        if getattr(self, "_dwm_keyboard_poll_active", False):
+            return "break"
         try:
             if self._address_focus_active or self.root.focus_get() is self.address:
                 return None
@@ -6406,6 +6803,8 @@ class BrowserApp(BrowserFeatures):
     def _on_address_pointer_down(self, event=None):
         self._address_focus_active = True
         self._chromium_page_keyboard_active = False
+        self._dwm_keyboard_sink_focused = False
+        self._stop_dwm_keyboard_poll()
         self._cancel_embedded_surface_wakes()
         try:
             self.root.focus_force()
@@ -6416,6 +6815,8 @@ class BrowserApp(BrowserFeatures):
     def _on_address_focus_in(self, event=None):
         self._address_focus_active = True
         self._chromium_page_keyboard_active = False
+        self._dwm_keyboard_sink_focused = False
+        self._stop_dwm_keyboard_poll()
         self._cancel_embedded_surface_wakes()
 
     def _on_address_focus_out(self, event=None):
@@ -6686,15 +7087,12 @@ class BrowserApp(BrowserFeatures):
         return True
 
     def _arm_dwm_input_surface(self):
-        """Make a newly visible DWM page ready for first-click input.
+        """Mark a visible DWM page ready without creating/focusing the sink.
 
-        Keep this deliberately lightweight: no Chromium wake, redraw, resize,
-        or input-queue attachment.  DWM presentation sends interaction through
-        Tekzite's CDP plane, so all it needs is an active Tk toplevel, focus on
-        edge_host, and the page-keyboard lane enabled.  Delayed retries cover
-        the short Windows activation window after the first browser frame is
-        revealed, while the omnibox guard prevents focus theft if the user has
-        already started typing there.
+        v10.5.44 created its raw native keyboard window from this delayed
+        bootstrap retry.  That fixed typing but made startup depend on a Python
+        Win32 WNDPROC lifetime.  v10.5.46 keeps bootstrap inert: the safe Tk
+        sink is created only after the first real page click.
         """
         if not (self._embedded_mode and self._chromium_dwm_mode and self._dwm_surface_ready):
             return False
@@ -6704,14 +7102,6 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             if self._address_focus_active:
                 return False
-        try:
-            self.root.focus_force()
-        except Exception:
-            pass
-        try:
-            self.edge_host.focus_set()
-        except Exception:
-            pass
         self._address_focus_active = False
         self._chromium_page_keyboard_active = True
         return True
@@ -7894,6 +8284,8 @@ class BrowserApp(BrowserFeatures):
         # cross-process Chromium child before focusing the Tk Entry.
         self._address_focus_active = True
         self._chromium_page_keyboard_active = False
+        self._dwm_keyboard_sink_focused = False
+        self._stop_dwm_keyboard_poll()
         self._cancel_embedded_surface_wakes()
         try:
             self.root.focus_force()
@@ -9970,7 +10362,25 @@ class BrowserApp(BrowserFeatures):
         sections = []
         def add(title, text):
             sections.append("=" * 80 + "\n" + title + "\n" + "=" * 80 + "\n" + (text or "(no data)"))
-        add("TEKZITE", f"version: {BROWSER_VERSION}\nweb_engine: Chromium only\npresentation: DWM/native Chromium")
+        add("TEKZITE", "\n".join([
+            f"version: {BROWSER_VERSION}",
+            "web_engine: Chromium only",
+            "presentation: DWM/native Chromium",
+            "dwm_keyboard_sink_kind: tk-native-lazy",
+            f"dwm_keyboard_sink_hwnd: {getattr(self, '_dwm_keyboard_sink_hwnd', None)}",
+            f"dwm_keyboard_sink_focused: {getattr(self, '_dwm_keyboard_sink_focused', False)}",
+            f"dwm_keyboard_sink_create_count: {getattr(self, '_dwm_keyboard_sink_create_count', 0)}",
+            f"dwm_keyboard_sink_focus_count: {getattr(self, '_dwm_keyboard_sink_focus_count', 0)}",
+            f"dwm_keyboard_sink_messages: {getattr(self, '_dwm_keyboard_sink_messages', 0)}",
+            f"dwm_keyboard_sink_chars: {getattr(self, '_dwm_keyboard_sink_chars', 0)}",
+            f"dwm_keyboard_sink_last: {getattr(self, '_dwm_keyboard_sink_last', None)}",
+            f"dwm_keyboard_poll_active: {getattr(self, '_dwm_keyboard_poll_active', False)}",
+            f"dwm_keyboard_poll_foreground: {getattr(self, '_dwm_keyboard_poll_foreground', False)}",
+            f"dwm_keyboard_poll_events: {getattr(self, '_dwm_keyboard_poll_events', 0)}",
+            f"dwm_keyboard_poll_chars: {getattr(self, '_dwm_keyboard_poll_chars', 0)}",
+            f"dwm_keyboard_poll_last: {getattr(self, '_dwm_keyboard_poll_last', None)}",
+            f"dwm_keyboard_poll_error: {getattr(self, '_dwm_keyboard_poll_error', None)}",
+        ]))
         try:
             add("CHROMIUM / DWM DEBUG", embedded_chromium_debug_report())
         except Exception as exc:
@@ -10265,6 +10675,19 @@ class BrowserApp(BrowserFeatures):
                 pass
             self._executor.shutdown(wait=False, cancel_futures=True)
         finally:
+            try:
+                self._stop_dwm_keyboard_poll()
+            except Exception:
+                pass
+            try:
+                sink = getattr(self, "_dwm_keyboard_sink_widget", None)
+                if sink is not None:
+                    sink.destroy()
+                self._dwm_keyboard_sink_widget = None
+                self._dwm_keyboard_sink_hwnd = None
+                self._dwm_keyboard_sink_focused = False
+            except Exception:
+                pass
             try:
                 if self._dwm_host is not None and os.name == "nt":
                     import ctypes

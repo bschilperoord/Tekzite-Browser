@@ -1,0 +1,10 @@
+Tekzite Browser v10.5.45 validation
+
+Purpose
+- Roll back the v10.5.44 native Win32 DWM keyboard-sink experiment after bootstrap errors/crash.
+- Restore v10.5.43 DWM input behavior while retaining all earlier browser features.
+
+Validation
+- Python compile check: PASS
+- Current regression suite: PASS (390 tests)
+- Chromium extension checks: PASS (mocked Chrome APIs)

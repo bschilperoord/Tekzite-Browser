@@ -1,3 +1,40 @@
+# Tekzite Browser v10.5.47
+
+## Foreground-native DWM keyboard bridge
+
+- Stops depending on Tk `KeyPress` delivery for DWM-presented webpages.
+- Samples physical Windows key state only while Tekzite is foreground and the webpage owns keyboard input.
+- Uses the active Windows keyboard layout to translate printable keys before forwarding them through Chromium's ordered CDP input lane.
+- Keeps the lazy Tk focus sink as a harmless focus anchor and retains the no-raw-WNDPROC crash fix from v10.5.46.
+- Adds diagnostics for poll activity, foreground ownership, translated events, characters and translation errors.
+
+# Tekzite Browser v10.5.46
+
+## Safe lazy DWM keyboard sink
+
+- Reworks the v10.5.44 keyboard-sink experiment so it no longer installs a raw Python Win32 WNDPROC.
+- Creates a 1x1 Tk-owned native focus target only after the user clicks the DWM webpage, keeping the Chromium bootstrap path inert.
+- Synchronizes Tk logical focus with Win32 `SetFocus` and routes translated `KeyPress` events through the existing ordered CDP keyboard lane.
+- Retains explicit DOM point-focus from v10.5.43 so text controls are focused before queued text arrives.
+- Destroys the sink through Tk during shutdown and exposes creation/focus/key counters in Diagnostics.
+
+# Tekzite Browser v10.5.45
+
+## Roll back native DWM keyboard sink
+
+- Removes the v10.5.44 native Win32 child keyboard-sink/WndProc experiment after bootstrap errors and a crash were observed.
+- Restores the v10.5.43 DWM keyboard/input path and click-to-focus behavior.
+- Leaves the default-browser integration, centered dialog positioning, and deterministic DWM viewport sizing fixes intact.
+
+# Tekzite Browser v10.5.43
+
+## DWM text-input focus repair
+
+- Re-activates the Tekzite Tk window and focuses `edge_host` when the user presses inside the DWM-rendered page, ensuring the next physical key reaches Tekzite's Chromium keyboard bridge.
+- Queues `focus_embedded_chromium_point()` immediately after the CDP `mousePressed` event on the same ordered input executor.
+- Guarantees clicked inputs, textareas and contenteditable controls have a Chromium focus target before `Input.insertText` packets can overtake the click.
+- Leaves the v10.5.38 DWM geometry contract and v10.5.42 default-browser handling unchanged.
+
 # Tekzite Browser v10.5.42
 
 ## Effective Windows default-browser detection
