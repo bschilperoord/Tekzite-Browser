@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  TARGET_VERSION: "10.5.42"
+  TARGET_VERSION: "10.5.47"
 
 jobs:
   publish:
@@ -35,85 +35,62 @@ jobs:
           }
           exit 0
 
-      - name: Apply v10.5.42 source update
+      - name: Apply v10.5.47 source update
         if: steps.release_check.outputs.exists != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $partFiles = Get-ChildItem ".release\v10.5.42.patch.b64.*" | Sort-Object Name
-          if ($partFiles.Count -ne 8) { throw "Expected 8 release patch chunks, found $($partFiles.Count)" }
+          $partFiles = @(Get-ChildItem ".release\v10.5.47.patch.b64.*" | Sort-Object Name)
+          if ($partFiles.Count -ne 4) {
+            throw "Expected 4 release patch chunks, found $($partFiles.Count)"
+          }
+
           $builder = [System.Text.StringBuilder]::new()
           foreach ($part in $partFiles) {
             [void]$builder.Append((Get-Content -Raw $part.FullName).Trim())
           }
-          $gzipPath = ".release\v10.5.42.patch.gz"
-          $patchPath = ".release\v10.5.42.patch"
-          [System.IO.File]::WriteAllBytes($gzipPath, [Convert]::FromBase64String($builder.ToString()))
+
+          $gzipPath = ".release\v10.5.47.patch.gz"
+          $patchPath = ".release\v10.5.47.patch"
+          [System.IO.File]::WriteAllBytes(
+            $gzipPath,
+            [Convert]::FromBase64String($builder.ToString())
+          )
 
           $input = [System.IO.File]::OpenRead($gzipPath)
           $output = [System.IO.File]::Create($patchPath)
           try {
-            $gzip = [System.IO.Compression.GzipStream]::new($input, [System.IO.Compression.CompressionMode]::Decompress)
+            $gzip = [System.IO.Compression.GzipStream]::new(
+              $input,
+              [System.IO.Compression.CompressionMode]::Decompress
+            )
             try { $gzip.CopyTo($output) } finally { $gzip.Dispose() }
           } finally {
             $output.Dispose()
             $input.Dispose()
           }
 
-          # The published v10.5.38 tree has four metadata-only files that
-          # differ from the local v10.5.38 source ZIP used to create this patch.
-          # Apply all clean hunks, then repair only those known metadata rejects.
           git apply --reject --ignore-space-change --ignore-whitespace $patchPath
+          $applyExit = $LASTEXITCODE
           $rejects = @(Get-ChildItem -Path . -Recurse -Filter "*.rej" -ErrorAction SilentlyContinue)
-          $allowedRejects = @(
-            "installer/README.txt.rej",
-            "tekzite_version_info.txt.rej",
-            "tests/current/test_stability_v1011.py.rej",
-            "tests/current/test_startup_input_v86.py.rej"
-          )
-          foreach ($reject in $rejects) {
-            $relative = [IO.Path]::GetRelativePath((Get-Location).Path, $reject.FullName).Replace("\", "/")
-            if ($allowedRejects -notcontains $relative) {
-              throw "Unexpected v10.5.42 patch reject: $relative"
+          if ($rejects.Count -gt 0) {
+            Write-Host "Patch rejects:"
+            foreach ($reject in $rejects) {
+              Write-Host $reject.FullName
+              Get-Content $reject.FullName
             }
+            throw "v10.5.47 source patch has $($rejects.Count) rejected hunks"
           }
-          $rejects | Remove-Item -Force
+          if ($applyExit -ne 0) {
+            throw "v10.5.47 source patch failed with exit code $applyExit"
+          }
+
           Remove-Item ".release" -Recurse -Force
 
-          @'
-          from pathlib import Path
-          import re
-
-          installer = Path("installer/README.txt")
-          body = installer.read_text(encoding="utf-8").replace(
-              "Tekzite-Browser-Setup-10.5.38.exe",
-              "Tekzite-Browser-Setup-10.5.42.exe",
-          )
-          installer.write_text(body, encoding="utf-8")
-
-          info_path = Path("tekzite_version_info.txt")
-          info = info_path.read_text(encoding="utf-8")
-          info = re.sub(r"filevers=\(10,\s*5,\s*\d+,\s*0\)", "filevers=(10, 5, 42, 0)", info)
-          info = re.sub(r"prodvers=\(10,\s*5,\s*\d+,\s*0\)", "prodvers=(10, 5, 42, 0)", info)
-          info = re.sub(r"u'10\.5\.\d+'", "u'10.5.42'", info)
-          info_path.write_text(info, encoding="utf-8")
-
-          startup = Path("tests/current/test_startup_input_v86.py")
-          body = startup.read_text(encoding="utf-8").replace(
-              'BROWSER_VERSION = "10.5.38"',
-              'BROWSER_VERSION = "10.5.42"',
-          )
-          startup.write_text(body, encoding="utf-8")
-
-          stability = Path("tests/current/test_stability_v1011.py")
-          body = stability.read_text(encoding="utf-8")
-          body = body.replace("10.5.38", "10.5.42")
-          body = body.replace("filevers=(10, 5, 38, 0)", "filevers=(10, 5, 42, 0)")
-          stability.write_text(body, encoding="utf-8")
-          '@ | python -
-
-          $versionLine = Select-String -Path "main.py" -Pattern 'BROWSER_VERSION = "10\.5\.42"' -SimpleMatch:$false
-          if (-not $versionLine) { throw "main.py was not updated to v10.5.42" }
+          $versionLine = Select-String -Path "main.py" -Pattern 'BROWSER_VERSION = "10\.5\.47"'
+          if (-not $versionLine) {
+            throw "main.py was not updated to v10.5.47"
+          }
 
       - name: Set up Python
         if: steps.release_check.outputs.exists != 'true'
@@ -144,7 +121,7 @@ jobs:
         if: steps.release_check.outputs.exists != 'true'
         run: node tests/current/test_extension_features.cjs
 
-      - name: Commit v10.5.42 source to main
+      - name: Commit v10.5.47 source to main
         if: steps.release_check.outputs.exists != 'true'
         id: source_commit
         shell: pwsh
@@ -152,12 +129,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Release Tekzite Browser v10.5.42 [skip ci]"
-          if ($LASTEXITCODE -ne 0) { throw "Could not create v10.5.42 source commit" }
+          git commit -m "Release Tekzite Browser v10.5.47 [skip ci]"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not create v10.5.47 source commit"
+          }
           $sha = (git rev-parse HEAD).Trim()
           "sha=$sha" >> $env:GITHUB_OUTPUT
           git push origin HEAD:main
-          if ($LASTEXITCODE -ne 0) { throw "Could not push v10.5.42 source commit to main" }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not push v10.5.47 source commit to main"
+          }
 
       - name: Build Windows x64 binary
         if: steps.release_check.outputs.exists != 'true'
@@ -172,12 +153,20 @@ jobs:
           $version = $env:TARGET_VERSION
           $exeName = "Tekzite-Browser-v$version-Windows-x64.exe"
           $zipName = "Tekzite-Browser-v$version-Windows-x64.zip"
+
           Copy-Item ".\dist\TekziteBrowser.exe" ".\$exeName" -Force
-          if (Test-Path ".\$zipName") { Remove-Item ".\$zipName" -Force }
+          if (Test-Path ".\$zipName") {
+            Remove-Item ".\$zipName" -Force
+          }
           Compress-Archive -Path ".\$exeName" -DestinationPath ".\$zipName" -CompressionLevel Optimal
+
           $exeHash = (Get-FileHash ".\$exeName" -Algorithm SHA256).Hash.ToLowerInvariant()
           $zipHash = (Get-FileHash ".\$zipName" -Algorithm SHA256).Hash.ToLowerInvariant()
-          @("$exeHash  $exeName", "$zipHash  $zipName") | Set-Content ".\SHA256SUMS.txt" -Encoding ascii
+          @(
+            "$exeHash  $exeName",
+            "$zipHash  $zipName"
+          ) | Set-Content ".\SHA256SUMS.txt" -Encoding ascii
+
           "exe=$exeName" >> $env:GITHUB_OUTPUT
           "zip=$zipName" >> $env:GITHUB_OUTPUT
 
@@ -188,25 +177,28 @@ jobs:
           $version = $env:TARGET_VERSION
           $tag = "v$version"
           $sha = "${{ steps.source_commit.outputs.sha }}"
+
           git fetch --tags --force
           git rev-parse "refs/tags/$tag" *> $null
           if ($LASTEXITCODE -ne 0) {
             git tag -a $tag $sha -m "Tekzite Browser v$version"
             git push origin $tag
-            if ($LASTEXITCODE -ne 0) { throw "Could not push release tag $tag" }
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not push release tag $tag"
+            }
           }
 
           $notes = @"
           Windows x64 release of Tekzite Browser v$version.
 
           Highlights:
-          - Correct effective Windows default-browser detection for HTTP and HTTPS.
-          - Windows Default Apps registration and URL handoff support.
-          - Live default-browser status in Settings.
-          - Screen-centered Tekzite-owned dialogs.
-          - Deterministic DWM viewport resizing retained.
+          - Fixes typing in DWM-presented webpages such as Startpage.
+          - Uses a foreground-only native Windows key-state poller instead of depending on Tk KeyPress delivery.
+          - Translates physical keys through the active Windows keyboard layout and forwards text through Chromium's ordered CDP input lane.
+          - Keeps the safe lazy focus sink while avoiding the raw Win32 WNDPROC experiment that caused bootstrap instability.
+          - Includes the v10.5.43 point-focus repair and all v10.5.42 default-browser integration.
 
-          The Windows executable is built natively on GitHub's windows-latest runner using the repository's hash-locked PyInstaller toolchain.
+          The Windows executable is built natively on GitHub's windows-latest runner after the full Python regression suite and Chromium extension checks pass.
           "@
 
           gh release create $tag `
