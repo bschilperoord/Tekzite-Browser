@@ -25,77 +25,134 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - name: Render Tekzite application icon
+      - name: Render Tekzite application icon without external packages
         shell: pwsh
         run: |
-          python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
           New-Item -ItemType Directory -Force -Path assets | Out-Null
           @'
           from pathlib import Path
-          from PIL import Image, ImageDraw, ImageFilter
-          import math
+          import math, struct, zlib, binascii
 
-          S = 1024
-          img = Image.new("RGBA", (S, S), (2, 6, 12, 255))
+          S = 256
+          pixels = bytearray(S * S * 4)
 
-          # Deep cyan-tinted radial glow behind the mark.
-          glow = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-          gp = glow.load()
-          cx = cy = S / 2
+          def put(x, y, rgba):
+              if not (0 <= x < S and 0 <= y < S):
+                  return
+              i = (y * S + x) * 4
+              r, g, b, a = rgba
+              if a >= 255:
+                  pixels[i:i+4] = bytes((r, g, b, 255))
+                  return
+              br, bg, bb, ba = pixels[i:i+4]
+              alpha = a / 255.0
+              pixels[i] = int(r * alpha + br * (1-alpha))
+              pixels[i+1] = int(g * alpha + bg * (1-alpha))
+              pixels[i+2] = int(b * alpha + bb * (1-alpha))
+              pixels[i+3] = 255
+
+          def fill_rect(x0, y0, x1, y1, c):
+              for y in range(max(0,y0), min(S,y1)):
+                  for x in range(max(0,x0), min(S,x1)):
+                      put(x, y, c)
+
+          def line(x0, y0, x1, y1, c, width=1):
+              dx, dy = abs(x1-x0), -abs(y1-y0)
+              sx, sy = (1 if x0<x1 else -1), (1 if y0<y1 else -1)
+              err = dx + dy
+              while True:
+                  half = width // 2
+                  for yy in range(y0-half, y0-half+width):
+                      for xx in range(x0-half, x0-half+width):
+                          put(xx, yy, c)
+                  if x0 == x1 and y0 == y1:
+                      break
+                  e2 = 2 * err
+                  if e2 >= dy:
+                      err += dy; x0 += sx
+                  if e2 <= dx:
+                      err += dx; y0 += sy
+
+          # Dark cyan radial background.
+          cx = cy = (S-1) / 2
           for y in range(S):
               for x in range(S):
-                  d = math.hypot(x-cx, y-cy) / (S * 0.62)
-                  a = max(0, int(105 * (1 - min(1, d)) ** 2))
-                  gp[x, y] = (0, 225, 235, a)
-          img = Image.alpha_composite(img, glow)
+                  d = min(1.0, math.hypot(x-cx, y-cy) / 160.0)
+                  glow = int(22 * (1-d) ** 2)
+                  put(x, y, (2, 8 + glow, 14 + glow, 255))
 
-          d = ImageDraw.Draw(img)
+          # Calm geometric web.
+          for radius in (58, 78, 98):
+              points=[]
+              for deg in range(0, 361, 4):
+                  a=math.radians(deg)
+                  points.append((int(cx+math.cos(a)*radius), int(cy+math.sin(a)*radius)))
+              for p, q in zip(points, points[1:]):
+                  line(*p, *q, (0, 115, 128, 80), 1)
+          for deg in range(0, 360, 30):
+              a=math.radians(deg)
+              line(int(cx+math.cos(a)*58), int(cy+math.sin(a)*58),
+                   int(cx+math.cos(a)*108), int(cy+math.sin(a)*108),
+                   (0, 130, 143, 95), 1)
 
-          # Rounded outer frame.
-          d.rounded_rectangle((45, 45, S-45, S-45), radius=150, outline=(0, 248, 255, 240), width=18)
-          d.rounded_rectangle((68, 68, S-68, S-68), radius=132, outline=(0, 80, 92, 160), width=5)
+          # Teal frame.
+          for w in range(4):
+              inset = 9 + w
+              for x in range(inset+18, S-inset-18):
+                  put(x, inset, (0, 235, 242, 235)); put(x, S-1-inset, (0, 235, 242, 235))
+              for y in range(inset+18, S-inset-18):
+                  put(inset, y, (0, 235, 242, 235)); put(S-1-inset, y, (0, 235, 242, 235))
+              r=18
+              for deg in range(180,271):
+                  a=math.radians(deg); put(inset+r+int(math.cos(a)*r), inset+r+int(math.sin(a)*r), (0,235,242,235))
+              for deg in range(270,361):
+                  a=math.radians(deg); put(S-1-inset-r+int(math.cos(a)*r), inset+r+int(math.sin(a)*r), (0,235,242,235))
+              for deg in range(0,91):
+                  a=math.radians(deg); put(S-1-inset-r+int(math.cos(a)*r), S-1-inset-r+int(math.sin(a)*r), (0,235,242,235))
+              for deg in range(90,181):
+                  a=math.radians(deg); put(inset+r+int(math.cos(a)*r), S-1-inset-r+int(math.sin(a)*r), (0,235,242,235))
 
-          # Subtle geometric/web arcs, deliberately calm rather than aggressive.
-          teal = (0, 210, 222, 145)
-          teal_dim = (0, 116, 130, 105)
-          for inset in (125, 175, 225, 275):
-              box = (inset, inset, S-inset, S-inset)
-              d.arc(box, 195, 345, fill=teal_dim, width=5)
-              d.arc(box, 15, 165, fill=teal_dim, width=5)
-          for angle in range(0, 360, 30):
-              r1, r2 = 250, 420
-              a = math.radians(angle)
-              x1, y1 = cx + math.cos(a)*r1, cy + math.sin(a)*r1
-              x2, y2 = cx + math.cos(a)*r2, cy + math.sin(a)*r2
-              d.line((x1, y1, x2, y2), fill=teal_dim, width=4)
+          # Soft offset teal accent and clean white T.
+          fill_rect(75, 70, 191, 96, (0, 202, 215, 255))
+          fill_rect(117, 91, 157, 198, (0, 202, 215, 255))
+          fill_rect(68, 63, 184, 89, (246, 250, 252, 255))
+          fill_rect(110, 84, 150, 191, (246, 250, 252, 255))
+          line(68,63,184,63,(150,239,244,255),2)
+          line(68,89,110,89,(150,239,244,255),2)
+          line(150,89,184,89,(150,239,244,255),2)
+          line(110,84,110,191,(150,239,244,255),2)
+          line(150,84,150,191,(150,239,244,255),2)
 
-          # Soft shadow behind the T.
-          shadow = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-          sd = ImageDraw.Draw(shadow)
-          top = [(286, 267), (738, 267), (738, 365), (582, 365), (582, 760), (442, 760), (442, 365), (286, 365)]
-          sd.polygon([(x+12, y+18) for x, y in top], fill=(0, 0, 0, 210))
-          shadow = shadow.filter(ImageFilter.GaussianBlur(18))
-          img = Image.alpha_composite(img, shadow)
-          d = ImageDraw.Draw(img)
+          def chunk(kind, data):
+              return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', binascii.crc32(kind+data) & 0xffffffff)
 
-          # Main Tekzite T. White face, restrained cyan side accent.
-          accent_poly = [(300, 282), (752, 282), (752, 380), (596, 380), (596, 776), (456, 776), (456, 380), (300, 380)]
-          d.polygon(accent_poly, fill=(0, 210, 222, 255))
-          main_poly = [(276, 258), (724, 258), (724, 350), (570, 350), (570, 744), (430, 744), (430, 350), (276, 350)]
-          d.polygon(main_poly, fill=(245, 250, 252, 255))
-          d.line(main_poly + [main_poly[0]], fill=(155, 238, 244, 255), width=7, joint="curve")
+          rows = bytearray()
+          for y in range(S):
+              rows.append(0)
+              start = y*S*4
+              rows.extend(pixels[start:start+S*4])
+          png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', S, S, 8, 6, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(bytes(rows), 9)) + chunk(b'IEND', b'')
+          Path('assets/tekzite.png').write_bytes(png)
 
-          # Tiny center notch gives the glyph a custom Tekzite feel without looking weapon-like.
-          d.polygon([(486, 350), (514, 350), (500, 383)], fill=(2, 18, 25, 255))
-
-          img = img.resize((512, 512), Image.Resampling.LANCZOS)
-          png = Path("assets/tekzite.png")
-          ico = Path("assets/tekzite.ico")
-          img.save(png, optimize=True)
-          img.save(ico, format="ICO", sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])
-          print(f"Rendered {png} and {ico}")
+          # ICO with one 256x256 PNG image. Windows scales it for small taskbar sizes.
+          header = struct.pack('<HHH', 0, 1, 1)
+          entry = struct.pack('<BBBBHHII', 0, 0, 0, 0, 1, 32, len(png), 22)
+          Path('assets/tekzite.ico').write_bytes(header + entry + png)
+          print('Rendered assets/tekzite.png and assets/tekzite.ico')
           '@ | python -
           if (-not (Test-Path assets\tekzite.ico)) { throw "tekzite.ico was not generated" }
+
+      - name: Install Windows runtime dependencies with retry
+        shell: pwsh
+        run: |
+          $ok = $false
+          for ($i = 1; $i -le 4; $i++) {
+            python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Host "Runtime dependency install attempt $i failed; retrying..." -ForegroundColor Yellow
+            Start-Sleep -Seconds (5 * $i)
+          }
+          if (-not $ok) { throw "Could not install Windows runtime dependencies after retries" }
 
       - name: Validate patched source
         shell: pwsh
