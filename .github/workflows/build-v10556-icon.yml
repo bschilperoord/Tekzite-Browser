@@ -51,15 +51,15 @@ jobs:
         shell: pwsh
         run: |
           python -m py_compile main.py browser_features.py engine\net.py
-          python - <<'PY'
+          @'
           from pathlib import Path
-          source = Path('main.py').read_text(encoding='utf-8')
+          source = Path("main.py").read_text(encoding="utf-8")
           assert 'BROWSER_VERSION = "10.5.56"' in source
           assert 'Tekzite.Browser' in source
           assert 'WM_SETICON' in source
           assert Path('assets/tekzite.ico').is_file()
           print('v10.5.56 native identity/icon checks passed')
-          PY
+          '@ | python -
 
       - name: Build Windows x64 EXE
         shell: pwsh
