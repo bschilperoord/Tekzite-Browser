@@ -6,6 +6,7 @@ on:
     paths:
       - ".linux-port/linux81-runtime.patch.xz.b64"
       - ".linux-port/apply_main.py"
+      - ".linux-port/apply_runtime_followup.py"
       - ".github/workflows/import-linux-runtime.yml"
 
 permissions:
@@ -44,6 +45,7 @@ jobs:
           git apply --exclude=main.py --check /tmp/linux81-runtime.patch
           git apply --exclude=main.py /tmp/linux81-runtime.patch
           python .linux-port/apply_main.py
+          python .linux-port/apply_runtime_followup.py
           chmod +x build_linux.sh run_linux.sh install_linux.sh
       - name: Full regression suite
         run: python -m pytest -q
