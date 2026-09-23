@@ -57,12 +57,18 @@ swap(
 )
 
 swap(
-    '        self.root.overrideredirect(True)',
-    '''        # Windows uses Tekzite's custom frameless shell. Linux Preview keeps
+    '''        self.root.geometry(f"{self.customization['window_width']}x{self.customization['window_height']}")
+        self.root.minsize(self.customization["window_min_width"], self.customization["window_min_height"])
+        self.root.overrideredirect(True)
+        self._window_restore_geometry = None''',
+    '''        self.root.geometry(f"{self.customization['window_width']}x{self.customization['window_height']}")
+        self.root.minsize(self.customization["window_min_width"], self.customization["window_min_height"])
+        # Windows uses Tekzite's custom frameless shell. Linux Preview keeps
         # the window-manager frame so taskbar/minimize/maximize behavior works
         # correctly on X11, XWayland and Wayland compositors.
-        self.root.overrideredirect(os.name == "nt")''',
-    "window manager frame",
+        self.root.overrideredirect(os.name == "nt")
+        self._window_restore_geometry = None''',
+    "main window manager frame",
 )
 
 swap(
