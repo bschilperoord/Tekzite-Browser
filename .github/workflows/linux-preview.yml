@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-linux-preview:
@@ -91,3 +91,42 @@ jobs:
             SHA256SUMS-Linux.txt
           if-no-files-found: error
           compression-level: 0
+
+
+      - name: Publish Linux preview release
+        if: startsWith(github.event.head_commit.message, 'Linux preview.1:')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version="$(python - <<'PY'
+          import re
+          from pathlib import Path
+          source = Path("main.py").read_text(encoding="utf-8")
+          m = re.search(r'BROWSER_VERSION\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', source)
+          if not m:
+              raise SystemExit("Could not determine BROWSER_VERSION")
+          print(m.group(1))
+          PY
+          )"
+          name="Tekzite-Browser-v${version}-Linux-x86_64-preview"
+          tag="v${version}-linux-preview.1"
+          title="Tekzite Browser v${version} Linux Preview 1"
+          notes_file="$(mktemp)"
+          cat > "$notes_file" <<'EOF'
+          First native Linux preview of Tekzite Browser.
+
+          Highlights:
+          - Chromium headless + CDP software compositor for Linux
+          - Linux process/socket ownership integration for Connection Forensics
+          - X11/XWayland/Wayland-friendly shell architecture
+          - Explicit Pillow/Tk compositor packaging for the standalone executable
+
+          This is a preview build and is separate from the stable Windows release.
+          EOF
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${name}.tar.gz" SHA256SUMS-Linux.txt --clobber
+          else
+            gh release create "$tag" "${name}.tar.gz#Linux x86_64 preview" SHA256SUMS-Linux.txt               --target "$GITHUB_SHA" --prerelease --title "$title" --notes-file "$notes_file"
+          fi
