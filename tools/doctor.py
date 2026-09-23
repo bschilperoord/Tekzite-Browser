@@ -28,8 +28,18 @@ def main() -> int:
 
     if os.name == "nt":
         ok("Platform", f"Windows ({platform.platform()})")
+        ok("Renderer backend", "native DWM/Chromium with software fallback")
+    elif sys.platform.startswith("linux"):
+        ok("Platform", f"Linux Preview ({platform.platform()})")
+        ok("Renderer backend", "Chromium headless + CDP software compositor (X11/Wayland shell)")
+        try:
+            import tkinter  # noqa: F401
+            ok("Tk", str(getattr(tkinter, "TkVersion", "installed")))
+        except Exception as exc:
+            failures += 1
+            fail("Tk", f"not importable: {exc}")
     else:
-        warn("Platform", f"{platform.platform()} (full DWM browser runtime is Windows-only)")
+        warn("Platform", f"{platform.platform()} (unsupported preview platform)")
 
     if sys.version_info >= (3, 10):
         ok("Python", sys.version.split()[0])

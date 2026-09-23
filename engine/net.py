@@ -19,6 +19,7 @@ import ipaddress
 import secrets
 import time
 import sys
+import signal
 import atexit
 import threading
 from pathlib import Path
@@ -42,11 +43,18 @@ except Exception:
 
 _ORIGINAL_URLOPEN = urlopen
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/140.0.0.0 Safari/537.36"
-)
+if sys.platform.startswith("linux"):
+    USER_AGENT = (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/140.0.0.0 Safari/537.36"
+    )
+else:
+    USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/140.0.0.0 Safari/537.36"
+    )
 
 DOCUMENT_HEADERS = {
     "User-Agent": USER_AGENT,
@@ -342,7 +350,7 @@ def _ensure_network_engine_locked():
     # services. Register the proxy destination before the readiness probe.
     allow_loopback_port(port, "Tekzite Network proxy (HTTP/HTTPS filtering and ad blocking)", owner="tekzite-network")
     root = _network_engine_root()
-    exe = root / "tekzite-network.exe"
+    exe = root / ("tekzite-network.exe" if os.name == "nt" else "tekzite-network")
     script = root / "tekzite_network.py"
     instance_token = secrets.token_hex(16)
     if exe.is_file():
@@ -392,6 +400,7 @@ def _ensure_network_engine_locked():
         stdout=log_handle,
         stderr=subprocess.STDOUT,
         creationflags=creationflags,
+        start_new_session=(os.name != "nt"),
     )
     try:
         _wait_tcp_port(host, port, proc)
@@ -639,6 +648,209 @@ def _windows_process_snapshot():
         return rows
     except Exception:
         return {}
+
+
+_LINUX_TCP_STATE_NAMES = {
+    "01": "ESTABLISHED", "02": "SYN-SENT", "03": "SYN-RECEIVED",
+    "04": "FIN-WAIT-1", "05": "FIN-WAIT-2", "06": "TIME-WAIT",
+    "07": "CLOSED", "08": "CLOSE-WAIT", "09": "LAST-ACK",
+    "0A": "LISTEN", "0B": "CLOSING", "0C": "SYN-RECEIVED",
+}
+
+
+def _linux_process_snapshot(proc_root="/proc"):
+    """Return {pid: {ppid, exe}} using procfs without third-party process modules/root access."""
+    if not sys.platform.startswith("linux"):
+        return {}
+    root = Path(proc_root)
+    rows = {}
+    try:
+        entries = list(root.iterdir())
+    except Exception:
+        return rows
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+            end = stat.rfind(")")
+            if end < 0:
+                continue
+            tail = stat[end + 2:].split()
+            # After the closing parenthesis: state, ppid, pgrp, ...
+            ppid = int(tail[1]) if len(tail) > 1 else 0
+            exe = ""
+            try:
+                exe = os.path.basename(os.readlink(entry / "exe"))
+            except Exception:
+                try:
+                    exe = (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
+                except Exception:
+                    exe = ""
+            rows[pid] = {"pid": pid, "ppid": ppid, "exe": str(exe or "")[:260]}
+        except Exception:
+            continue
+    return rows
+
+
+def _linux_owned_processes(processes=None, extra_roots=None):
+    """Return Tekzite plus the complete live descendant closure from procfs."""
+    processes = dict(processes if processes is not None else _linux_process_snapshot())
+    roots = {int(os.getpid())}
+    for state in (_NETWORK_ENGINE or {}, _EDGE_SESSION or {}):
+        proc = state.get("process") if isinstance(state, dict) else None
+        try:
+            pid = int(getattr(proc, "pid", 0) or 0)
+        except Exception:
+            pid = 0
+        if pid > 0:
+            roots.add(pid)
+    for value in list(extra_roots or []):
+        try:
+            pid = int(value or 0)
+        except Exception:
+            pid = 0
+        if pid > 0:
+            roots.add(pid)
+    owned = set(roots)
+    for _ in range(max(2, len(processes) + 1)):
+        before = len(owned)
+        for pid, item in processes.items():
+            try:
+                if int(item.get("ppid") or 0) in owned:
+                    owned.add(int(pid))
+            except Exception:
+                continue
+        if len(owned) == before:
+            break
+    return owned, processes
+
+
+def _linux_proc_address(value, family):
+    """Decode one /proc/net IPv4/IPv6 hexadecimal address."""
+    try:
+        raw = bytes.fromhex(str(value or ""))
+        if family == "IPv4":
+            if len(raw) != 4:
+                return ""
+            return socket.inet_ntop(socket.AF_INET, raw[::-1])
+        if len(raw) != 16:
+            return ""
+        # procfs prints IPv6 as four little-endian 32-bit words.
+        native = b"".join(raw[index:index + 4][::-1] for index in range(0, 16, 4))
+        return socket.inet_ntop(socket.AF_INET6, native)
+    except Exception:
+        return ""
+
+
+def _linux_proc_endpoint(token, family):
+    try:
+        address_hex, port_hex = str(token).split(":", 1)
+        return _linux_proc_address(address_hex, family), int(port_hex, 16)
+    except Exception:
+        return "", 0
+
+
+def _linux_socket_inode_owners(owned_pids, proc_root="/proc"):
+    """Map socket inode -> owning Tekzite PID(s) by scanning only owned /proc FDs."""
+    root = Path(proc_root)
+    result = {}
+    for pid in set(int(value) for value in (owned_pids or []) if int(value or 0) > 0):
+        fd_dir = root / str(pid) / "fd"
+        try:
+            entries = list(fd_dir.iterdir())
+        except Exception:
+            continue
+        for fd in entries:
+            try:
+                target = os.readlink(fd)
+            except Exception:
+                continue
+            if not target.startswith("socket:[") or not target.endswith("]"):
+                continue
+            inode = target[8:-1]
+            if inode:
+                result.setdefault(inode, set()).add(pid)
+    return result
+
+
+def _linux_socket_rows(owned_pids=None, proc_root="/proc"):
+    """Enumerate current Linux TCP/UDP sockets from procfs with PID ownership.
+
+    This is intentionally dependency-free and requires no elevated privileges
+    for Tekzite's own processes. Unlike the Windows ETW layer it is a snapshot,
+    so very short-lived flows can still fall between refreshes in Linux Preview.
+    """
+    if not sys.platform.startswith("linux"):
+        return []
+    owned = set(int(value) for value in (owned_pids or []) if int(value or 0) > 0)
+    inode_owners = _linux_socket_inode_owners(owned, proc_root=proc_root)
+    root = Path(proc_root) / "net"
+    result = []
+    tables = (
+        ("tcp", "TCP", "IPv4"), ("tcp6", "TCP", "IPv6"),
+        ("udp", "UDP", "IPv4"), ("udp6", "UDP", "IPv6"),
+    )
+    for filename, protocol, family in tables:
+        try:
+            lines = (root / filename).read_text(encoding="ascii", errors="replace").splitlines()[1:]
+        except Exception:
+            continue
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 10:
+                continue
+            inode = parts[9]
+            pids = inode_owners.get(inode)
+            if not pids:
+                continue
+            local_address, local_port = _linux_proc_endpoint(parts[1], family)
+            remote_address, remote_port = _linux_proc_endpoint(parts[2], family)
+            state_code = str(parts[3]).upper()
+            if protocol == "TCP":
+                state = _LINUX_TCP_STATE_NAMES.get(state_code, state_code)
+            else:
+                try:
+                    rip = ipaddress.ip_address(remote_address)
+                    remote_empty = rip.is_unspecified and int(remote_port or 0) == 0
+                except Exception:
+                    remote_empty = not remote_address or int(remote_port or 0) == 0
+                state = "ENDPOINT" if remote_empty else "CONNECTED"
+                if remote_empty:
+                    remote_address, remote_port = "", 0
+            for pid in sorted(pids):
+                result.append({
+                    "pid": int(pid), "protocol": protocol, "family": family,
+                    "local_address": local_address, "local_port": int(local_port),
+                    "remote_address": remote_address, "remote_port": int(remote_port),
+                    "state": state,
+                })
+    return result
+
+
+def _platform_process_snapshot():
+    if os.name == "nt":
+        return _windows_process_snapshot()
+    if sys.platform.startswith("linux"):
+        return _linux_process_snapshot()
+    return {}
+
+
+def _platform_owned_processes(processes=None, extra_roots=None):
+    if os.name == "nt":
+        return _windows_owned_processes(processes, extra_roots=extra_roots)
+    if sys.platform.startswith("linux"):
+        return _linux_owned_processes(processes, extra_roots=extra_roots)
+    return {int(os.getpid())}, dict(processes or {})
+
+
+def _platform_socket_rows(owned_pids=None):
+    if os.name == "nt":
+        return _windows_socket_rows()
+    if sys.platform.startswith("linux"):
+        return _linux_socket_rows(owned_pids)
+    return []
 
 
 def _windows_owned_processes(processes=None, extra_roots=None):
@@ -971,27 +1183,36 @@ def _match_internal_network_activity(host, *, around=0.0):
 
 
 def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
-    """Return every current socket owned by Tekzite and its child processes.
+    """Return current sockets owned by Tekzite and its descendant processes.
 
-    Current TCP endpoints come directly from Windows' owner-PID tables. UDP
-    owner-table rows are enriched with Microsoft-Windows-Kernel-Network ETW
-    send/receive events, and TCP connect/accept ETW events retain short-lived
-    flows briefly as RECENT rows. The ETW ledger is RAM-only and short-lived.
+    Windows uses owner-PID tables plus optional Kernel-Network ETW enrichment.
+    Linux Preview uses procfs socket tables and inode-to-PID ownership mapping,
+    which requires no third-party module or elevated privileges for Tekzite's
+    own processes. CDP/proxy attribution is shared across both platforms.
     """
-    if os.name != "nt":
+    if os.name != "nt" and not sys.platform.startswith("linux"):
         return {
             "supported": False, "captured_at": time.time(), "sockets": [],
-            "reason": "Live owner-PID socket enumeration is available on Windows only.",
+            "reason": "Live socket ownership is currently supported on Windows and Linux.",
         }
 
-    processes = _windows_process_snapshot()
-    owned, processes = _windows_owned_processes(processes, extra_roots=extra_pids)
-    # Start/update the ETW peer filter before reading the owner table. The first
-    # snapshot can legitimately have no peers yet; subsequent event callbacks
-    # populate the RAM ledger without waiting for another packet-table API.
-    udp_peer_state = ensure_udp_peer_monitor(owned)
-    peer_rows = list((udp_peer_state or {}).get("peers") or [])
-    tcp_event_rows = list((udp_peer_state or {}).get("tcp_flows") or [])
+    processes = _platform_process_snapshot()
+    owned, processes = _platform_owned_processes(processes, extra_roots=extra_pids)
+    if os.name == "nt":
+        # Start/update the ETW peer filter before reading the owner table. The first
+        # snapshot can legitimately have no peers yet; subsequent event callbacks
+        # populate the RAM ledger without waiting for another packet-table API.
+        udp_peer_state = ensure_udp_peer_monitor(owned)
+        peer_rows = list((udp_peer_state or {}).get("peers") or [])
+        tcp_event_rows = list((udp_peer_state or {}).get("tcp_flows") or [])
+    else:
+        udp_peer_state = {
+            "status": "snapshot-only",
+            "reason": "Linux Preview reads current TCP/UDP ownership from procfs; event-level eBPF enrichment is not enabled yet.",
+            "peers": [], "tcp_flows": [],
+        }
+        peer_rows = []
+        tcp_event_rows = []
 
     network_state = _NETWORK_ENGINE or {}
     edge_state = _EDGE_SESSION or {}
@@ -1131,7 +1352,7 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
                 concrete = _normalize_socket_address(peer.get("local_address"))
                 if concrete:
                     row["local_address"] = concrete
-        row["process"] = exe or ("TekziteBrowser.exe" if pid == int(os.getpid()) else "")
+        row["process"] = exe or (("TekziteBrowser.exe" if os.name == "nt" else "TekziteBrowser") if pid == int(os.getpid()) else "")
         row["role"] = _socket_role(
             pid, exe, network_pid, chromium_pid,
             network_pids=network_pids, chromium_pids=chromium_pids,
@@ -1297,7 +1518,7 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
 
     rows = []
     current_tcp_keys = set()
-    for item in _windows_socket_rows():
+    for item in _platform_socket_rows(owned):
         pid = int(item.get("pid") or 0)
         if pid not in owned:
             continue
@@ -1372,6 +1593,9 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
         "sampling_note": (
             "Current TCP sockets use owner-PID snapshots; recent TCP connect/accept events "
             "and UDP remote peers are enriched from live Microsoft-Windows-Kernel-Network ETW."
+            if os.name == "nt" else
+            "Linux Preview reads current TCP/UDP sockets from procfs and correlates socket inodes to Tekzite-owned PIDs. "
+            "CDP/proxy attribution is live; very short-lived flows can still fall between snapshots until optional eBPF event capture is added."
         ),
     }
 
@@ -1467,6 +1691,18 @@ def _chromium_candidates():
     Tekzite. Prefer the actual installed executable and skip alias shims.
     """
     seen = set()
+
+    # Linux preview/CI can pin an exact Chromium-family executable without
+    # changing the normal desktop discovery order. This is also useful on
+    # distributions where `chromium` is a sandboxed launcher wrapper rather
+    # than the real browser binary.
+    override = str(os.environ.get("TEKZITE_CHROMIUM") or "").strip()
+    if override:
+        candidate = shutil.which(override) if os.path.basename(override) == override else os.path.expanduser(override)
+        if candidate and os.path.isfile(candidate):
+            key = os.path.normcase(os.path.realpath(candidate))
+            seen.add(key)
+            yield candidate
 
     if os.name == "nt":
         roots = [
@@ -2043,6 +2279,16 @@ def _terminate_helper_process_tree(process):
                 timeout=4,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            return
+        except Exception:
+            pass
+    if os.name != "nt":
+        try:
+            os.killpg(os.getpgid(int(process.pid)), signal.SIGTERM)
+            try:
+                process.wait(timeout=2.0)
+            except Exception:
+                os.killpg(os.getpgid(int(process.pid)), signal.SIGKILL)
             return
         except Exception:
             pass
@@ -5003,6 +5249,20 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     f"--window-size={launch_w},{launch_h}",
                     f"--app={str(launch_url or 'about:blank')}",
                 ]
+                if os.name != "nt":
+                    # Linux Preview presents Chromium through Tekzite's existing
+                    # CDP software compositor. Modern headless Chromium needs no
+                    # X11/XWayland child-window reparenting and therefore works
+                    # under native Wayland as well as X11. Keep Chromium's sandbox
+                    # for normal desktop users. Root-only CI/container smoke tests
+                    # cannot start Chromium's sandbox, so opt out only in that
+                    # exceptional execution context.
+                    command.extend(["--headless=new", "--disable-gpu-vsync"])
+                    geteuid = getattr(os, "geteuid", None)
+                    if callable(geteuid) and int(geteuid()) == 0:
+                        command.append("--no-sandbox")
+                        _CHROMIUM_LAUNCH_DEBUG["linux_root_no_sandbox"] = True
+                    _CHROMIUM_LAUNCH_DEBUG["linux_headless_software_backend"] = True
                 if os.environ.get("TEKZITE_DOWNLOAD_PROMPT") == "1":
                     command.append("--download-prompt-for-download")
                 # v7.3 typography guard: Chromium's best Windows text path is
@@ -5042,6 +5302,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                 process = subprocess.Popen(
                     command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     creationflags=creationflags, startupinfo=None,
+                    start_new_session=(os.name != "nt"),
                 )
                 _CHROMIUM_LAUNCH_DEBUG["process_spawn_ms"] = round(
                     (time.monotonic() - launch_started) * 1000.0, 2
@@ -6715,6 +6976,12 @@ def _wait_for_embedded_first_frame(session, timeout: float = 12.0, soft_timeout:
     """
     page = _pick_devtools_page(session["port"], session)
     ws = _open_devtools_websocket(page["webSocketDebuggerUrl"], timeout=5)
+    target_url = str(session.get("last_url") or page.get("url") or "").strip().lower()
+    # A blank new tab is a valid software-compositor frame even though it has
+    # no text/nodes and produces a deliberately uniform screenshot. Without
+    # this exception Linux Preview would wait for the full first-frame timeout
+    # every time about:blank is used as a tab/bootstrap surface.
+    blank_document_allowed = target_url in {"about:blank", "chrome://newtab/"}
     deadline = time.monotonic() + max(1.0, float(timeout))
     msg = 20
     ready_since = None
@@ -6744,14 +7011,29 @@ def _wait_for_embedded_first_frame(session, timeout: float = 12.0, soft_timeout:
             height = int(value.get("h") or 0)
             last_ready, last_text_len, last_nodes = ready, text_len, nodes
 
-            has_document = (
+            has_document = bool(
                 ready in {"interactive", "complete"}
-                and (text_len >= 8 or nodes >= 2)
-                and width > 0 and height > 0
+                and (
+                    blank_document_allowed
+                    or ((text_len >= 8 or nodes >= 2) and width > 0 and height > 0)
+                )
             )
             if has_document:
                 if ready_since is None:
                     ready_since = time.monotonic()
+                if blank_document_allowed:
+                    # No visual proof is meaningful for an intentionally empty
+                    # tab. Return as soon as Chromium exposes the complete blank
+                    # document; the normal software-frame loop will capture the
+                    # viewport immediately after the UI maps it.
+                    session["first_frame_ready"] = True
+                    session["first_frame_ready_state"] = ready
+                    session["first_frame_text_len"] = text_len
+                    session["first_frame_nodes"] = nodes
+                    session["first_frame_png_chars"] = 0
+                    session["first_frame_probe"] = "blank-document"
+                    session["first_frame_empty_shell_rejected"] = False
+                    return True
 
                 raf_ok = False
                 try:
@@ -6817,11 +7099,12 @@ def _wait_for_embedded_first_frame(session, timeout: float = 12.0, soft_timeout:
                 screenshot_exists = screenshot_chars >= 128
                 screenshot_ready = screenshot_exists and bool(frame_metrics.get("visual"))
                 semantic_frame_ready = text_len >= 8 and (raf_ok or stable_ready)
+                blank_frame_ready = bool(blank_document_allowed and stable_ready)
                 session["first_frame_visual_black_ratio"] = frame_metrics.get("black_ratio")
                 session["first_frame_visual_white_ratio"] = frame_metrics.get("white_ratio")
                 session["first_frame_visual_span"] = frame_metrics.get("channel_span")
                 session["first_frame_blank_png_rejected"] = bool(screenshot_exists and not screenshot_ready)
-                if screenshot_ready or semantic_frame_ready:
+                if screenshot_ready or semantic_frame_ready or blank_frame_ready:
                     session["first_frame_ready"] = True
                     session["first_frame_ready_state"] = ready
                     session["first_frame_text_len"] = text_len
@@ -6829,6 +7112,7 @@ def _wait_for_embedded_first_frame(session, timeout: float = 12.0, soft_timeout:
                     session["first_frame_png_chars"] = screenshot_chars
                     session["first_frame_probe"] = (
                         "visual-screenshot" if screenshot_ready
+                        else "blank-document" if blank_frame_ready
                         else "text+raf" if raf_ok
                         else "stable-text-dom"
                     )
@@ -9576,10 +9860,13 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
     # the destination document is just starting. The UI already schedules zoom
     # verification asynchronously; keeping it out of this worker lets the DWM
     # surface start painting immediately after Page.navigate is accepted.
-    if hot_native_navigation or (attach_native and preferred_zoom_percent == 100):
-        # v9.2: 100% is Chromium's native default, so synchronously invoking the
-        # zoom extension during cold startup is pure latency. Non-default zoom
-        # still applies before reveal; hot navigation remains asynchronous.
+    if hot_native_navigation or preferred_zoom_percent == 100:
+        # v9.2/v10.5.81: 100% is Chromium's native default, so synchronously
+        # invoking the zoom extension during cold startup is pure latency on
+        # every platform. This is especially important for Linux headless mode,
+        # where an extension service worker may not wake before first paint.
+        # Non-default zoom still applies before reveal; hot navigation remains
+        # asynchronous.
         session["preferences_zoom_post_navigation_applied"] = False
         session["hot_navigation_fast_path"] = bool(hot_native_navigation)
     else:

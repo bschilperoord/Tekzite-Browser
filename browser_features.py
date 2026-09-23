@@ -1138,7 +1138,7 @@ class BrowserFeatures:
         return 'break'
 
     def _show_network_connections(self):
-        """Show a live Windows socket view for Tekzite and Chromium children."""
+        """Show a live platform socket view for Tekzite and Chromium children."""
         previous = getattr(self, '_network_connections_window', None)
         if previous is not None and previous.winfo_exists():
             try:
@@ -1163,8 +1163,8 @@ class BrowserFeatures:
         scope_note = tk.Label(
             win,
             text=(
-                'Live Windows sockets for Tekzite + its Chromium/helper children. '
-                'TCP endpoints come from the Windows owner table; UDP remote peers are correlated from live Kernel-Network ETW events. '
+                ('Live Windows sockets for Tekzite + its Chromium/helper children. TCP endpoints come from the Windows owner table; UDP remote peers are correlated from live Kernel-Network ETW events. ' if os.name == 'nt' else
+                 'Live Linux sockets from procfs inode/PID ownership for Tekzite + its Chromium/helper children. ') +
                 'Proxy hostnames are exact; CDP attribution adds causal request metadata, same-site/cross-site relation, response evidence, initiator and sanitized JavaScript call stacks. Script source is fetched only on demand in Details, locally pretty-printed/source-map inspected, and is not retained.'
             ),
             bg=self.ui['bg'], fg=self.ui['muted'], anchor='w', justify='left',
@@ -1172,7 +1172,7 @@ class BrowserFeatures:
         )
         scope_note.pack(side='top', fill='x', padx=18, pady=(12, 0), before=tree)
 
-        status_var = tk.StringVar(value='Reading live Windows socket tables…')
+        status_var = tk.StringVar(value='Reading live socket tables…')
         auto_var = tk.BooleanVar(value=True)
         dns_var = tk.BooleanVar(value=True)
         refresh_after = {'id': None}
