@@ -8,11 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  TARGET_VERSION: "10.5.73"
-  SEED_BRANCH: "release/v10.5.73-seed"
-  SEED_SHA256: "83347ee2ef2f85400b9724fcace956137d51b1a59767f12860232eb47c7cf816"
-
 jobs:
   publish:
     runs-on: windows-latest
@@ -20,16 +15,29 @@ jobs:
       GH_TOKEN: ${{ github.token }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout release source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+
+      - name: Read release version
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = Get-Content -Raw "main.py"
+          $match = [regex]::Match($source, 'BROWSER_VERSION\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
+          if (-not $match.Success) { throw "Could not read BROWSER_VERSION from main.py" }
+          $version = $match.Groups[1].Value
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Release version: $version"
 
       - name: Check whether release already exists
         id: release_check
         shell: pwsh
         run: |
-          $tag = "v$env:TARGET_VERSION"
+          $tag = "${{ steps.version.outputs.tag }}"
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
             "exists=true" >> $env:GITHUB_OUTPUT
@@ -44,65 +52,7 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
-
-      - name: Materialize v10.5.73 source
-        if: steps.release_check.outputs.exists != 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          git fetch origin "refs/heads/$($env:SEED_BRANCH):refs/remotes/origin/$($env:SEED_BRANCH)"
-          if ($LASTEXITCODE -ne 0) { throw "Could not fetch release seed branch" }
-
-          $parts = @(git ls-tree -r --name-only "origin/$env:SEED_BRANCH" -- .release |
-            Where-Object { $_ -like ".release/v$env:TARGET_VERSION.source.tar.xz.b64.*" } |
-            Sort-Object)
-          if ($parts.Count -ne 22) {
-            throw "Expected 22 release payload parts, got $($parts.Count)"
-          }
-
-          $b64 = New-Object System.Text.StringBuilder
-          foreach ($part in $parts) {
-            $spec = "origin/$($env:SEED_BRANCH):$part"
-            $chunkLines = @(git show $spec)
-            if ($LASTEXITCODE -ne 0) { throw "Could not read $part" }
-            [void]$b64.Append(($chunkLines -join "").Trim())
-          }
-
-          $archive = Join-Path $env:RUNNER_TEMP "tekzite-v$env:TARGET_VERSION.tar.xz"
-          [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String($b64.ToString()))
-          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne $env:SEED_SHA256) {
-            throw "Release payload hash mismatch: $hash"
-          }
-          Write-Host "Verified release payload SHA-256: $hash"
-
-          $extract = Join-Path $env:RUNNER_TEMP "tekzite-release-source"
-          if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
-          New-Item -ItemType Directory -Force -Path $extract | Out-Null
-          $env:ARCHIVE_PATH = $archive
-          $env:EXTRACT_PATH = $extract
-          @'
-          import lzma
-          import os
-          import tarfile
-
-          archive = os.environ["ARCHIVE_PATH"]
-          out = os.environ["EXTRACT_PATH"]
-          with lzma.open(archive, "rb") as stream:
-              with tarfile.open(fileobj=stream, mode="r:") as tar:
-                  tar.extractall(out, filter="data")
-          '@ | python -
-          if ($LASTEXITCODE -ne 0) { throw "Could not extract release payload" }
-
-          $srcRoot = Join-Path $extract "Tekzite-Browser-v$env:TARGET_VERSION-Source"
-          if (-not (Test-Path (Join-Path $srcRoot "main.py"))) {
-            throw "Release source root not found: $srcRoot"
-          }
-
-          Get-ChildItem -Force | Where-Object { $_.Name -ne ".git" } | Remove-Item -Recurse -Force
-          Get-ChildItem -Force $srcRoot | ForEach-Object {
-            Copy-Item $_.FullName -Destination "." -Recurse -Force
-          }
+          cache: pip
 
       - name: Set up Node
         if: steps.release_check.outputs.exists != 'true'
@@ -113,7 +63,7 @@ jobs:
       - name: Verify synchronized version metadata
         if: steps.release_check.outputs.exists != 'true'
         shell: pwsh
-        run: python tools\sync_version.py "$env:TARGET_VERSION" --check
+        run: python tools\sync_version.py "${{ steps.version.outputs.version }}" --check
 
       - name: Install test dependencies
         if: steps.release_check.outputs.exists != 'true'
@@ -138,31 +88,6 @@ jobs:
         shell: pwsh
         run: python tools\doctor.py
 
-      - name: Commit v10.5.73 source
-        id: source
-        if: steps.release_check.outputs.exists != 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # The GITHUB_TOKEN may push application source, but GitHub blocks it from
-          # creating/updating workflow files. Keep the authorized workflows from
-          # the triggering main commit; workflows are synchronized separately.
-          git restore --source="origin/main" -- .github/workflows
-          if ($LASTEXITCODE -ne 0) { throw "Could not restore authorized workflow files" }
-          git add -A
-          git diff --cached --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git commit -m "Release v$env:TARGET_VERSION [skip ci]"
-            if ($LASTEXITCODE -ne 0) { throw "Could not commit release source" }
-            git push origin HEAD:main
-            if ($LASTEXITCODE -ne 0) { throw "Could not push release source to main" }
-          }
-          $sourceCommit = (git rev-parse HEAD).Trim()
-          "source_commit=$sourceCommit" >> $env:GITHUB_OUTPUT
-          Write-Host "Release source commit: $sourceCommit"
-
       - name: Build Windows x64 executable
         if: steps.release_check.outputs.exists != 'true'
         shell: pwsh
@@ -174,7 +99,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $exe = Get-Item ".\dist\TekziteBrowser.exe"
-          $expected = $env:TARGET_VERSION
+          $expected = "${{ steps.version.outputs.version }}"
           $fileVersion = [string]$exe.VersionInfo.FileVersion
           $productVersion = [string]$exe.VersionInfo.ProductVersion
           Write-Host "FileVersion=$fileVersion ProductVersion=$productVersion"
@@ -191,7 +116,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $version = $env:TARGET_VERSION
+          $version = "${{ steps.version.outputs.version }}"
           $exeName = "Tekzite-Browser-v$version-Windows-x64.exe"
           $zipName = "Tekzite-Browser-v$version-Windows-x64.zip"
           Copy-Item ".\dist\TekziteBrowser.exe" ".\$exeName" -Force
@@ -208,8 +133,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $tag = "v$env:TARGET_VERSION"
-          $sha = "${{ steps.source.outputs.source_commit }}"
+          $tag = "${{ steps.version.outputs.tag }}"
+          $sha = "${{ github.sha }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch --tags --force
           git rev-parse "refs/tags/$tag" *> $null
           if ($LASTEXITCODE -eq 0) {
@@ -229,9 +156,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $version = $env:TARGET_VERSION
-          $tag = "v$version"
-          $sourceCommit = "${{ steps.source.outputs.source_commit }}"
+          $version = "${{ steps.version.outputs.version }}"
+          $tag = "${{ steps.version.outputs.tag }}"
 
           $changeLog = Get-Content -Raw "CHANGELOG.md"
           $escaped = [regex]::Escape($version)
@@ -249,4 +175,4 @@ jobs:
             ".\SHA256SUMS.txt" `
             --title "Tekzite Browser v$version" `
             --notes $notes `
-            --target $sourceCommit
+            --target "${{ github.sha }}"
