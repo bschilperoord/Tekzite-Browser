@@ -82,4 +82,4 @@ replace_once(
     "smoke overall timeout",
 )
 
-print("Linux runtime follow-up transformations applied")
+print("Linux runtime follow-up transformations applied and smoke backend pinned")
