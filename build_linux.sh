@@ -32,6 +32,7 @@ chmod +x ./tekzite-network
 cat > build/linux-browser-spec/TekziteBrowser-Linux.spec <<'PYISPEC'
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules
 project = Path(SPECPATH).resolve().parents[1]
 helper = project / "tekzite-network"
 if not helper.is_file():
@@ -46,7 +47,7 @@ a = Analysis(
     pathex=[str(project)],
     binaries=[(str(helper), ".")],
     datas=datas,
-    hiddenimports=["tkinter", "PIL.ImageTk", "PIL._tkinter_finder"], hookspath=[], hooksconfig={}, runtime_hooks=[],
+    hiddenimports=sorted(set(["tkinter", "PIL.ImageTk", "PIL._tkinter_finder"] + collect_submodules("PIL"))), hookspath=[], hooksconfig={}, runtime_hooks=[],
     excludes=["pytest", "numpy", "pygame", "matplotlib", "pandas", "scipy", "IPython", "psutil"],
     noarchive=False, optimize=1,
 )
