@@ -430,20 +430,9 @@ app_manifest = re.sub(
 write("tekzite_browser.manifest", app_manifest)
 
 version_info = read("tekzite_version_info.txt")
-version_info = re.sub(r'filevers=\\(10,\\s*5,\\s*\\d+,\\s*0\\)', 'filevers=(10, 5, 59, 0)', version_info, count=1)
-version_info = re.sub(r'prodvers=\\(10,\\s*5,\\s*\\d+,\\s*0\\)', 'prodvers=(10, 5, 59, 0)', version_info, count=1)
-version_info = re.sub(
-    r"StringStruct\\(u'FileVersion', u'10\\.5\\.\\d+'\\)",
-    "StringStruct(u'FileVersion', u'10.5.59')",
-    version_info,
-    count=1,
-)
-version_info = re.sub(
-    r"StringStruct\\(u'ProductVersion', u'10\\.5\\.\\d+'\\)",
-    "StringStruct(u'ProductVersion', u'10.5.59')",
-    version_info,
-    count=1,
-)
+version_info = version_info.replace("10.5.58", "10.5.59")
+version_info = re.sub(r'filevers=\(10,\s*5,\s*\d+,\s*0\)', 'filevers=(10, 5, 59, 0)', version_info, count=1)
+version_info = re.sub(r'prodvers=\(10,\s*5,\s*\d+,\s*0\)', 'prodvers=(10, 5, 59, 0)', version_info, count=1)
 write("tekzite_version_info.txt", version_info)
 
 print("Applied Tekzite Browser v10.5.59 visible/stable Google auth handoff fix")
