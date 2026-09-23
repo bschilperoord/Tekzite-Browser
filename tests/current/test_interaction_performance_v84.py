@@ -5,7 +5,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_version_84():
-    assert 'BROWSER_VERSION = "10.5.54"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.73"' in MAIN
 
 
 def test_hover_has_separate_executor():
@@ -22,7 +22,7 @@ def test_motion_is_latest_value_only():
 
 
 def test_dwm_geometry_uses_low_latency_coalescing():
-    assert 'def _schedule_dwm_geometry_sync(self, resize=False, delay=8)' in MAIN
+    assert 'def _schedule_dwm_geometry_sync(self, resize=False, delay=8' in MAIN
     assert '_schedule_dwm_geometry_sync(resize=True, delay=8)' in MAIN
     assert '_schedule_dwm_geometry_sync(resize=False, delay=8)' in MAIN
 

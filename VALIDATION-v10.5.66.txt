@@ -1,0 +1,23 @@
+Tekzite Browser v10.5.66 validation
+
+Focus: live Google/YouTube auth-window completion and exact HWND shutdown
+
+Automated validation:
+- Python source compilation: PASS
+- Current Python regression suite: 454/454 PASS
+- Live YouTube HWND title completion signal: PASS
+- Google Accounts title rejected as YouTube completion: PASS
+- Live HWND completion bypasses lagging Cookies/History snapshots: PASS
+- Exact auth HWND is the primary clean close target: PASS
+- First post-auth close request is synchronous/cooperative SC_CLOSE/WM_CLOSE: PASS
+- v10.5.65 cookie + History fallback detection remains covered: PASS
+- Release metadata synchronization: PASS
+- Chromium extension JavaScript syntax checks: PASS
+- Environment doctor: no blocking setup issues (full DWM/runtime smoke test remains Windows-only)
+
+Windows smoke test target:
+1. Open YouTube in Tekzite and trigger Google sign-in.
+2. Complete sign-in until the standalone Chromium window visibly shows YouTube.
+3. Verify Tekzite detects the live YouTube window title within about 1-2 seconds.
+4. Verify that exact Chromium window closes automatically without a crash/restore-pages prompt.
+5. Verify Tekzite returns to YouTube signed in and performs the one-shot automatic refresh.

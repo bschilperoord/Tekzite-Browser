@@ -1137,6 +1137,332 @@ class BrowserFeatures:
         text.insert('1.0', '\n'.join(state)); text.configure(state='disabled')
         return 'break'
 
+    def _show_network_connections(self):
+        """Show a live Windows socket view for Tekzite and Chromium children."""
+        previous = getattr(self, '_network_connections_window', None)
+        if previous is not None and previous.winfo_exists():
+            try:
+                previous.lift()
+                previous.focus_force()
+            except Exception:
+                pass
+            return 'break'
+
+        win, tree, controls = self._feature_window(
+            'Live Socket View',
+            ('Role', 'Process', 'PID', 'Proto', 'Local endpoint', 'Hostname', 'Remote endpoint', 'State', 'Traffic', 'Seen', 'Path'),
+            (120, 155, 65, 60, 195, 235, 195, 90, 170, 85, 180),
+        )
+        self._network_connections_window = win
+        win.geometry('1770x650')
+        try:
+            win.minsize(980, 480)
+        except Exception:
+            pass
+
+        scope_note = tk.Label(
+            win,
+            text=(
+                'Live Windows sockets for Tekzite + its Chromium/helper children. '
+                'TCP endpoints come from the Windows owner table; UDP remote peers are correlated from live Kernel-Network ETW events. '
+                'Proxy hostnames are exact; other remote IPs can use background PTR lookup.'
+            ),
+            bg=self.ui['bg'], fg=self.ui['muted'], anchor='w', justify='left',
+            wraplength=1650,
+        )
+        scope_note.pack(side='top', fill='x', padx=18, pady=(12, 0), before=tree)
+
+        status_var = tk.StringVar(value='Reading live Windows socket tables…')
+        auto_var = tk.BooleanVar(value=True)
+        dns_var = tk.BooleanVar(value=True)
+        refresh_after = {'id': None}
+        snapshot_future = {'value': None}
+        last_rows = {'rows': []}
+        dns_cache = {}
+        dns_pending = {}
+        window_alive = {'value': True}
+
+        def endpoint(address, port):
+            address = str(address or '')
+            try:
+                port = int(port or 0)
+            except Exception:
+                port = 0
+            if not address:
+                return ''
+            shown = f'[{address}]' if ':' in address and not address.startswith('[') else address
+            return f'{shown}:{port}' if port else shown
+
+        def queue_dns(address):
+            address = str(address or '').split('%', 1)[0]
+            if not address or not dns_var.get() or address in dns_cache or address in dns_pending:
+                return
+            # Keep DNS enrichment deliberately bounded so a page with many CDN
+            # endpoints cannot starve browser work in the shared executor.
+            if len(dns_pending) >= 6:
+                return
+            try:
+                import ipaddress as _ipaddress
+                ip = _ipaddress.ip_address(address)
+                if ip.is_loopback:
+                    dns_cache[address] = 'localhost'
+                    return
+                if ip.is_unspecified:
+                    dns_cache[address] = ''
+                    return
+            except Exception:
+                return
+            dns_pending[address] = self._executor.submit(features.net.reverse_dns_hostname, address)
+
+        def harvest_dns():
+            changed = False
+            for address, future in list(dns_pending.items()):
+                if not future.done():
+                    continue
+                try:
+                    dns_cache[address] = str(future.result() or '')[:253]
+                except Exception:
+                    dns_cache[address] = ''
+                dns_pending.pop(address, None)
+                changed = True
+            return changed
+
+        def hostname_for(row):
+            if str(row.get('state') or '') == 'LISTEN':
+                return ''
+            host = str(row.get('hostname') or '')
+            if host:
+                return host
+            address = str(row.get('remote_address') or '').split('%', 1)[0]
+            if not address:
+                return ''
+            cached = dns_cache.get(address)
+            if cached is not None:
+                return cached or address
+            queue_dns(address)
+            return address
+
+        def _format_bytes(value):
+            try:
+                value = max(0, int(value or 0))
+            except Exception:
+                value = 0
+            if value < 1024:
+                return f'{value} B'
+            if value < 1024 * 1024:
+                return f'{value / 1024:.1f} KB'
+            return f'{value / (1024 * 1024):.1f} MB'
+
+        def traffic_for(row):
+            if str(row.get('protocol') or '') != 'UDP' or str(row.get('state') or '') != 'PEER':
+                return ''
+            txp = int(row.get('tx_packets') or 0)
+            rxp = int(row.get('rx_packets') or 0)
+            txb = _format_bytes(row.get('tx_bytes'))
+            rxb = _format_bytes(row.get('rx_bytes'))
+            return f'↑{txp}/{txb}  ↓{rxp}/{rxb}'
+
+        def seen_for(row):
+            try:
+                seen = float(row.get('last_seen') or 0.0)
+            except Exception:
+                seen = 0.0
+            if seen <= 0:
+                return ''
+            age = max(0.0, time.time() - seen)
+            if age < 1.0:
+                return 'now'
+            if age < 10.0:
+                return f'{age:.1f}s ago'
+            return f'{int(age)}s ago'
+
+        def row_values(row):
+            return (
+                row.get('role') or '',
+                row.get('process') or '',
+                row.get('pid') or '',
+                f"{row.get('protocol') or ''}/{row.get('family') or ''}",
+                endpoint(row.get('local_address'), row.get('local_port')),
+                hostname_for(row),
+                endpoint(row.get('remote_address'), row.get('remote_port')),
+                row.get('state') or '',
+                traffic_for(row),
+                seen_for(row),
+                row.get('path') or '',
+            )
+
+        def apply_snapshot(snapshot):
+            if not window_alive['value'] or not win.winfo_exists():
+                return
+            if not (snapshot or {}).get('supported'):
+                status_var.set(str((snapshot or {}).get('reason') or 'Live socket view is unavailable.'))
+                return
+            rows = list((snapshot or {}).get('sockets') or [])
+            last_rows['rows'] = rows
+            live_iids = set()
+            for index, row in enumerate(rows):
+                key = str(row.get('key') or f'{index}:{row}')
+                iid = 'sock:' + hashlib.sha1(key.encode('utf-8', 'replace')).hexdigest()[:20]
+                live_iids.add(iid)
+                values = row_values(row)
+                if tree.exists(iid):
+                    tree.item(iid, values=values)
+                    tree.move(iid, '', index)
+                else:
+                    tree.insert('', index, iid=iid, values=values)
+            for iid in list(tree.get_children()):
+                if iid not in live_iids:
+                    tree.delete(iid)
+
+            tcp = sum(1 for row in rows if row.get('protocol') == 'TCP')
+            udp = sum(1 for row in rows if row.get('protocol') == 'UDP')
+            established = sum(1 for row in rows if row.get('state') == 'ESTABLISHED')
+            listeners = sum(1 for row in rows if row.get('state') == 'LISTEN')
+            direct = sum(1 for row in rows if str(row.get('path') or '').startswith('Direct'))
+            udp_peers = sum(1 for row in rows if row.get('protocol') == 'UDP' and row.get('state') == 'PEER')
+            pids = {int(row.get('pid') or 0) for row in rows if int(row.get('pid') or 0) > 0}
+            direct_text = f' • {direct} Direct external' if direct else ''
+            peer_text = f' • {udp_peers} UDP peer(s)' if udp_peers else ''
+            udp_monitor = (snapshot or {}).get('udp_peer_monitor') or {}
+            etw_status = str(udp_monitor.get('status') or '')
+            etw_reason = str(udp_monitor.get('reason') or '')
+            etw_text = ' • UDP ETW active' if etw_status == 'running' else ''
+            if etw_status in {'error', 'permission', 'unsupported'} and etw_reason:
+                etw_text = f' • UDP peer ETW: {etw_reason}'
+            status_var.set(
+                f'{len(rows)} live socket(s) • {len(pids)} process(es) • '
+                f'{tcp} TCP • {udp} UDP • {established} established • {listeners} listener(s)'
+                f'{peer_text}{direct_text}{etw_text} • 250 ms snapshots'
+            )
+
+        def collect_snapshot():
+            auth = getattr(self, '_google_auth_handle', None) or {}
+            extra_pids = list(auth.get('browser_pids') or [])
+            launch_pid = auth.get('launch_pid')
+            if launch_pid:
+                extra_pids.append(launch_pid)
+            return features.net.live_socket_snapshot(include_proxy_names=True, extra_pids=extra_pids)
+
+        def schedule_next(delay=250):
+            if not window_alive['value'] or not win.winfo_exists() or not auto_var.get():
+                return
+            refresh_after['id'] = win.after(delay, refresh)
+
+        def finish_snapshot():
+            if not window_alive['value'] or not win.winfo_exists():
+                return
+            future = snapshot_future.get('value')
+            if future is None:
+                return
+            if not future.done():
+                win.after(25, finish_snapshot)
+                return
+            snapshot_future['value'] = None
+            try:
+                apply_snapshot(future.result())
+            except Exception as exc:
+                status_var.set(f'Could not read live sockets: {exc}')
+            harvest_dns()
+            # Hostnames resolved after the snapshot can be painted immediately
+            # without waiting for another OS socket-table query.
+            if last_rows.get('rows'):
+                for index, row in enumerate(last_rows['rows']):
+                    key = str(row.get('key') or f'{index}:{row}')
+                    iid = 'sock:' + hashlib.sha1(key.encode('utf-8', 'replace')).hexdigest()[:20]
+                    if tree.exists(iid):
+                        tree.item(iid, values=row_values(row))
+            schedule_next(250)
+
+        def refresh():
+            if not window_alive['value'] or not win.winfo_exists():
+                return
+            harvest_dns()
+            future = snapshot_future.get('value')
+            if future is not None and not future.done():
+                return
+            snapshot_future['value'] = self._executor.submit(collect_snapshot)
+            win.after(10, finish_snapshot)
+
+        def copy_rows():
+            rows = last_rows.get('rows') or []
+            lines = ['Role\tProcess\tPID\tProtocol\tLocal endpoint\tHostname\tRemote endpoint\tState\tTraffic\tSeen\tPath']
+            for row in rows:
+                values = row_values(row)
+                lines.append('\t'.join(str(value) for value in values))
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append('\n'.join(lines))
+                status_var.set(f'Copied {len(rows)} live socket row(s).')
+            except Exception:
+                status_var.set('Could not copy live socket view.')
+
+        def toggle_auto():
+            if auto_var.get():
+                refresh()
+            else:
+                after_id = refresh_after.get('id')
+                if after_id:
+                    try:
+                        win.after_cancel(after_id)
+                    except Exception:
+                        pass
+                    refresh_after['id'] = None
+
+        def toggle_dns():
+            if not dns_var.get():
+                dns_pending.clear()
+            if last_rows.get('rows'):
+                apply_snapshot({'supported': True, 'sockets': last_rows['rows']})
+
+        def close():
+            window_alive['value'] = False
+            after_id = refresh_after.get('id')
+            if after_id:
+                try:
+                    win.after_cancel(after_id)
+                except Exception:
+                    pass
+            try:
+                features.net.stop_live_socket_peer_monitor()
+            except Exception:
+                pass
+            self._network_connections_window = None
+            win.destroy()
+
+        self._feature_button(controls, 'Refresh now', refresh)
+        self._feature_button(controls, 'Copy all', copy_rows)
+        tk.Checkbutton(
+            controls, text='Live', variable=auto_var, command=toggle_auto,
+            bg=self.ui['bg'], fg=self.ui['text'], selectcolor=self.ui['field'],
+            activebackground=self.ui['bg'], activeforeground=self.ui['text'],
+            highlightthickness=0, bd=0,
+        ).pack(side='left', padx=(8, 4))
+        tk.Checkbutton(
+            controls, text='Resolve hostnames (PTR)', variable=dns_var, command=toggle_dns,
+            bg=self.ui['bg'], fg=self.ui['text'], selectcolor=self.ui['field'],
+            activebackground=self.ui['bg'], activeforeground=self.ui['text'],
+            highlightthickness=0, bd=0,
+        ).pack(side='left', padx=(8, 4))
+        self._feature_button(controls, 'Close', close)
+        tk.Label(
+            controls, textvariable=status_var, bg=self.ui['bg'], fg=self.ui['muted'],
+            anchor='e', justify='right',
+        ).pack(side='right', fill='x', expand=True, padx=(12, 4))
+
+        footer = tk.Label(
+            win,
+            text=(
+                'Exact site hostnames come from Tekzite Network when available; UDP peers come from RAM-only Kernel-Network ETW metadata. '
+                'PTR enrichment may query your configured DNS. TCP is sampled every 250 ms; UDP peer send/receive discovery is event-driven while this window is open.'
+            ),
+            bg=self.ui['bg'], fg=self.ui['muted_dim'], anchor='w', justify='left', wraplength=1650,
+        )
+        footer.pack(side='bottom', fill='x', padx=18, pady=(0, 4), before=controls)
+
+        win.protocol('WM_DELETE_WINDOW', close)
+        refresh()
+        return 'break'
+
     def _show_local_ports(self):
         win = self._new_animated_toplevel(self.root)
         win.title('Tekzite Local Ports & Loopback')

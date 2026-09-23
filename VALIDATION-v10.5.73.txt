@@ -1,0 +1,22 @@
+Tekzite Browser v10.5.73 validation
+
+Focus: live UDP remote-peer discovery in Tools -> Network Connections.
+
+Validated in this build:
+- Windows owner-PID UDP rows remain the baseline for socket ownership.
+- Microsoft-Windows-Kernel-Network ETW send/receive metadata augments UDP rows with actual remote IP and port while the Live Socket View is open.
+- IPv4 and IPv6 UDP event parsing maps send/receive source/destination endpoints back to the correct local and remote peer.
+- One connectionless UDP socket can expose multiple recent remote-peer rows instead of overwriting the previous peer.
+- Per-peer TX/RX packet counts, byte counts and last-seen age are retained in a bounded short-lived RAM ledger.
+- UDP peer rows use the existing hostname/PTR enrichment and direct-external route classification.
+- ETW filtering is limited to Tekzite/Chromium/network-helper PIDs; packet payloads are not copied into the monitor.
+- Closing the Live Socket View stops the optional ETW peer monitor; permission/provider failures are surfaced and fall back to the local UDP endpoint.
+- Dedicated v10.5.73 UDP-peer regressions: 6/6 PASS.
+- Full current Python regression suite: 493/493 PASS.
+- Python compile checks for main browser/network/ETW modules: PASS.
+- Chromium extension JavaScript syntax checks: PASS.
+- Release metadata synchronized to v10.5.73.
+- Environment doctor: no blocking setup issues.
+
+Environment limitation:
+- Validation ran on Linux, so the native Windows ETW session and Windows socket/DWM runtime still require a real Windows smoke test.

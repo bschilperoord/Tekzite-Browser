@@ -10,7 +10,7 @@ def _source():
 
 
 def test_release_is_v10546():
-    assert main.BROWSER_VERSION == "10.5.54"
+    assert main.BROWSER_VERSION == "10.5.73"
 
 
 def test_keyboard_sink_is_tk_owned_not_raw_subclass():

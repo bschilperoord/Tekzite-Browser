@@ -1,0 +1,14 @@
+Tekzite Browser v10.5.70 validation
+
+Focus: maximized DWM pointer/CSS coordinate alignment.
+
+Validated in this build:
+- DWM pointer metrics prefer the actual visible 1:1 thumbnail pixel contract over stale pre-maximize RenderWidgetHost dimensions.
+- A maximize/restore recrop request can force Chromium geometry work even when the viewport-size cache already contains the final dimensions.
+- Input metrics refresh only after the forced geometry/recrop pass has completed.
+- Maximize/restore performs one forced recrop plus two lightweight metric-only settle checks to avoid unnecessary DComp churn.
+- Regression simulation covers a 1920x900 visible DWM surface with stale 1200x700 render-host geometry and a 1536x720 CSS viewport at 1.25 native/CSS scale.
+- Release metadata synchronized to v10.5.70.
+- Current Python regression suite: 475/475 PASS.
+- Chromium extension JavaScript syntax checks: PASS.
+- Environment doctor: no blocking setup issues; Windows DWM behavior requires real Windows smoke test.

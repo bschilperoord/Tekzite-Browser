@@ -30,6 +30,7 @@ The intended design is:
 - direct download opening is allowed only after Chromium reports a completed download with a safe/accepted danger state;
 - Tekzite does not disable Chromium client-side phishing detection or component updates;
 - official Windows runtime/build dependencies are exact-version and SHA-256 hash locked, GitHub Actions use immutable commit SHAs, and CI runs `pip-audit` plus high-severity Bandit checks;
+- the Live Socket View UDP peer monitor consumes Kernel-Network ETW metadata only while the view is open, filters it to Tekzite-owned PIDs, retains a bounded short-lived peer ledger in RAM, and does not store packet payloads;
 - release executables can be Authenticode-signed by setting `TEKZITE_SIGN_CERT_SHA1` during `build_windows.ps1`.
 
 Please report any behavior that breaks these assumptions.

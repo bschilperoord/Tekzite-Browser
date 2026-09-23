@@ -2,7 +2,63 @@
 
 Tekzite Browser is an experimental Windows desktop browser shell built in Python/Tk around a real Chromium renderer. Tekzite keeps its own tabs, omnibox, menus, preferences and interaction layer while Chromium handles web standards, JavaScript, media, cookies, canvas, WebGL and page rendering.
 
-> **Current release:** v10.5.54 UltraSpeed for Windows  
+> **Current release:** v10.5.73 UltraSpeed for Windows  
+
+### UDP remote peers via live ETW (v10.5.73)
+
+**Tools -> Network Connections** can now resolve the remote peer behind live UDP sockets instead of stopping at the local Windows owner-table endpoint. While the Live Socket View is open, Tekzite starts a RAM-only `Microsoft-Windows-Kernel-Network` ETW consumer for Tekzite/Chromium/helper PIDs and correlates UDP send/receive events with the owning socket. The dashboard shows the remote IP and port, one row per recent peer, TX/RX packet and byte counters, last-seen age, route classification and asynchronous hostname enrichment.
+
+One UDP socket may talk to several destinations, so peers remain separate rows for a short rolling window rather than overwriting each other. The ETW monitor stores metadata only in process memory and stops when the Live Socket View closes; it does not capture packet payloads. If Windows refuses the ETW session, the UI reports the reason and falls back to the local UDP endpoint instead of inventing a remote peer. TCP continues to use the 250 ms Windows owner-table snapshot, while UDP peer discovery is event-driven after the monitor starts.
+
+### Full live socket view (v10.5.72)
+
+**Tools -> Network Connections** is now a process-level **Live Socket View**. Tekzite reads Windows' owner-PID TCP/UDP tables and shows every current socket owned by Tekzite itself, Chromium, Tekzite Network and their descendants: process role/name, PID, TCP/UDP + IPv4/IPv6, local endpoint, hostname, remote endpoint, TCP state and route classification. Public Chromium sockets that do not go through Tekzite Network are called out as **Direct external**.
+
+For proxied web traffic, the network helper correlates its live upstream socket with the original requested hostname in RAM, so the table can show the real site/subdomain even when the remote IP belongs to a CDN. Other unresolved IPs can be enriched with optional background PTR lookup. No URL paths, headers, query strings or page contents are added to the monitor. Windows' UDP owner table itself exposes only local UDP endpoints. Starting with v10.5.73, Tekzite augments those UDP rows with live Kernel-Network ETW peer events; TCP remains a 250 ms owner-table snapshot, so an extremely short-lived TCP socket can still theoretically exist entirely between samples.
+
+### Live network connections overview (v10.5.71)
+
+**Tools -> Network Connections** now shows the current Tekzite Network helper session as a live destination table: hostname, port, protocol, allowed/blocked result, connection count, active tunnels and last-seen age. The ledger lives only in the helper's RAM and is read through the existing loopback proxy port using a random per-launch token. Tekzite does not persist connection history for this feature and does not record URL paths, query strings, headers or page contents. HTTPS traffic remains opaque inside end-to-end CONNECT tunnels.
+
+### Maximized DWM pointer alignment (v10.5.70)
+
+Maximize/restore now re-establishes the DWM pointer transform from the actual visible thumbnail pixel contract instead of a possibly stale pre-maximize RenderWidgetHost measurement. Tekzite forces one real recrop before refreshing input metrics, then performs lightweight metric-only settle checks. This keeps text selection, links and controls under the physical cursor even when the viewport jumps to a much larger maximized size.
+
+### Faster Google auth close + durable sign-out (v10.5.69)
+
+A successful Google/YouTube handoff now closes the standalone Chromium window on the first confirmed live YouTube HWND/title return. The live auth monitor runs every 70 ms instead of 220 ms and no longer imposes the old extra 0.55-second settle delay on this authoritative signal. Cookie/history-only fallbacks remain deliberately conservative. Normal Tekzite exit now also gives Chromium a clean `Browser.close` window before fallback teardown, so newly written cookie changes such as a YouTube sign-out are flushed to the profile instead of being lost to an immediate forced process-tree kill.
+
+### Native/DComp stall guard (v10.5.68)
+
+Hot Native navigation now treats surface-reuse state as per-navigation instead of persistent session state. Tekzite clears stale cold-frame diagnostics before every hot handoff, skips the old fixed 220 ms screen probe while Chromium is swapping renderers, and spaces forced DWM recrops farther apart. Cold/new-target surface diagnostics now ignore flat frames while the page is still loading and require two post-load blank samples before declaring a real DComp stall.
+
+### Continuous Chromium frame handoff (v10.5.67)
+
+Refreshes and same-tab navigations now keep the existing healthy DWM page surface continuously visible while Chromium swaps to the new document. Tekzite no longer hides that surface and re-reveals it on a fixed timer, removing a race that could expose Chromium's black DirectComposition backing surface. Cold startup also gets one hidden full-recrop/readiness retry before the first Chromium frame is revealed.
+
+### Live auth-window completion (v10.5.66)
+
+Google/YouTube sign-in completion now follows the visible standalone Chromium window itself. Tekzite records the exact auth HWND, detects when that window has visibly returned to YouTube, and sends a synchronous clean close directly to that HWND. Chromium History and cookie snapshots remain fallback signals, but they are no longer allowed to lag behind a visibly completed login.
+
+### Reliable already-signed-in Google auth return (v10.5.65)
+
+The Google/YouTube handoff no longer depends on an authentication cookie changing. Tekzite also watches Chromium's live History WAL for a fresh navigation back to the originating site, so an already-signed-in account can complete the handoff, close the standalone Chromium window, and refresh the Tekzite tab automatically. Before opening the auth window, Tekzite heals stale Chromium clean-exit metadata left by older releases and suppresses the legacy crash-recovery bubble.
+
+### Clean Google-auth Chromium handoff (v10.5.64)
+
+The Google sign-in handoff now closes Tekzite's embedded Chromium with Chromium's own `Browser.close` command before reusing the shared profile. The standalone sign-in window is also closed cooperatively with normal Windows close messages only. This prevents Chromium from treating the handoff as a crash and showing the “restore pages / wasn’t shut down correctly” bubble after login.
+
+### Google sign-in completion handoff (v10.5.63)
+
+Google authentication handoff now detects live Chromium cookie changes from SQLite WAL, closes the standalone sign-in window automatically, and performs a one-shot authenticated refresh of the originating tab.
+
+### Release hygiene + maximize/restore guard (v10.5.62)
+
+Tekzite now performs a final explicit DWM viewport reconciliation after maximize/restore, and the release metadata/test/build pipeline is synchronized around one source version. The release workflow builds directly from a pushed `vX.Y.Z` tag instead of replaying an old embedded source patch.
+
+### Native Windows identity + Google auth handoff (v10.5.61)
+
+The packaged browser now carries Tekzite's own native app identity and icon more consistently. Google sign-in can hand off to a normal visible Chromium window using the same profile, detect a settled authentication-cookie change, close that window normally, wait for the profile to be released, and then return to the embedded Tekzite tab.
 
 ### Drag lock after taskbar restore (v10.5.54)
 

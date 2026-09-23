@@ -18,7 +18,7 @@ BUILD = (ROOT / 'build_windows.ps1').read_text(encoding='utf-8')
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == '10.5.54'
+    assert main.BROWSER_VERSION == '10.5.73'
 
 
 def test_network_helper_kill_requires_instance_identity():

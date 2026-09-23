@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.54"
+    assert main.BROWSER_VERSION == "10.5.73"
 
 
 def test_about_is_dedicated_toplevel_not_generic_message():

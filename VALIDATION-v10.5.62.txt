@@ -1,0 +1,20 @@
+Tekzite Browser v10.5.62 validation
+=================================
+
+Source checks performed in the sandbox:
+- Python compile checks: PASS
+- Release metadata sync check: PASS
+- Current regression suite: PASS (435 tests)
+- Chromium extension mocked API checks: PASS
+- Tekzite environment doctor: PASS with no blocking issues
+
+Expected environment warning:
+- Validation host is Linux. Full Windows DWM/taskbar/native-icon behavior and the Windows OneFile executable must be smoke-tested/built on Windows or GitHub Actions.
+
+v10.5.62 maintenance changes:
+- Restored explicit final DWM geometry reconciliation after maximize/restore.
+- Synchronized active release metadata and regression-suite version pins.
+- Added tools/sync_version.py with update and --check modes.
+- Added regression coverage for v10.5.61 native app identity and Google authentication handoff/auto-close behavior.
+- Replaced obsolete v10.5.54 patch-based publishing workflow with tag-driven release builds.
+- Removed the obsolete branch-only v10.5.61 icon/auth build workflow.

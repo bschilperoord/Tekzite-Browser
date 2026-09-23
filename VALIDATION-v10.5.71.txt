@@ -1,0 +1,19 @@
+Tekzite Browser v10.5.71 validation
+
+Focus: privacy-preserving live network connections overview.
+
+Validated in this build:
+- Tools -> Network Connections exposes the current helper session's HTTP/HTTPS destinations.
+- The helper tracks hostname, port, protocol, result, count, active tunnels, first seen and last seen only.
+- Allowed outbound tunnels, blocked ads, blocked trackers, blocked browser telemetry, HTTPS-first upgrades and failed connects are distinguishable.
+- Connection overview state is RAM-only; no connection-history file is created.
+- Tekzite reads the ledger over the existing loopback proxy through an authenticated internal request using the helper's random per-launch instance token.
+- Invalid overview tokens receive 404 and the control request is never forwarded upstream.
+- URL paths, query strings, request headers and page contents are not retained by the overview.
+- HTTPS CONNECT remains end-to-end encrypted; tunnel counts do not claim to equal encrypted request counts.
+- UI explicitly notes that OS DNS and non-proxy UDP are outside the overview's scope.
+- RAM overview loopback integration probe: PASS.
+- Release metadata synchronized to v10.5.71.
+- Current Python regression suite: 482/482 PASS.
+- Chromium extension JavaScript syntax checks: PASS.
+- Environment doctor: no blocking setup issues; Windows DWM/browser behavior still requires real Windows smoke testing.

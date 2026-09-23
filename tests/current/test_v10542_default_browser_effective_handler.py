@@ -5,7 +5,7 @@ from test_v10541_default_browser_detection import FakeWinreg, _url_path, _file_p
 
 
 def test_release_version_is_10542():
-    assert main.BROWSER_VERSION == "10.5.54"
+    assert main.BROWSER_VERSION == "10.5.73"
 
 
 def test_windows_applications_progid_is_recognized_as_tekzite():

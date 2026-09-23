@@ -4,7 +4,7 @@ import main
 
 
 def test_release_version_is_10540():
-    assert main.BROWSER_VERSION == "10.5.54"
+    assert main.BROWSER_VERSION == "10.5.73"
 
 
 def test_windows_url_activation_parser_ignores_tekzite_switches(tmp_path):

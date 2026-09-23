@@ -1,48 +1,11 @@
-# Python
 __pycache__/
 *.py[cod]
-*.pyd
-*.pyo
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Build output
 build/
 dist/
-*.spec
-tekzite-network.exe
-
-# Local Chromium bundles / profiles
-chromium/
-ungoogled-chromium/
-chromium.exe
-chrome.exe
-Chromium Bridge Profile/
-preferences.json
-
-# Editors / OS
+*.spec.bak
+*.log
+*.tmp
+*.bak
 .vscode/
 .idea/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-Desktop.ini
-
-# Logs / local debug dumps
-*.log
-*.dmp
-*.tmp
-Pasted text*.txt
-
-# Windows/PyInstaller build output
-installer-dist/
-*.spec.bak

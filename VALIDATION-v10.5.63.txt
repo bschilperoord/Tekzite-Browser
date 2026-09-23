@@ -1,0 +1,20 @@
+Tekzite Browser v10.5.63 validation
+==================================
+
+Google sign-in completion handoff
+- Live Chromium Cookies SQLite WAL state is included in authentication detection.
+- Auth detection covers Google session cookies and YouTube LOGIN_INFO/session cookies.
+- Transient live-cookie read failures do not reset the sign-in settle timer.
+- Auth-window PID tracking is refreshed from the shared Chromium profile.
+- Graceful WM_CLOSE is retried; a bounded process fallback prevents a stuck auth window.
+- The originating tab receives one automatic authenticated reload after profile release.
+
+Validation performed in this source environment
+- python -m py_compile main.py engine/net.py: PASS
+- focused v10.5.61/v10.5.63 Google-auth regression tests: PASS
+- full tests/current regression suite: 439/439 PASS
+- tools/sync_version.py 10.5.63 --check: PASS
+
+Platform note
+- Source/regression validation was performed outside Windows. The real Win32 popup close,
+  shared-profile handoff, DWM surface recovery, and packaged EXE still require a Windows smoke test.

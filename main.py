@@ -32,12 +32,16 @@ from engine.net import (
     capture_embedded_chromium_frame, dispatch_embedded_chromium_mouse,
     dispatch_embedded_chromium_key, get_embedded_chromium_context, get_embedded_chromium_cursor, focus_embedded_chromium_point,
     get_embedded_chromium_dwm_input_offset, get_embedded_chromium_input_scale, get_embedded_chromium_input_zoom_factor,
+    refresh_embedded_chromium_dwm_input_metrics,
     get_embedded_chromium_page_state, find_embedded_chromium_text,
     set_embedded_chromium_presentation, set_embedded_chromium_zoom, check_embedded_chromium_zoom,
     validate_and_recover_embedded_chromium_frame, record_embedded_surface_probe, record_embedded_native_recovery, sync_embedded_chromium_native_geometry,
     warm_embedded_chromium_io_channels, stop_embedded_chromium_loading,
-    request_embedded_chromium_dwm_recrop, request_embedded_chromium_dwm_reregister, network_engine_debug, privacy_stats,
+    request_embedded_chromium_dwm_recrop, request_embedded_chromium_dwm_reregister, detach_embedded_chromium_dwm_thumbnail, network_engine_debug, privacy_stats,
     cleanup_abandoned_temporary_profiles, remove_profile_tree,
+    start_standalone_auth_chromium,
+    standalone_auth_chromium_running, wait_for_standalone_auth_chromium_release,
+    standalone_google_auth_succeeded, close_standalone_auth_chromium,
 )
 
 
@@ -634,6 +638,54 @@ def _open_tekzite_default_apps_settings():
     return uri
 
 
+def _set_windows_app_user_model_id():
+    """Give Tekzite its own Windows taskbar/application identity before Tk maps."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        app_id = "Tekzite.Browser"
+        shell32 = ctypes.windll.shell32
+        shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [ctypes.c_wchar_p]
+        shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.c_long
+        return int(shell32.SetCurrentProcessExplicitAppUserModelID(app_id)) == 0
+    except Exception:
+        return False
+
+
+def _resource_root():
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            return Path(base)
+        try:
+            return Path(sys.executable).resolve().parent
+        except Exception:
+            pass
+    return Path(__file__).resolve().parent
+
+
+def _asset_path(*parts):
+    candidates = []
+    primary = _resource_root()
+    candidates.append(primary.joinpath(*parts))
+    try:
+        executable_root = Path(sys.executable).resolve().parent
+        candidate = executable_root.joinpath(*parts)
+        if candidate not in candidates:
+            candidates.append(candidate)
+    except Exception:
+        pass
+    script_root = Path(__file__).resolve().parent
+    candidate = script_root.joinpath(*parts)
+    if candidate not in candidates:
+        candidates.append(candidate)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
 def _preferences_path():
     base = _state_root_for_profile()
     try:
@@ -770,7 +822,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.54"
+BROWSER_VERSION = "10.5.73"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -1813,6 +1865,92 @@ class BrowserApp(BrowserFeatures):
             except Exception:
                 pass
 
+    def _native_root_hwnd(self):
+        if sys.platform != "win32":
+            return 0
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            self.root.update_idletasks()
+            inner = wintypes.HWND(int(self.root.winfo_id()))
+            GA_ROOT = 2
+            try:
+                user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+                user32.GetAncestor.restype = wintypes.HWND
+                hwnd = int(user32.GetAncestor(inner, GA_ROOT) or 0)
+            except Exception:
+                hwnd = 0
+            if not hwnd:
+                hwnd = int(user32.GetParent(inner) or int(inner.value or 0))
+            return hwnd
+        except Exception:
+            return 0
+
+    def _apply_native_windows_icon(self):
+        """Force Tekzite's icon onto the actual frameless Win32 wrapper HWND."""
+        if sys.platform != "win32":
+            return False
+        icon_ico = _asset_path("assets", "tekzite.ico")
+        if not icon_ico.is_file():
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            hwnd = int(self._native_root_hwnd() or 0)
+            if not hwnd:
+                return False
+            IMAGE_ICON = 1
+            LR_LOADFROMFILE = 0x0010
+            LR_DEFAULTSIZE = 0x0040
+            WM_SETICON = 0x0080
+            ICON_SMALL = 0
+            ICON_BIG = 1
+            user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            user32.LoadImageW.restype = wintypes.HANDLE
+            user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+            user32.SendMessageW.restype = wintypes.LRESULT
+            big = user32.LoadImageW(None, str(icon_ico), IMAGE_ICON, 256, 256, LR_LOADFROMFILE)
+            small = user32.LoadImageW(None, str(icon_ico), IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+            if not big:
+                big = user32.LoadImageW(None, str(icon_ico), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
+            if not small:
+                small = user32.LoadImageW(None, str(icon_ico), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+            self._native_icon_handles = tuple(int(h) for h in (big, small) if h)
+            if big:
+                user32.SendMessageW(wintypes.HWND(hwnd), WM_SETICON, ICON_BIG, int(big))
+            if small:
+                user32.SendMessageW(wintypes.HWND(hwnd), WM_SETICON, ICON_SMALL, int(small))
+            return bool(big or small)
+        except Exception:
+            return False
+
+    def _apply_app_icon(self):
+        """Apply the bundled Tekzite icon to Tk and the native Windows wrapper."""
+        self._app_icon_photo = None
+        self._native_icon_handles = ()
+        icon_png = _asset_path("assets", "tekzite.png")
+        icon_ico = _asset_path("assets", "tekzite.ico")
+        if os.name == "nt":
+            try:
+                if icon_ico.is_file():
+                    self.root.iconbitmap(default=str(icon_ico))
+            except Exception:
+                pass
+        try:
+            if icon_png.is_file():
+                self._app_icon_photo = tk.PhotoImage(file=str(icon_png))
+                self.root.iconphoto(True, self._app_icon_photo)
+        except Exception:
+            self._app_icon_photo = None
+        if sys.platform == "win32":
+            try:
+                self.root.after(1, self._apply_native_windows_icon)
+                self.root.after(40, self._apply_native_windows_icon)
+            except Exception:
+                pass
+
     def __init__(self):
         self.browser_version = BROWSER_VERSION
         self._profile_name = _requested_profile_name()
@@ -1848,7 +1986,23 @@ class BrowserApp(BrowserFeatures):
                 os.environ["TEKZITE_CHROMIUM_PROFILE"] = str(profile_dir)
 
         self._dpi_awareness_enabled = _enable_per_monitor_dpi_awareness()
+        self._windows_app_user_model_id_set = _set_windows_app_user_model_id()
         self.root = tk.Tk()
+        self._apply_app_icon()
+        self._taskbar_presence_guard_after_id = None
+        try:
+            self._taskbar_presence_guard_after_id = self.root.after(250, self._taskbar_presence_guard)
+        except Exception:
+            pass
+        self._google_auth_handoff_active = False
+        self._google_auth_launch_future = None
+        self._google_auth_release_future = None
+        self._google_auth_success_future = None
+        self._google_auth_close_future = None
+        self._google_auth_handle = None
+        self._google_auth_return_url = None
+        self._google_auth_source_url = None
+        self._google_auth_refresh_pending_url = None
         self.preferences = load_preferences()
         if not self._private_mode and self.preferences.get("privacy_lockdown", True):
             # Privacy Lockdown never points Chromium at a persistent profile.
@@ -2111,6 +2265,12 @@ class BrowserApp(BrowserFeatures):
         self._dwm_host_rect = None
         self._dwm_geometry_after_id = None
         self._dwm_pending_resize = False
+        # v10.5.70: a forced recrop/metrics refresh must not be lost merely
+        # because the visible viewport already matches the cached size. Maximize
+        # can change Chromium's native/CSS transform without changing this cache
+        # again by the time the recrop callback runs.
+        self._dwm_pending_force_resize = False
+        self._dwm_pending_input_metrics_refresh = False
         self._dwm_last_chromium_viewport = None
         self._dwm_last_root_configure_size = None
         # v10.5.4: DWM thumbnails are visual mirrors, not native Chromium input
@@ -4198,6 +4358,384 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             return None
 
+    @staticmethod
+    def _is_google_auth_url(url):
+        try:
+            parts = urlsplit(str(url or ""))
+            host = (parts.hostname or "").lower()
+            path = (parts.path or "").lower()
+            return host == "accounts.google.com" and any(
+                token in path for token in ("signin", "servicelogin", "oauth", "login")
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _google_auth_handoff_urls(url, previous_url=""):
+        """Return (standalone launch URL, Tekzite return URL)."""
+        source = str(url or "").strip()
+        launch_url = source
+        return_url = str(previous_url or "").strip()
+        try:
+            parts = urlsplit(source)
+            params = dict(parse_qsl(parts.query, keep_blank_values=True))
+            continue_url = str(params.get("continue") or "").strip()
+            if "rejected" in (parts.path or "").lower() and continue_url:
+                cp = urlsplit(continue_url)
+                if cp.scheme.lower() in {"http", "https"} and cp.hostname:
+                    launch_url = continue_url
+            if (not return_url) or BrowserApp._is_google_auth_url(return_url):
+                candidate = continue_url
+                if candidate:
+                    cp = urlsplit(candidate)
+                    nested = dict(parse_qsl(cp.query, keep_blank_values=True))
+                    next_url = str(nested.get("next") or "").strip()
+                    np = urlsplit(next_url)
+                    if np.scheme.lower() in {"http", "https"} and np.hostname:
+                        return_url = next_url
+                    elif cp.scheme.lower() in {"http", "https"} and cp.hostname:
+                        return_url = candidate
+            rp = urlsplit(return_url)
+            if rp.scheme.lower() not in {"http", "https"} or not rp.hostname:
+                return_url = "https://www.google.com/"
+        except Exception:
+            if not return_url:
+                return_url = "https://www.google.com/"
+        return launch_url, return_url
+
+    def _paint_google_auth_handoff(self):
+        try:
+            self.canvas.delete("all")
+            self.canvas.configure(bg=self.ui["bg"])
+            width = max(600, int(self.content_frame.winfo_width() or 900))
+            self.canvas.create_text(
+                width // 2, 115,
+                anchor="n",
+                text="Google sign-in opened in a normal Chromium window",
+                width=max(460, width - 180),
+                justify="center",
+                fill=self.ui["text"],
+                font=(self._ui_font_family, self._font_size(18), "bold"),
+            )
+            self.canvas.create_text(
+                width // 2, 175,
+                anchor="n",
+                text=(
+                    "Complete the sign-in there, then close that Chromium window.\n"
+                    "Tekzite will reopen this tab with the same profile and cookies."
+                ),
+                width=max(440, width - 220),
+                justify="center",
+                fill=self.ui["muted"],
+                font=(self._ui_font_family, self._font_size(11)),
+            )
+        except Exception:
+            pass
+
+    def _suspend_chromium_for_external_auth(self):
+        """Quiesce every Chromium/DWM callback before the helper process is retired."""
+        self._navigation_generation += 1
+        self._chromium_frame_generation += 1
+        self._cancel_pending_tab_switch()
+        self._stop_dwm_keyboard_poll()
+        self._chromium_page_keyboard_active = False
+        try:
+            self._cancel_embedded_surface_wakes()
+        except Exception:
+            pass
+
+        # Cancel Chromium-only Tk callbacks that could otherwise fire against
+        # the just-retired renderer/source HWND.
+        for attr in (
+            "_dwm_pointer_after_id",
+            "_dwm_geometry_after_id",
+            "_dwm_reveal_after_id",
+            "_dwm_restore_recovery_after_id",
+            "_chromium_viewport_after_id",
+            "_chromium_motion_after_id",
+            "_chromium_drag_after_id",
+            "_chromium_wheel_after_id",
+        ):
+            after_id = getattr(self, attr, None)
+            if after_id is not None:
+                try:
+                    self.root.after_cancel(after_id)
+                except Exception:
+                    pass
+                try:
+                    setattr(self, attr, None)
+                except Exception:
+                    pass
+
+        # Unregister the DWM thumbnail while its source HWND is still alive,
+        # then destroy the transient destination HWND on the Tk/UI thread.
+        try:
+            detach_embedded_chromium_dwm_thumbnail()
+        except Exception:
+            pass
+        try:
+            self._show_native_canvas()
+        except Exception:
+            self._embedded_mode = False
+            self._chromium_software_mode = False
+            self._chromium_dwm_mode = False
+        try:
+            self._destroy_dwm_host_for_taskbar()
+        except Exception:
+            pass
+
+        self._dwm_surface_ready = False
+        self._dwm_reveal_pending = False
+        self._dwm_host_visible = False
+        self._dwm_pending_resize = False
+        self._dwm_pending_force_resize = False
+        self._dwm_pending_input_metrics_refresh = False
+        self._chromium_frame_target_id = None
+        self._chromium_pending_motion = None
+        self._chromium_pending_wheel = None
+        self._chromium_pending_drag = None
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        return True
+
+    def _launch_google_auth_worker(self, launch_url, return_url):
+        if not getattr(self, "_google_auth_handoff_active", False):
+            return
+        try:
+            self._google_auth_launch_future = self._executor.submit(
+                start_standalone_auth_chromium, launch_url, return_url
+            )
+        except Exception as exc:
+            self._google_auth_handoff_active = False
+            self.status_var.set(f"Could not open Google sign-in window: {exc}")
+            return
+        self.root.after(40, self._poll_google_auth_launch)
+
+    def _maybe_start_google_auth_handoff(self, url, previous_url="", tab=None):
+        if os.name != "nt" or getattr(self, "_google_auth_handoff_active", False):
+            return False
+        if not self._is_google_auth_url(url):
+            return False
+        tab = tab or self._active_tab()
+        if tab is None or tab.get("id") != self.active_tab_id:
+            return False
+
+        launch_url, return_url = self._google_auth_handoff_urls(url, previous_url)
+        self._google_auth_handoff_active = True
+        self._google_auth_return_url = return_url
+        self._google_auth_source_url = str(url or "")
+        self._suspend_chromium_for_external_auth()
+
+        for item in self.tabs:
+            item["chromium_target_id"] = None
+            item["loaded"] = False
+            item["loading"] = False
+            item["ready_state"] = ""
+            item.pop("presentation", None)
+            if item.get("id") != self.active_tab_id:
+                item["sleeping"] = True
+                item["restore_pending"] = bool(item.get("url"))
+        tab["sleeping"] = False
+        tab["restore_pending"] = False
+
+        try:
+            if self._closed_target_retire_after_id is not None:
+                self.root.after_cancel(self._closed_target_retire_after_id)
+        except Exception:
+            pass
+        self._closed_target_retire_after_id = None
+        self._closed_target_retire_queue.clear()
+        self._page_state_inflight.clear()
+
+        self._paint_google_auth_handoff()
+        self.status_var.set("Google sign-in: complete authentication in Chromium; Tekzite will close it automatically")
+        self._refresh_tab_strip()
+
+        # Let Tk finish destroying/hiding every native DWM surface before the
+        # worker closes Chromium. This avoids a source-HWND teardown racing
+        # callbacks still running on the UI thread.
+        try:
+            self.root.after(90, self._launch_google_auth_worker, launch_url, return_url)
+        except Exception:
+            self._launch_google_auth_worker(launch_url, return_url)
+        return True
+
+    def _poll_google_auth_launch(self):
+        future = getattr(self, "_google_auth_launch_future", None)
+        if not getattr(self, "_google_auth_handoff_active", False) or future is None:
+            return
+        if not future.done():
+            self.root.after(40, self._poll_google_auth_launch)
+            return
+        self._google_auth_launch_future = None
+        try:
+            self._google_auth_handle = future.result()
+        except Exception as exc:
+            self._google_auth_handoff_active = False
+            self._google_auth_handle = None
+            self.status_var.set(f"Google sign-in handoff failed: {exc}")
+            return
+        self.status_var.set("Google sign-in window is open; Tekzite will close it when authentication finishes")
+        # v10.5.69: the live HWND completion signal is cheap and authoritative.
+        # Poll it quickly so a visibly completed YouTube sign-in does not linger
+        # for the old 220 ms cadence. Slow cookie/history fallbacks still run in
+        # the executor and retain their own settle guard.
+        self.root.after(70, self._poll_google_auth_window)
+
+    def _poll_google_auth_window(self):
+        if not getattr(self, "_google_auth_handoff_active", False):
+            return
+        handle = getattr(self, "_google_auth_handle", None) or {}
+        try:
+            running = bool(standalone_auth_chromium_running(handle))
+        except Exception:
+            running = False
+
+        if running:
+            # Detect the live returned auth HWND off the Tk thread first; the
+            # cookie/history profile checks are slower fallbacks. A confirmed
+            # live YouTube return closes immediately, while disk-only signals
+            # keep their conservative settle guard.
+            close_future = getattr(self, "_google_auth_close_future", None)
+            if close_future is not None and close_future.done():
+                self._google_auth_close_future = None
+                close_future = None
+
+            if not bool(handle.get("auto_close_requested")):
+                future = getattr(self, "_google_auth_success_future", None)
+                if future is None:
+                    try:
+                        self._google_auth_success_future = self._executor.submit(
+                            standalone_google_auth_succeeded, handle, 1.35
+                        )
+                    except Exception:
+                        self._google_auth_success_future = None
+                elif future.done():
+                    self._google_auth_success_future = None
+                    try:
+                        succeeded = bool(future.result())
+                    except Exception:
+                        succeeded = False
+                    if succeeded:
+                        self.status_var.set(
+                            "Google sign-in successful; closing authentication window…"
+                        )
+                        try:
+                            # The first close is already a synchronous, cooperative
+                            # SC_CLOSE/WM_CLOSE against the exact auth HWND. This is
+                            # still a clean Chromium shutdown, but avoids leaving a
+                            # fully authenticated YouTube window sitting on screen.
+                            self._google_auth_close_future = self._executor.submit(
+                                close_standalone_auth_chromium, handle, True
+                            )
+                        except Exception:
+                            self._google_auth_close_future = None
+            else:
+                # A posted WM_CLOSE can occasionally be swallowed while Chromium
+                # is finishing account UI work. Retry it and then escalate only
+                # to a synchronous SC_CLOSE/WM_CLOSE request. Never taskkill the
+                # auth browser: that dirties Chromium's shared profile and makes
+                # it show the restore-pages crash bubble on the next launch.
+                requested_at = float(handle.get("auto_close_requested_at") or time.monotonic())
+                elapsed = max(0.0, time.monotonic() - requested_at)
+                if close_future is None and elapsed >= 1.6:
+                    cooperative_escalation = elapsed >= 3.8
+                    self.status_var.set(
+                        "Finishing Google sign-in…" if not cooperative_escalation
+                        else "Google sign-in complete; closing Chromium cleanly…"
+                    )
+                    try:
+                        self._google_auth_close_future = self._executor.submit(
+                            close_standalone_auth_chromium, handle, cooperative_escalation
+                        )
+                    except Exception:
+                        self._google_auth_close_future = None
+            self.root.after(70, self._poll_google_auth_window)
+            return
+
+        self._google_auth_success_future = None
+        self._google_auth_close_future = None
+
+        # Do not relaunch embedded Chromium until the standalone browser has
+        # flushed cookies/storage and released its profile singleton files.
+        try:
+            self._google_auth_release_future = self._executor.submit(
+                wait_for_standalone_auth_chromium_release, handle, 6.0
+            )
+        except Exception:
+            self._google_auth_release_future = None
+            self.root.after(500, self._poll_google_auth_window)
+            return
+        self.root.after(40, self._poll_google_auth_profile_release)
+
+    def _poll_google_auth_profile_release(self):
+        future = getattr(self, "_google_auth_release_future", None)
+        if not getattr(self, "_google_auth_handoff_active", False):
+            return
+        if future is None:
+            self.root.after(250, self._poll_google_auth_window)
+            return
+        if not future.done():
+            self.root.after(50, self._poll_google_auth_profile_release)
+            return
+        self._google_auth_release_future = None
+        try:
+            released = bool(future.result())
+        except Exception:
+            released = False
+        if not released:
+            self.status_var.set(
+                "Google sign-in window is still releasing its profile; waiting…"
+            )
+            self.root.after(350, self._poll_google_auth_window)
+            return
+        self.root.after(80, self._finish_google_auth_handoff, True)
+
+    def _finish_google_auth_handoff(self, browser_closed=True):
+        if not getattr(self, "_google_auth_handoff_active", False):
+            return
+        self._google_auth_handoff_active = False
+        self._google_auth_handle = None
+        self._google_auth_launch_future = None
+        self._google_auth_release_future = None
+        self._google_auth_success_future = None
+        self._google_auth_close_future = None
+        return_url = str(getattr(self, "_google_auth_return_url", "") or "")
+        self._google_auth_return_url = None
+        self._google_auth_source_url = None
+        tab = self._active_tab()
+        if tab is None:
+            return
+        if return_url:
+            tab["url"] = return_url
+            tab["title"] = self._tab_title_for_url(return_url)
+            tab["loaded"] = False
+            tab["loading"] = False
+            tab["sleeping"] = False
+            tab["restore_pending"] = False
+            self._google_auth_refresh_pending_url = return_url
+            self.url_var.set(return_url)
+            self._refresh_tab_strip()
+            self.status_var.set("Returning from Google sign-in…")
+            self.navigate_to(return_url, add_history=False, reuse_existing=False)
+        else:
+            self._google_auth_refresh_pending_url = None
+            self.status_var.set("Google sign-in window closed")
+
+    def _refresh_after_google_auth(self, generation, target_id, expected_url):
+        """Reload the returned page once after Chromium has reopened the profile."""
+        if generation != self._navigation_generation:
+            return
+        tab = self._active_tab()
+        if tab is None or tab.get("chromium_target_id") != target_id:
+            return
+        if self._canonical_tab_url(tab.get("url")) != self._canonical_tab_url(expected_url):
+            return
+        self.status_var.set("Applying Google sign-in session…")
+        self.navigate_to(expected_url, add_history=False, reuse_existing=False)
+
     def _poll_one_tab_state(self, tab_id, target_id, include_favicon=False):
         key = str(target_id or "")
         if not key or key in self._page_state_inflight:
@@ -4227,6 +4765,9 @@ class BrowserApp(BrowserFeatures):
                 changed = True
             live_url = str(info.get("url") or "").strip()
             if live_url and live_url != "about:blank" and live_url != tab.get("url"):
+                previous_url = str(tab.get("url") or "")
+                if self._maybe_start_google_auth_handoff(live_url, previous_url, tab):
+                    return
                 tab["url"] = live_url
                 if tab.get("id") == self.active_tab_id and not self._address_focus_active:
                     self.url_var.set(live_url)
@@ -5894,6 +6435,8 @@ class BrowserApp(BrowserFeatures):
                 pass
             self._dwm_geometry_after_id = None
         self._dwm_pending_resize = False
+        self._dwm_pending_force_resize = False
+        self._dwm_pending_input_metrics_refresh = False
         self._destroy_dwm_host_for_taskbar()
 
     def _restore_dwm_host_after_taskbar(self):
@@ -6120,18 +6663,32 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             self._dwm_reveal_after_id = None
 
-    def _schedule_dwm_geometry_sync(self, resize=False, delay=8):
-        """Coalesce DWM geometry near a 120 Hz cadence without resize spam."""
+    def _schedule_dwm_geometry_sync(self, resize=False, delay=8, *, force_resize=False, refresh_input_metrics=False):
+        """Coalesce DWM geometry near a 120 Hz cadence without resize spam.
+
+        ``force_resize`` is reserved for viewport transitions that need a real
+        Chromium/DWM recrop even when the final width/height equals the cached
+        viewport. ``refresh_input_metrics`` runs only after that geometry work
+        has completed, so pointer scaling can never sample the pre-resize host.
+        """
         if not self._embedded_mode or not self._chromium_dwm_mode:
             return
         self._dwm_pending_resize = bool(self._dwm_pending_resize or resize)
+        self._dwm_pending_force_resize = bool(self._dwm_pending_force_resize or force_resize)
+        self._dwm_pending_input_metrics_refresh = bool(
+            self._dwm_pending_input_metrics_refresh or refresh_input_metrics
+        )
         if self._dwm_geometry_after_id is not None:
             return
 
         def _flush():
             self._dwm_geometry_after_id = None
             do_resize = bool(self._dwm_pending_resize)
+            force_now = bool(self._dwm_pending_force_resize)
+            refresh_metrics_now = bool(self._dwm_pending_input_metrics_refresh)
             self._dwm_pending_resize = False
+            self._dwm_pending_force_resize = False
+            self._dwm_pending_input_metrics_refresh = False
             # v10.5.38: the DWM popup rectangle is the authoritative visible
             # viewport.  During maximize/restore Tk can resize content_frame one
             # layout pass before edge_host, so reading edge_host here could keep
@@ -6149,9 +6706,20 @@ class BrowserApp(BrowserFeatures):
                         w = max(1, int(self.content_frame.winfo_width()))
                         h = max(1, int(self.content_frame.winfo_height()))
                     viewport = (max(1, w), max(1, h))
-                    if viewport != self._dwm_last_chromium_viewport:
+                    if force_now or viewport != self._dwm_last_chromium_viewport:
                         resize_embedded_chromium(*viewport)
                         self._dwm_last_chromium_viewport = viewport
+                except Exception:
+                    pass
+            if refresh_metrics_now:
+                try:
+                    tab = self._active_tab()
+                    target_id = tab.get("chromium_target_id") if tab else self._chromium_frame_target_id
+                    self._executor.submit(
+                        refresh_embedded_chromium_dwm_input_metrics,
+                        target_id,
+                        0.8,
+                    )
                 except Exception:
                     pass
 
@@ -6197,6 +6765,8 @@ class BrowserApp(BrowserFeatures):
                 pass
             self._dwm_geometry_after_id = None
         self._dwm_pending_resize = False
+        self._dwm_pending_force_resize = False
+        self._dwm_pending_input_metrics_refresh = False
         if os.name != "nt" or not self._dwm_host:
             return
         try:
@@ -7854,13 +8424,12 @@ class BrowserApp(BrowserFeatures):
             pass
 
     def _probe_visible_embedded_surface(self, generation, target_id, cdp_visual, attempt=1):
-        """Verify that the *screen-visible* native Chromium surface actually presents pixels.
+        """Verify that the *screen-visible* native Chromium surface presents pixels.
 
-        CDP can capture a healthy compositor frame while a re-parented Win32 Chromium
-        child shows only Tekzite's gray host.  Probe the final on-screen host after attach.
-        A near-uniform visible surface, combined with a known-good CDP frame, means the
-        native presentation path stalled rather than the web page itself. v5.11 keeps
-        that tab native and uses this probe only to drive native recovery/diagnostics.
+        v10.5.68 treats this as a cold/new-target diagnostic, not a hot-navigation
+        watchdog.  A page still loading is allowed to pass through flat compositor
+        frames without being called stalled, and a completed page must produce two
+        consecutive blank samples before the DComp source is diagnosed as stuck.
         """
         if generation != self._navigation_generation or not self._embedded_mode:
             return
@@ -7869,6 +8438,9 @@ class BrowserApp(BrowserFeatures):
         tab = self._active_tab()
         if tab is None or tab.get("chromium_target_id") != target_id:
             return
+        if tab.get("native_surface_probe_generation") != generation:
+            tab["native_surface_probe_generation"] = generation
+            tab["native_surface_blank_confirmations"] = 0
         try:
             self.root.update_idletasks()
             x = int(self.edge_host.winfo_rootx())
@@ -7907,6 +8479,7 @@ class BrowserApp(BrowserFeatures):
             except Exception:
                 pass
             if not blank:
+                tab["native_surface_blank_confirmations"] = 0
                 # A resize-triggered native retry has now proved itself on the
                 # actual monitor.  Commit native presentation and release the
                 # temporary software-fallback latch.
@@ -7921,18 +8494,27 @@ class BrowserApp(BrowserFeatures):
                         pass
                     self.status_var.set("Chromium native presentation recovered after resize")
                 return
-            if attempt == 1:
-                # Give native Chromium one last compositor/repaint pulse, then look
-                # at the actual screen again instead of trusting another CDP capture.
-                self._schedule_embedded_surface_wake()
-                self.root.after(500, self._probe_visible_embedded_surface,
-                                generation, target_id, cdp_visual, 2)
+
+            # A renderer swap is allowed to be flat while the live page is still
+            # loading. Do not count those samples toward a DComp-stall diagnosis.
+            if bool(tab.get("loading")):
+                tab["native_surface_blank_confirmations"] = 0
+                if int(attempt) < 6:
+                    self.root.after(320, self._probe_visible_embedded_surface,
+                                    generation, target_id, cdp_visual, int(attempt) + 1)
                 return
 
-            # v5.11: native presentation is authoritative unless the user explicitly
-            # selected software mode in Preferences. A flat/black native HWND is now
-            # treated as a native compositor problem to recover and diagnose, not as
-            # permission to move the tab onto the slower CDP screenshot renderer.
+            confirmations = int(tab.get("native_surface_blank_confirmations") or 0) + 1
+            tab["native_surface_blank_confirmations"] = confirmations
+            if confirmations < 2:
+                # Passive probation only. In DWM mode the historical wake helper
+                # deliberately returns immediately, so pretending to "pulse" it here
+                # merely delayed a false-positive diagnosis. Keep source geometry
+                # untouched and sample once more after the completed page settles.
+                self.root.after(420, self._probe_visible_embedded_surface,
+                                generation, target_id, cdp_visual, int(attempt) + 1)
+                return
+
             if generation != self._navigation_generation:
                 return
             tab = self._active_tab()
@@ -7955,17 +8537,15 @@ class BrowserApp(BrowserFeatures):
                 record_embedded_surface_probe(True, span, dominant, attempt, False)
             except Exception:
                 pass
-            # v5.16: do not hammer a stalled top-level DComp surface with
-            # repeated resize/geometry-sync/repaint pulses. Those recovery
-            # mutations caused visible black/blue flicker. Keep native mode
-            # authoritative, record the stall, and leave Chromium's current
-            # compositor/window hierarchy untouched until a real user-driven
-            # geometry change occurs.
+            # Do not hammer a persistently stalled top-level DComp surface with
+            # repeated resize/geometry-sync/repaint pulses. Keep Native authoritative
+            # and leave Chromium's current compositor hierarchy untouched until a
+            # genuine user-driven geometry change provides a safe recovery boundary.
             try:
                 self._set_chromium_presentation_fast("native", target_id)
             except Exception:
                 pass
-            self.status_var.set("Chromium native surface stalled; recovery paused to preserve DComp stability")
+            self.status_var.set("Chromium Native surface stalled after load; holding DComp geometry stable")
         except Exception as exc:
             try:
                 record_embedded_surface_probe(False, None, None, attempt, False, type(exc).__name__)
@@ -8000,6 +8580,7 @@ class BrowserApp(BrowserFeatures):
             return
         try:
             session = future.result()
+            hot_native_reuse = bool(session.get("hot_navigation_reused_native_surface"))
             tab = self._active_tab()
             if tab is not None:
                 tab["chromium_target_id"] = session.get("target_id")
@@ -8011,6 +8592,15 @@ class BrowserApp(BrowserFeatures):
                 tab["document"] = None
                 self._refresh_tab_strip()
             self._schedule_chromium_zoom_apply(all_tabs=True)
+            pending_auth_refresh = str(getattr(self, "_google_auth_refresh_pending_url", "") or "")
+            if (pending_auth_refresh and
+                    self._canonical_tab_url(pending_auth_refresh) == self._canonical_tab_url(url)):
+                self._google_auth_refresh_pending_url = None
+                try:
+                    self.root.after(650, self._refresh_after_google_auth,
+                                    generation, session.get("target_id"), url)
+                except Exception:
+                    pass
             if self._use_chromium_software_surface_for_url(url):
                 if tab is not None:
                     tab["presentation"] = "software"
@@ -8020,38 +8610,62 @@ class BrowserApp(BrowserFeatures):
                     tab["presentation"] = "native"
                     tab.pop("software_fallback_reason", None)
                     tab.pop("native_recovery_viewport", None)
-                self._show_embedded_host()
+                # v10.5.67: a hot navigation/refresh already owns a healthy,
+                # visible DWM destination.  Do not tear that surface down and
+                # reveal it again on a fixed timer.  Chromium can replace its
+                # renderer one compositor beat after Page.navigate returns;
+                # hiding + re-showing the destination in that gap exposed the
+                # DComp black backing surface and made refreshes intermittently
+                # look dead.  Keep the last good destination continuously
+                # mapped and let Chromium paint the new document into it.
+                if (hot_native_reuse and self._embedded_mode
+                        and self._chromium_dwm_mode and self._dwm_host):
+                    self._set_chromium_presentation_fast(
+                        "native", tab.get("chromium_target_id") if tab else None
+                    )
+                    self._chromium_frame_target_id = (
+                        tab.get("chromium_target_id") if tab else session.get("target_id")
+                    )
+                    self._chromium_software_mode = False
+                    self._dwm_surface_ready = True
+                    self._dwm_reveal_pending = False
+                    self._cancel_dwm_host_reveal()
+                    self._sync_dwm_host_geometry(show=True, transparent=False)
+                    self._schedule_dwm_geometry_sync(resize=True, delay=1)
+                else:
+                    self._show_embedded_host()
                 # v5.42: navigation can rebuild Chromium's presenter/chrome after
                 # the first committed frame (notably YouTube and consent shells).
                 # Re-measure the DWM crop while that geometry settles so title-bar
                 # pixels from the previous site can never leak into the mirror.
-                for delay_index, delay_ms in enumerate((60, 180, 420, 850)):
+                # v10.5.68: hot navigation already owns a healthy live DWM source.
+                # Do not hit that source with four eager full-recrops while Chromium
+                # is replacing its RenderWidgetHost. Three later samples still meet
+                # the crop-stability contract, but avoid the 60/180 ms DComp churn
+                # that could itself make Native look stalled.
+                recrop_delays = (260, 700, 1250) if hot_native_reuse else (60, 180, 420, 850)
+                for delay_index, delay_ms in enumerate(recrop_delays):
                     self.root.after(
                         delay_ms,
                         self._refresh_dwm_crop_after_navigation,
                         generation,
                         delay_index,
                     )
-                # Navigation can recreate Chromium's internal render widget. Wake
-                # the surface repeatedly while that native view settles.
-                self._schedule_embedded_surface_wake()
-                # v4.99: CDP can see a healthy page while the re-parented native
-                # HWND presents only Tekzite's flat gray host. Verify what is
-                # actually visible on-screen and fall back per-tab when needed.
-                # v9.9: the fast semantic first-frame path normally avoids PNG
-                # capture, so attached_frame_visual can legitimately be False even
-                # though Chromium has a non-empty page. Do not let that optimization
-                # disable the on-screen black-surface safety probe. Treat a verified
-                # non-empty attached DOM as sufficient evidence that a flat/black DWM
-                # destination is a presentation problem worth checking.
-                visible_probe_expected = bool(
-                    session.get("attached_frame_visual")
-                    or int(session.get("attached_frame_text_len") or 0) >= 8
-                    or int(session.get("first_frame_text_len") or 0) >= 8
-                )
-                self.root.after(220, self._probe_visible_embedded_surface,
-                                generation, session.get("target_id"),
-                                visible_probe_expected)
+                # v10.5.68: never run the old fixed-220ms visible-surface probe on
+                # a hot Native/DWM handoff.  open_embedded_chromium returns the same
+                # session dictionary on that path, so its attached-frame diagnostics
+                # can describe the *previous* document. Sampling the screen during a
+                # renderer swap then produced false "native surface stalled" reports.
+                # Cold/new-target paths still get the on-screen safety probe below.
+                if not hot_native_reuse:
+                    visible_probe_expected = bool(
+                        session.get("attached_frame_visual")
+                        or int(session.get("attached_frame_text_len") or 0) >= 8
+                        or int(session.get("first_frame_text_len") or 0) >= 8
+                    )
+                    self.root.after(260, self._probe_visible_embedded_surface,
+                                    generation, session.get("target_id"),
+                                    visible_probe_expected)
             self.root.after(1000, lambda current=session: self._start_optional_services(current))
         except Exception as exc:
             self._show_native_canvas()
@@ -8085,12 +8699,6 @@ class BrowserApp(BrowserFeatures):
             pass
         width = max(1, int(self.content_frame.winfo_width()))
         height = max(1, int(self.content_frame.winfo_height()))
-        if not self._embedded_mode:
-            self._dwm_surface_ready = False
-        self._dwm_reveal_pending = False
-        self._cancel_dwm_host_reveal()
-        self._sync_dwm_host_geometry(show=False, transparent=False)
-        parent_hwnd = int(self._ensure_dwm_host())
         tab = self._active_tab()
         target_id = tab.get("chromium_target_id") if tab is not None else None
         other_targets_exist = any(
@@ -8100,6 +8708,31 @@ class BrowserApp(BrowserFeatures):
         )
         create_new_target = bool(tab is not None and not target_id and other_targets_exist)
         software_presentation = self._use_chromium_software_surface_for_url(url)
+        # v10.5.67: normal navigation and F5/Ctrl+R on an already attached
+        # native target keep the current DWM surface visible while Chromium
+        # accepts the new navigation.  The old code unconditionally hid the
+        # destination here even though the comment above promised to preserve
+        # the current frame.  A subsequent 45 ms timed reveal could race a
+        # renderer swap and expose a black frame.  Only cold/new-target paths
+        # need the hidden preparation ceremony.
+        keep_live_native_surface = bool(
+            not software_presentation
+            and self._embedded_mode
+            and self._chromium_dwm_mode
+            and self._dwm_surface_ready
+            and self._dwm_host
+            and target_id
+            and not create_new_target
+        )
+        self._dwm_reveal_pending = False
+        self._cancel_dwm_host_reveal()
+        if keep_live_native_surface:
+            self._sync_dwm_host_geometry(show=True, transparent=False)
+        else:
+            if not self._embedded_mode:
+                self._dwm_surface_ready = False
+            self._sync_dwm_host_geometry(show=False, transparent=False)
+        parent_hwnd = int(self._ensure_dwm_host())
         self._embedded_future = self._executor.submit(
             open_embedded_chromium,
             parent_hwnd,
@@ -8426,31 +9059,108 @@ class BrowserApp(BrowserFeatures):
             return False
 
     def _apply_frameless_app_style(self):
-        """Keep an override-redirect Tk window visible in the Windows taskbar."""
+        """Keep Tekzite's real top-level Win32 wrapper permanently taskbar-eligible."""
         if sys.platform != "win32":
-            return
+            return False
         try:
             import ctypes
             from ctypes import wintypes
             user32 = ctypes.windll.user32
             self.root.update_idletasks()
-            hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            hwnd = int(self._current_native_root_hwnd() or self._native_root_hwnd() or 0)
+            if not hwnd:
+                return False
+
             GWL_EXSTYLE = -20
+            GWLP_HWNDPARENT = -8
+            GW_OWNER = 4
             WS_EX_TOOLWINDOW = 0x00000080
             WS_EX_APPWINDOW = 0x00040000
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+
             get_long = user32.GetWindowLongW
             set_long = user32.SetWindowLongW
             get_long.argtypes = [wintypes.HWND, ctypes.c_int]
             get_long.restype = ctypes.c_long
             set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
             set_long.restype = ctypes.c_long
-            style = get_long(hwnd, GWL_EXSTYLE)
-            style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
-            set_long(hwnd, GWL_EXSTYLE, style)
-            self._window_rounding_signature = None
-            self._apply_window_rounding()
+
+            user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetWindow.restype = wintypes.HWND
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                ctypes.c_int, ctypes.c_int, wintypes.UINT,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
+
+            changed = False
+            exstyle = int(get_long(wintypes.HWND(hwnd), GWL_EXSTYLE)) & 0xFFFFFFFF
+            wanted = (exstyle & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            if wanted != exstyle:
+                set_long(wintypes.HWND(hwnd), GWL_EXSTYLE, ctypes.c_long(wanted).value)
+                changed = True
+
+            # An owned top-level window can disappear from the taskbar even when
+            # WS_EX_APPWINDOW is set. The real Tekzite root must stay unowned.
+            owner = int(user32.GetWindow(wintypes.HWND(hwnd), GW_OWNER) or 0)
+            if owner:
+                set_owner = getattr(user32, "SetWindowLongPtrW", None)
+                if set_owner is not None:
+                    set_owner.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+                    set_owner.restype = ctypes.c_void_p
+                    set_owner(wintypes.HWND(hwnd), GWLP_HWNDPARENT, None)
+                else:
+                    user32.SetWindowLongW(wintypes.HWND(hwnd), GWLP_HWNDPARENT, 0)
+                changed = True
+
+            wrapper_changed = int(getattr(self, "_taskbar_identity_hwnd", 0) or 0) != hwnd
+            if changed or wrapper_changed:
+                self._taskbar_identity_hwnd = hwnd
+                user32.SetWindowPos(
+                    wintypes.HWND(hwnd), wintypes.HWND(0),
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                    SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                )
+                self._window_rounding_signature = None
+                self._apply_window_rounding()
+                self._apply_native_windows_icon()
+            return True
+        except Exception:
+            return False
+
+    def _schedule_taskbar_presence_guard(self, delay=1200):
+        """Continuously verify taskbar identity without changing window visibility."""
+        if sys.platform != "win32":
+            return
+        previous = getattr(self, "_taskbar_presence_guard_after_id", None)
+        if previous is not None:
+            try:
+                self.root.after_cancel(previous)
+            except Exception:
+                pass
+        try:
+            self._taskbar_presence_guard_after_id = self.root.after(
+                max(250, int(delay)), self._taskbar_presence_guard
+            )
+        except Exception:
+            self._taskbar_presence_guard_after_id = None
+
+    def _taskbar_presence_guard(self):
+        self._taskbar_presence_guard_after_id = None
+        try:
+            if not bool(self.root.winfo_exists()):
+                return
+            # Apply to normal, maximized and minimized roots. This does not call
+            # deiconify or ShowWindow, so a minimized browser stays minimized.
+            self._apply_frameless_app_style()
         except Exception:
             pass
+        self._schedule_taskbar_presence_guard(1200)
 
     def _make_window_control(self, parent, role, command, close=False):
         size = max(26, self._ui_metric("app_bar_height", 44) - self._ui_padding(10))
@@ -8639,6 +9349,7 @@ class BrowserApp(BrowserFeatures):
                 None,
                 ("Task Manager", self._show_task_manager, ""),
                 ("Diagnostics", self._show_diagnostics, ""),
+                ("Network Connections", self._show_network_connections, ""),
                 ("Local Ports & Loopback", self._show_local_ports, ""),
                 ("Check for Updates", self._check_for_updates, ""),
                 ("Settings", self.show_preferences, "Ctrl+,"),
@@ -8663,7 +9374,7 @@ class BrowserApp(BrowserFeatures):
             "Manage Bookmarks": "▤", "Downloads": "↓", "Toggle Ad Blocking for This Site": "◇",
             "Site Info & Privacy": "◈", "Privacy Shield": "◆", "Permissions Manager": "✓",
             "Extension Manager": "◇", "Tab Groups": "▦", "Profiles": "◉",
-            "Task Manager": "▥", "Diagnostics": "⌁", "Local Ports & Loopback": "⌘",
+            "Task Manager": "▥", "Diagnostics": "⌁", "Network Connections": "↗", "Local Ports & Loopback": "⌘",
             "Check for Updates": "↥", "Settings": "⚙", "Copy All Debug": "⧉",
             "Copy Full Debug": "⧉", "Inspect Chromium HTML": "</>", "About Tekzite": "ⓘ",
         }
@@ -8931,6 +9642,59 @@ class BrowserApp(BrowserFeatures):
                 pass
         return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
 
+    def _rearm_dwm_input_after_maximize(self, force_recrop=False):
+        """Rebind DWM hit testing after maximize/restore changes the viewport.
+
+        One transition beat performs a forced native recrop. Later beats only
+        refresh the input metrics against the already-settled visible contract.
+        This avoids both stale maximized hit testing and repeated DComp churn.
+        """
+        if not (self._embedded_mode and self._chromium_dwm_mode and self._dwm_surface_ready):
+            return False
+
+        # A pending poll can still be using the pre-maximize rectangle. Cancel
+        # it and restart from the new host geometry instead of letting one stale
+        # sample poison the first click after the viewport jump.
+        if self._dwm_pointer_after_id is not None:
+            try:
+                self.root.after_cancel(self._dwm_pointer_after_id)
+            except Exception:
+                pass
+            self._dwm_pointer_after_id = None
+        self._dwm_pointer_inside = False
+        self._dwm_pointer_last_screen_xy = None
+        self._dwm_pointer_last_page_xy = None
+        self._chromium_left_button_down = False
+        self._chromium_drag_selecting = False
+        self._chromium_press_point = None
+        self._chromium_pending_drag = None
+
+        if force_recrop:
+            try:
+                request_embedded_chromium_dwm_recrop()
+            except Exception:
+                pass
+        if self._dwm_host:
+            try:
+                self._repair_dwm_host_owner_and_style(self._dwm_host)
+            except Exception:
+                pass
+
+        # v10.5.70: on the first maximize/restore beat, force resize even when
+        # the viewport cache already contains the new size. Otherwise the recrop
+        # request can remain pending forever and input metrics keep the old
+        # RenderWidgetHost scale. Later beats only remeasure the settled contract.
+        self._schedule_dwm_geometry_sync(
+            resize=bool(force_recrop),
+            delay=1,
+            force_resize=bool(force_recrop),
+            refresh_input_metrics=True,
+        )
+
+        self._arm_dwm_input_surface()
+        self._schedule_dwm_pointer_bridge(delay=1)
+        return True
+
     def _toggle_maximize(self):
         if self._fullscreen:
             return
@@ -8948,10 +9712,15 @@ class BrowserApp(BrowserFeatures):
         self._dwm_host_region_signature = None
         self.root.after_idle(self._apply_window_rounding)
         if self._embedded_mode and self._chromium_dwm_mode:
-            # v10.5.38: maximizing/restoring changes the DWM viewport.  Reconcile
-            # immediately and once more after Tk has finished packing children.
-            self.root.after_idle(lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
+            # A maximize/restore is both a visual resize and an input-coordinate
+            # transition. Reconcile the committed viewport immediately and once
+            # again after Tk has finished packing the new geometry. Then re-arm
+            # the input bridge across the same transition beats.
+            self._schedule_dwm_geometry_sync(resize=True, delay=1)
             self.root.after(70, lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
+            self.root.after_idle(lambda: self._rearm_dwm_input_after_maximize(force_recrop=True))
+            self.root.after(55, lambda: self._rearm_dwm_input_after_maximize(force_recrop=False))
+            self.root.after(150, lambda: self._rearm_dwm_input_after_maximize(force_recrop=False))
 
     def _schedule_taskbar_restore_check(self, delay=120):
         if self._taskbar_restore_after_id is not None:
@@ -9058,6 +9827,11 @@ class BrowserApp(BrowserFeatures):
             self._taskbar_restore_watchdog_id = None
         try:
             self.root.overrideredirect(False)
+            self.root.update_idletasks()
+            # override-redirect(False) can create a fresh Tk wrapper. Mark that
+            # wrapper as an app window before iconifying so the taskbar button
+            # cannot vanish during the minimize transition.
+            self._apply_frameless_app_style()
             self.root.iconify()
         except Exception:
             # If iconify itself races with Tk, immediately repair visibility
@@ -11110,6 +11884,9 @@ class BrowserApp(BrowserFeatures):
         url = self.apply_site_compatibility(url)
 
         active = self._active_tab()
+        previous_url = str(active.get("url") or "") if active is not None else ""
+        if self._maybe_start_google_auth_handoff(url, previous_url, active):
+            return
         if reuse_existing and self.preferences.get("reuse_open_tabs", True):
             existing = self._find_open_tab_by_url(url, exclude_id=self.active_tab_id)
             if existing is not None:
@@ -11570,11 +12347,17 @@ class BrowserApp(BrowserFeatures):
         self._cancel_all_tk_after_jobs()
         self._navigation_generation += 1
         try:
-            close_embedded_chromium(clear_profile=bool(
-                getattr(self, "_private_mode", False)
-                or self.preferences.get("privacy_lockdown", True)
-                or self.preferences.get("clear_browsing_data_on_exit", True)
-            ))
+            close_embedded_chromium(
+                clear_profile=bool(
+                    getattr(self, "_private_mode", False)
+                    or self.preferences.get("privacy_lockdown", True)
+                    or self.preferences.get("clear_browsing_data_on_exit", True)
+                ),
+                # v10.5.69: let Chromium durably commit cookie/storage changes
+                # such as a fresh YouTube sign-out before Tekzite exits.
+                graceful=True,
+                timeout=6.0,
+            )
         except Exception:
             pass
         try:

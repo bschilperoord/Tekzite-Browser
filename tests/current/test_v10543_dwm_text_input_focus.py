@@ -11,7 +11,7 @@ def _press_block():
 
 
 def test_release_is_v10543():
-    assert 'BROWSER_VERSION = "10.5.54"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.73"' in MAIN
 
 
 def test_dwm_page_click_reclaims_keyboard_focus():

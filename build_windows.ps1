@@ -80,9 +80,12 @@ if not helper.is_file():
     raise SystemExit("tekzite-network.exe is missing")
 
 extension_dir = project / "chromium_zoom_extension"
+assets_dir = project / "assets"
 datas = []
 if extension_dir.is_dir():
     datas.append((str(extension_dir), "chromium_zoom_extension"))
+if assets_dir.is_dir():
+    datas.append((str(assets_dir), "assets"))
 
 icon_candidate = project / "assets" / "tekzite.ico"
 icon_path = str(icon_candidate) if icon_candidate.is_file() else None

@@ -1,0 +1,20 @@
+Tekzite Browser v10.5.65 validation
+
+Focus: already-signed-in Google/YouTube auth handoff and stale crash-state recovery
+
+Automated validation:
+- Python source compilation: PASS
+- Current Python regression suite: 449/449 PASS
+- Live Cookies SQLite WAL auth detection remains covered
+- Live History SQLite WAL return-navigation detection: PASS
+- Already-authenticated return can complete without a cookie delta: PASS
+- Sign-in endpoint itself is rejected as a completion signal: PASS
+- Stale Chromium profile crash markers are repaired while the profile is offline: PASS
+- Standalone auth launch suppresses the legacy session-crashed bubble: PASS
+
+Windows smoke test target:
+1. Open YouTube in Tekzite and trigger Google sign-in.
+2. Complete sign-in, or repeat while the shared profile is already signed in.
+3. Verify the standalone Chromium window closes automatically after returning to YouTube.
+4. Verify no “restore pages / Chromium wasn't shut down correctly” bubble appears.
+5. Verify Tekzite returns to YouTube signed in without manual refresh.

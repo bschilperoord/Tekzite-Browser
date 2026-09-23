@@ -1,3 +1,116 @@
+# v10.5.73 - UDP remote peer tracing
+
+- Live Socket View now augments Windows UDP owner-table rows with `Microsoft-Windows-Kernel-Network` ETW send/receive events, exposing the actual remote UDP IP and port.
+- Keeps separate recent rows when one UDP socket talks to multiple peers instead of replacing the previous destination.
+- Adds per-peer TX/RX packet and byte counters plus last-seen age and hostname enrichment.
+- Filters UDP ETW metadata to Tekzite/Chromium/network-helper PIDs, retains it only in a bounded RAM ledger while the view is open, and captures no packet payloads.
+- Reports ETW permission/provider failures in the dashboard and falls back to the local UDP endpoint rather than fabricating peer data.
+
+# v10.5.72 - Full live socket view
+
+- Replaces the proxy-only Network Connections table with a live Windows owner-PID socket dashboard for Tekzite, Chromium, the network helper and their child processes.
+- Enumerates TCP and UDP sockets for both IPv4 and IPv6 using the built-in Windows `GetExtendedTcpTable` / `GetExtendedUdpTable` APIs; no `psutil`, packet sniffer or kernel driver is required.
+- Shows role, executable, PID, protocol/family, local endpoint, hostname, remote endpoint, TCP state and connection path.
+- Labels Chromium-to-proxy, Tekzite Network upstream, Chromium DevTools, loopback, listener, UDP endpoint and direct external paths separately so proxy bypasses stand out immediately.
+- Correlates active Tekzite Network upstream sockets with the original requested hostname in RAM, avoiding misleading CDN PTR names while still retaining no URL paths, headers or page content.
+- Adds optional bounded background PTR lookup for sockets outside the proxy path; IP addresses appear immediately and DNS enrichment never blocks the live UI.
+- Refreshes the owner tables every 250 ms without recreating unchanged tree rows, reducing flicker. Windows' UDP owner table exposes only local UDP endpoints, and ultra-short sockets can still open and close entirely between snapshots.
+
+# v10.5.71 - Live network connections overview
+
+- Adds **Tools -> Network Connections**, a live current-session view of outbound HTTP/HTTPS destinations observed by Tekzite Network.
+- Shows hostname, port, protocol, allowed/blocked result, tunnel count, currently active tunnels and recency.
+- Distinguishes allowed upstream connections from ads, trackers and browser telemetry that Tekzite blocked before opening an Internet socket, plus HTTPS-first upgrades and failed connects.
+- Keeps the overview entirely in the network helper's RAM; no connection-history file is created.
+- Exposes the RAM snapshot only through an authenticated loopback control request on the already-existing proxy port using the helper's random per-launch instance token.
+- Stores no URL paths, query strings, headers or page contents; HTTPS CONNECT payloads remain end-to-end encrypted.
+- Caps the live ledger at 512 destination/status rows and drops old inactive rows as needed.
+
+# v10.5.70 - Maximized DWM pointer alignment
+
+- Fixes cursor/text-selection hit testing drifting away from the visible pointer after maximizing Tekzite on sites such as Guru3D.
+- Makes the committed 1:1 DWM thumbnail pixel contract authoritative for native-pixel to CSS-pixel input scaling, instead of trusting a RenderWidgetHost size that can still describe the pre-maximize window.
+- Prevents a requested maximize/restore DWM recrop from being skipped just because the viewport-size cache already contains the final width and height.
+- Refreshes Chromium input metrics only after the forced geometry/recrop pass has completed, eliminating the race where the pointer transform sampled stale native geometry.
+- Performs one forced recrop per maximize/restore transition, then uses two lighter metric-only rechecks so input alignment settles without unnecessary DComp churn.
+
+# v10.5.69 - Faster Google auth close + durable sign-out
+
+- Closes the standalone Chromium auth window on the first confirmed live YouTube HWND/title return instead of waiting an extra 0.55 second settle cycle.
+- Reduces the auth monitor cadence from 220 ms to 70 ms, cutting visible post-login linger to roughly one or two short poll intervals in the normal live-HWND path.
+- Shortens the dedicated auth-window startup guard from 450 ms to 120 ms while still rejecting transient window-creation titles.
+- Rechecks the live HWND after slower cookie/history fallback work, so a login that completes mid-check closes in the same detector cycle.
+- Normal Tekzite shutdown now asks Chromium to perform a clean `Browser.close` before any fallback teardown, allowing fresh Google/YouTube cookie deletions and other profile writes to flush durably.
+- Prevents a just-completed YouTube sign-out from being lost to the old unconditional `taskkill /F` shutdown and appearing signed back in on the next launch.
+- Keeps conservative settling for cookie/history-only auth completion signals and a bounded force-close fallback only for a genuinely hung Chromium helper.
+
+# v10.5.68 - Native/DComp stall guard
+
+- Resets `hot_navigation_reused_native_surface` for every navigation so one previous refresh cannot poison a later new-target/recovery path.
+- Clears cold attached-frame diagnostics when a hot Native/DWM navigation reuses the persistent session.
+- Stops running the fixed 220 ms on-screen blank probe during hot renderer swaps, eliminating false `native surface stalled` diagnoses from stale previous-document evidence.
+- Reduces hot-navigation DWM recrop pressure from four eager passes to three later stability samples at 260/700/1250 ms.
+- Cold/new-target visible-surface diagnostics now ignore blank samples while the page is still loading and require two consecutive post-load blank samples before diagnosing a DComp stall.
+- Removes the misleading DWM recovery-pulse assumption from the visible-surface probe; DWM remains geometry-stable unless a genuine user-driven resize provides a safe recovery boundary.
+
+# v10.5.67 - Continuous Chromium frame handoff
+
+- Keeps an already-good native DWM surface mapped during refreshes and same-tab navigations instead of hiding it before `Page.navigate` completes.
+- Removes the fixed hide -> 45 ms reveal race from hot native navigation, preventing a late Chromium renderer swap from exposing a black DirectComposition backing frame.
+- Reuses the live DWM destination directly when Chromium reports `hot_navigation_reused_native_surface`, while preserving the cold/new-target transparent reveal path.
+- Adds one bounded hidden full-recrop + attached-frame readiness retry during cold Chromium bootstrap before Tekzite exposes the first page frame.
+- Adds regression coverage for continuous hot-navigation presentation and the cold first-frame retry gate.
+
+# v10.5.66 - Live auth-window completion and exact HWND close
+
+- Stops waiting on Chromium History/Cookies once the visible standalone auth window has already returned to YouTube.
+- Tracks the exact top-level Chromium HWND launched for Google authentication and uses its live window title as an immediate YouTube completion signal.
+- Targets that exact HWND for the clean `SC_CLOSE` / `WM_CLOSE` shutdown instead of relying only on Chromium PID rediscovery.
+- Makes the first post-auth close request synchronous and cooperative, so the authenticated Chromium window disappears promptly without dirtying the shared profile.
+- Keeps the v10.5.65 History/cookie signals as fallbacks and preserves the automatic authenticated refresh back inside Tekzite.
+
+# v10.5.65 - Reliable already-signed-in Google auth return
+
+- Detects successful Google/YouTube authentication from either a settled auth-cookie change or a fresh Chromium History navigation back to the originating site.
+- Fixes the already-signed-in case where Google redirects straight back to YouTube without changing any authentication cookie, which previously left the standalone Chromium window open forever.
+- Reads live Chromium History SQLite WAL state while the auth browser is still running.
+- Repairs stale `profile.exit_type = Crashed` / `profile.exited_cleanly = false` metadata left by older force-kill handoffs before launching the standalone auth browser.
+- Launches the auth window with `--disable-session-crashed-bubble` as a final guard against legacy restore-page prompts.
+- Passes the expected return URL into the standalone auth monitor and rejects sign-in/login endpoints themselves as completion signals.
+- Keeps the graceful `Browser.close` / Windows close-message shutdown path and automatic post-login refresh.
+
+# v10.5.64 - Clean Google-auth Chromium handoff
+
+- Replaces the auth handoff's forced embedded-Chromium termination with Chromium's own `Browser.close` graceful shutdown.
+- Refuses to dirty-kill the shared profile if Chromium does not release it cleanly; the handoff fails safely instead.
+- Replaces the standalone auth window's `taskkill /F` fallback with cooperative `SC_CLOSE` / `WM_CLOSE` requests using a bounded `SendMessageTimeoutW` path.
+- Keeps the v10.5.63 live-cookie detection and automatic post-login page refresh.
+- Prevents the Chromium “wasn't shut down correctly / restore pages” crash-recovery prompt caused by the previous auth handoff.
+
+# v10.5.63 - Google sign-in completion handoff
+
+- Fixed standalone Google sign-in detection while Chromium is still writing authentication cookies through SQLite WAL.
+- Auth cookie snapshots now include live WAL state and tolerate transient Windows sharing failures without resetting the success timer.
+- Refreshes the tracked profile-owning Chromium PID set before checking or closing the authentication window.
+- Retries graceful auth-window close and uses a bounded fallback if Chromium ignores the close request.
+- Automatically reloads the originating page once after the authenticated Chromium profile is reopened, so the signed-in state appears without a manual refresh.
+
+# v10.5.62 - Release hygiene + maximize/restore DWM guard
+
+- Restores the explicit final DWM viewport resize pass after maximize/restore so the mirrored Chromium surface cannot keep a stale size after Tk finishes repacking.
+- Synchronizes browser, Windows manifest, version resource, installer, built-in extension and active regression-suite version metadata.
+- Adds `tools/sync_version.py` so future releases can update or validate all active version pins with one command.
+- Moves the v10.5.61 native Windows identity and Google-auth handoff checks into the normal regression suite.
+- Replaces the obsolete v10.5.54 patch-and-publish workflow with a tag-driven Windows release workflow that tests and builds the exact tagged source.
+
+# v10.5.61 - Native app identity + Google auth auto-close
+
+- Applies Tekzite's own Windows AppUserModelID and icon consistently to the frameless Tk shell and packaged executable.
+- Keeps the real Tekzite taskbar identity stable while transient DWM presentation windows stay out of taskbar/Alt-Tab.
+- Opens Google authentication in a normal visible Chromium window that shares Tekzite's persistent web profile without CDP or app mode.
+- Detects a settled Google authentication-cookie change and requests a normal close of the standalone auth window before returning to the embedded browser.
+- Waits for Chromium to release the shared profile before relaunching the embedded renderer.
+
 # v10.5.54 - Drag lock after taskbar restore
 
 - Invalidates the cached native Tekzite HWND before the frameless window is temporarily de-framed for taskbar minimize.

@@ -1,0 +1,23 @@
+Tekzite Browser v10.5.68 validation
+
+Focus: intermittent Native/DComp stall diagnosis and hot-navigation state leakage
+
+Automated validation:
+- Python source compilation: PASS
+- Current Python regression suite: 463/463 PASS
+- Hot navigation resets the persistent hot-reuse marker before every operation: PASS
+- Hot Native/DWM navigation clears stale cold first-frame diagnostics: PASS
+- Hot renderer swaps skip the old fixed 220 ms visible-surface probe: PASS
+- Hot DWM recrop stabilization is reduced to three later 260/700/1250 ms samples: PASS
+- Cold/new-target blank detection ignores in-flight loads and requires two post-load confirmations: PASS
+- Existing v10.5.67 continuous-frame, DWM performance, restore, resize and auth regressions: PASS
+- Release metadata synchronization: PASS
+- Chromium extension mocked-API checks: PASS
+- Environment doctor: no blocking setup issues (full DWM/runtime smoke test remains Windows-only)
+
+Windows smoke test target:
+1. Open a normal Chromium-backed page, refresh repeatedly, and navigate between several sites in the same tab.
+2. Verify the status bar no longer intermittently reports a Native/DComp stall during ordinary renderer swaps.
+3. Open/close tabs after several refreshes to verify one prior hot refresh cannot poison a later new-target navigation.
+4. Exercise YouTube and another SPA while watching for Native pauses during the first ~1.5 seconds after navigation.
+5. Repeat maximize/restore and taskbar minimize/restore to verify the existing DWM recovery paths remain intact.

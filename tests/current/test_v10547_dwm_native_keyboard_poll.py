@@ -8,7 +8,7 @@ SOURCE = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_is_v10547():
-    assert main.BROWSER_VERSION == "10.5.54"
+    assert main.BROWSER_VERSION == "10.5.73"
 
 
 def test_dwm_keyboard_poll_is_foreground_only_and_hook_free():

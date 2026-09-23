@@ -8,7 +8,7 @@ FEATURES = (ROOT / "browser_features.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.54"
+    assert main.BROWSER_VERSION == "10.5.73"
 
 
 def test_all_animated_toplevels_are_branded_by_default():

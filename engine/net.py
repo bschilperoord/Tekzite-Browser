@@ -9,6 +9,10 @@ import shutil
 import subprocess
 import tempfile
 import json
+import hashlib
+import shutil
+import sqlite3
+import tempfile
 import socket
 import ipaddress
 import secrets
@@ -20,6 +24,7 @@ from pathlib import Path
 from urllib.request import urlopen as _stdlib_urlopen
 from urllib.parse import urlsplit
 from loopback_policy import allow_loopback_port, revoke_loopback_port, snapshot as loopback_policy_snapshot
+from .udp_peer_etw import ensure_udp_peer_monitor, stop_udp_peer_monitor
 
 # ctypes.wintypes does not expose HRESULT on every supported Python build
 # (notably some packaged Windows/Python combinations). HRESULT is always a
@@ -284,6 +289,7 @@ def _stop_network_engine_unlocked():
         _NETWORK_ENGINE_LOG_HANDLE = None
 
 atexit.register(_stop_network_engine)
+atexit.register(stop_udp_peer_monitor)
 
 
 def _ensure_network_engine_locked():
@@ -451,6 +457,576 @@ def privacy_stats():
         pass
     return {"telemetry_blocked": 0, "trackers_blocked": 0, "ads_blocked": 0, "https_upgrades": 0, "started_at": None}
 
+
+def connection_overview(start=False, timeout=0.25):
+    """Return the current helper session's RAM-only destination ledger."""
+    state = ensure_network_engine() if start else (_NETWORK_ENGINE or {})
+    proc = state.get("process") if state else None
+    if proc is None or proc.poll() is not None:
+        return {"started_at": None, "updated_at": None, "connections": []}
+    host = str(state.get("host") or "127.0.0.1")
+    port = int(state.get("port") or 0)
+    token = str(state.get("instance_token") or "")
+    if not port or not token:
+        return {"started_at": None, "updated_at": None, "connections": []}
+    request = (
+        "GET http://tekzite.internal/__connections HTTP/1.1\r\n"
+        "Host: tekzite.internal\r\n"
+        f"X-Tekzite-Instance-Token: {token}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+    try:
+        with socket.create_connection((host, port), timeout=max(0.05, float(timeout))) as sock:
+            sock.settimeout(max(0.05, float(timeout)))
+            sock.sendall(request)
+            chunks = []
+            total = 0
+            while total < 1024 * 1024:
+                chunk = sock.recv(min(65536, 1024 * 1024 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+        raw = b"".join(chunks)
+        head, body = raw.split(b"\r\n\r\n", 1)
+        if not head.startswith(b"HTTP/1.1 200"):
+            raise ValueError("connection overview endpoint unavailable")
+        data = json.loads(body.decode("utf-8"))
+    except Exception:
+        return {"started_at": None, "updated_at": None, "connections": []}
+    if not isinstance(data, dict):
+        return {"started_at": None, "updated_at": None, "connections": []}
+    rows = []
+    for item in list(data.get("connections") or [])[:512]:
+        if not isinstance(item, dict):
+            continue
+        host_name = str(item.get("host") or "")[:253]
+        if not host_name:
+            continue
+        rows.append({
+            "host": host_name,
+            "port": int(item.get("port", 0) or 0),
+            "protocol": str(item.get("protocol") or "TCP")[:16],
+            "status": str(item.get("status") or "unknown")[:32],
+            "count": max(0, int(item.get("count", 0) or 0)),
+            "active": max(0, int(item.get("active", 0) or 0)),
+            "first_seen": float(item.get("first_seen", 0) or 0),
+            "last_seen": float(item.get("last_seen", 0) or 0),
+        })
+    upstreams = []
+    for item in list(data.get("active_upstreams") or [])[:512]:
+        if not isinstance(item, dict):
+            continue
+        host_name = str(item.get("host") or "")[:253]
+        local_address = str(item.get("local_address") or "")[:128]
+        remote_address = str(item.get("remote_address") or "")[:128]
+        try:
+            local_port = int(item.get("local_port", 0) or 0)
+            remote_port = int(item.get("remote_port", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not host_name or not local_port or not remote_port:
+            continue
+        upstreams.append({
+            "host": host_name,
+            "protocol": str(item.get("protocol") or "TCP")[:16],
+            "local_address": local_address,
+            "local_port": local_port,
+            "remote_address": remote_address,
+            "remote_port": remote_port,
+            "opened_at": float(item.get("opened_at", 0) or 0),
+        })
+    return {
+        "started_at": data.get("started_at"),
+        "updated_at": data.get("updated_at"),
+        "connections": rows,
+        "active_upstreams": upstreams,
+    }
+
+
+
+_TCP_STATE_NAMES = {
+    1: "CLOSED", 2: "LISTEN", 3: "SYN-SENT", 4: "SYN-RECEIVED",
+    5: "ESTABLISHED", 6: "FIN-WAIT-1", 7: "FIN-WAIT-2",
+    8: "CLOSE-WAIT", 9: "CLOSING", 10: "LAST-ACK", 11: "TIME-WAIT",
+    12: "DELETE-TCB",
+}
+
+
+def _normalize_socket_address(value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    raw = value.split("%", 1)[0]
+    try:
+        return ipaddress.ip_address(raw).compressed
+    except ValueError:
+        return raw
+
+
+def _windows_process_snapshot():
+    """Return {pid: {ppid, exe}} from Toolhelp without third-party modules."""
+    if os.name != "nt":
+        return {}
+    try:
+        from ctypes import wintypes
+
+        TH32CS_SNAPPROCESS = 0x00000002
+        INVALID_HANDLE_VALUE = _ctypes.c_void_p(-1).value
+        MAX_PATH = 260
+
+        class PROCESSENTRY32W(_ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", _ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * MAX_PATH),
+            ]
+
+        kernel32 = _ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, _ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, _ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not handle or int(handle) == int(INVALID_HANDLE_VALUE):
+            return {}
+        rows = {}
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = _ctypes.sizeof(PROCESSENTRY32W)
+            ok = bool(kernel32.Process32FirstW(handle, _ctypes.byref(entry)))
+            while ok:
+                pid = int(entry.th32ProcessID)
+                if pid > 0:
+                    rows[pid] = {
+                        "pid": pid,
+                        "ppid": int(entry.th32ParentProcessID),
+                        "exe": str(entry.szExeFile or "")[:260],
+                    }
+                ok = bool(kernel32.Process32NextW(handle, _ctypes.byref(entry)))
+        finally:
+            kernel32.CloseHandle(handle)
+        return rows
+    except Exception:
+        return {}
+
+
+def _windows_owned_processes(processes=None, extra_roots=None):
+    """Return Tekzite itself plus every live descendant visible to Toolhelp."""
+    processes = dict(processes if processes is not None else _windows_process_snapshot())
+    own_pid = int(os.getpid())
+    roots = {own_pid}
+
+    for state in (_NETWORK_ENGINE or {}, _EDGE_SESSION or {}):
+        proc = state.get("process") if isinstance(state, dict) else None
+        try:
+            pid = int(getattr(proc, "pid", 0) or 0)
+        except Exception:
+            pid = 0
+        if pid > 0:
+            roots.add(pid)
+
+    for value in list(extra_roots or []):
+        try:
+            pid = int(value or 0)
+        except Exception:
+            pid = 0
+        if pid > 0:
+            roots.add(pid)
+
+    owned = set(roots)
+    # Chromium's browser process can spawn several generations of renderer,
+    # utility, GPU and crash-handler children. Resolve the complete descendant
+    # closure rather than matching executable names globally.
+    for _ in range(max(2, len(processes) + 1)):
+        before = len(owned)
+        for pid, item in processes.items():
+            try:
+                if int(item.get("ppid") or 0) in owned:
+                    owned.add(int(pid))
+            except Exception:
+                continue
+        if len(owned) == before:
+            break
+    return owned, processes
+
+
+def _win_port(value) -> int:
+    try:
+        return int(socket.ntohs(int(value) & 0xFFFF))
+    except Exception:
+        return 0
+
+
+def _win_ipv4(value) -> str:
+    try:
+        packed = int(value).to_bytes(4, byteorder="little", signed=False)
+        return socket.inet_ntop(socket.AF_INET, packed)
+    except Exception:
+        return ""
+
+
+def _win_ipv6(value, scope_id=0) -> str:
+    try:
+        packed = bytes(value)
+        address = socket.inet_ntop(socket.AF_INET6, packed)
+        if int(scope_id or 0) and address.lower().startswith("fe80:"):
+            return f"{address}%{int(scope_id)}"
+        return address
+    except Exception:
+        return ""
+
+
+def _windows_socket_rows():
+    """Enumerate Windows owner-PID TCP/UDP tables for IPv4 and IPv6.
+
+    TCP rows include both endpoints and state. The Windows UDP owner table itself
+    exposes only the local endpoint; live_socket_snapshot augments those rows
+    with Kernel-Network ETW peer events when the Live Socket View is active.
+    """
+    if os.name != "nt":
+        return []
+    try:
+        from ctypes import wintypes
+
+        class MIB_TCPROW_OWNER_PID(_ctypes.Structure):
+            _fields_ = [
+                ("dwState", wintypes.DWORD), ("dwLocalAddr", wintypes.DWORD),
+                ("dwLocalPort", wintypes.DWORD), ("dwRemoteAddr", wintypes.DWORD),
+                ("dwRemotePort", wintypes.DWORD), ("dwOwningPid", wintypes.DWORD),
+            ]
+
+        class MIB_TCP6ROW_OWNER_PID(_ctypes.Structure):
+            _fields_ = [
+                ("ucLocalAddr", _ctypes.c_ubyte * 16), ("dwLocalScopeId", wintypes.DWORD),
+                ("dwLocalPort", wintypes.DWORD), ("ucRemoteAddr", _ctypes.c_ubyte * 16),
+                ("dwRemoteScopeId", wintypes.DWORD), ("dwRemotePort", wintypes.DWORD),
+                ("dwState", wintypes.DWORD), ("dwOwningPid", wintypes.DWORD),
+            ]
+
+        class MIB_UDPROW_OWNER_PID(_ctypes.Structure):
+            _fields_ = [
+                ("dwLocalAddr", wintypes.DWORD), ("dwLocalPort", wintypes.DWORD),
+                ("dwOwningPid", wintypes.DWORD),
+            ]
+
+        class MIB_UDP6ROW_OWNER_PID(_ctypes.Structure):
+            _fields_ = [
+                ("ucLocalAddr", _ctypes.c_ubyte * 16), ("dwLocalScopeId", wintypes.DWORD),
+                ("dwLocalPort", wintypes.DWORD), ("dwOwningPid", wintypes.DWORD),
+            ]
+
+        iphlpapi = _ctypes.WinDLL("iphlpapi", use_last_error=True)
+        ERROR_INSUFFICIENT_BUFFER = 122
+        TCP_TABLE_OWNER_PID_ALL = 5
+        UDP_TABLE_OWNER_PID = 1
+
+        def table_rows(func_name, family, table_class, row_type):
+            func = getattr(iphlpapi, func_name)
+            func.argtypes = [
+                _ctypes.c_void_p, _ctypes.POINTER(wintypes.DWORD), wintypes.BOOL,
+                wintypes.ULONG, wintypes.ULONG, wintypes.ULONG,
+            ]
+            func.restype = wintypes.DWORD
+            size = wintypes.DWORD(0)
+            result = int(func(None, _ctypes.byref(size), False, family, table_class, 0))
+            if result not in (0, ERROR_INSUFFICIENT_BUFFER) or size.value < 4:
+                return []
+            buf = _ctypes.create_string_buffer(int(size.value))
+            result = int(func(buf, _ctypes.byref(size), False, family, table_class, 0))
+            if result != 0:
+                return []
+            count = int(wintypes.DWORD.from_buffer_copy(buf.raw[:4]).value)
+            row_size = _ctypes.sizeof(row_type)
+            rows = []
+            offset = 4
+            for _ in range(count):
+                if offset + row_size > len(buf.raw):
+                    break
+                rows.append(row_type.from_buffer_copy(buf.raw[offset:offset + row_size]))
+                offset += row_size
+            return rows
+
+        result = []
+        for row in table_rows("GetExtendedTcpTable", socket.AF_INET, TCP_TABLE_OWNER_PID_ALL, MIB_TCPROW_OWNER_PID):
+            result.append({
+                "pid": int(row.dwOwningPid), "protocol": "TCP", "family": "IPv4",
+                "local_address": _win_ipv4(row.dwLocalAddr), "local_port": _win_port(row.dwLocalPort),
+                "remote_address": _win_ipv4(row.dwRemoteAddr), "remote_port": _win_port(row.dwRemotePort),
+                "state": _TCP_STATE_NAMES.get(int(row.dwState), str(int(row.dwState))),
+            })
+        for row in table_rows("GetExtendedTcpTable", socket.AF_INET6, TCP_TABLE_OWNER_PID_ALL, MIB_TCP6ROW_OWNER_PID):
+            result.append({
+                "pid": int(row.dwOwningPid), "protocol": "TCP", "family": "IPv6",
+                "local_address": _win_ipv6(row.ucLocalAddr, row.dwLocalScopeId), "local_port": _win_port(row.dwLocalPort),
+                "remote_address": _win_ipv6(row.ucRemoteAddr, row.dwRemoteScopeId), "remote_port": _win_port(row.dwRemotePort),
+                "state": _TCP_STATE_NAMES.get(int(row.dwState), str(int(row.dwState))),
+            })
+        for row in table_rows("GetExtendedUdpTable", socket.AF_INET, UDP_TABLE_OWNER_PID, MIB_UDPROW_OWNER_PID):
+            result.append({
+                "pid": int(row.dwOwningPid), "protocol": "UDP", "family": "IPv4",
+                "local_address": _win_ipv4(row.dwLocalAddr), "local_port": _win_port(row.dwLocalPort),
+                "remote_address": "", "remote_port": 0, "state": "ENDPOINT",
+            })
+        for row in table_rows("GetExtendedUdpTable", socket.AF_INET6, UDP_TABLE_OWNER_PID, MIB_UDP6ROW_OWNER_PID):
+            result.append({
+                "pid": int(row.dwOwningPid), "protocol": "UDP", "family": "IPv6",
+                "local_address": _win_ipv6(row.ucLocalAddr, row.dwLocalScopeId), "local_port": _win_port(row.dwLocalPort),
+                "remote_address": "", "remote_port": 0, "state": "ENDPOINT",
+            })
+        return result
+    except Exception:
+        return []
+
+
+def _socket_role(pid: int, exe: str, network_pid: int, chromium_pid: int) -> str:
+    pid = int(pid or 0)
+    lower = str(exe or "").casefold()
+    if pid == int(os.getpid()):
+        return "Tekzite UI"
+    if network_pid and pid == int(network_pid):
+        return "Tekzite Network"
+    if "chrom" in lower or (chromium_pid and pid == int(chromium_pid)):
+        return "Chromium"
+    if exe:
+        return "Tekzite child"
+    return "Tekzite process"
+
+
+def _socket_path_label(row, *, network_pid=0, proxy_port=0, devtools_port=0):
+    state = str(row.get("state") or "")
+    protocol = str(row.get("protocol") or "")
+    remote = _normalize_socket_address(row.get("remote_address"))
+    remote_port = int(row.get("remote_port") or 0)
+    pid = int(row.get("pid") or 0)
+    if state == "LISTEN":
+        return "Listener"
+    if protocol == "UDP" and not remote:
+        return "UDP endpoint"
+    try:
+        ip = ipaddress.ip_address(remote) if remote else None
+    except ValueError:
+        ip = None
+    if ip is not None and ip.is_loopback:
+        if proxy_port and remote_port == int(proxy_port):
+            return "Via Tekzite Network"
+        if devtools_port and remote_port == int(devtools_port):
+            return "Chromium DevTools"
+        return "Loopback internal"
+    if remote:
+        if network_pid and pid == int(network_pid):
+            return "Tekzite Network upstream" if protocol != "UDP" else "Tekzite Network UDP"
+        return "Direct UDP external" if protocol == "UDP" else "Direct external"
+    return "Local endpoint"
+
+
+def _udp_peer_candidates(peer_rows, item):
+    """Return recent ETW peers matching one Windows UDP owner-table row."""
+    pid = int(item.get("pid") or 0)
+    family = str(item.get("family") or "")
+    local_port = int(item.get("local_port") or 0)
+    local_address = _normalize_socket_address(item.get("local_address"))
+    try:
+        bound_ip = ipaddress.ip_address(local_address) if local_address else None
+    except ValueError:
+        bound_ip = None
+    unspecified = bound_ip is None or bound_ip.is_unspecified
+    matches = []
+    for peer in list(peer_rows or []):
+        if int(peer.get("pid") or 0) != pid:
+            continue
+        if str(peer.get("family") or "") != family:
+            continue
+        if int(peer.get("local_port") or 0) != local_port:
+            continue
+        peer_local = _normalize_socket_address(peer.get("local_address"))
+        if not unspecified and peer_local and peer_local != local_address:
+            continue
+        matches.append(peer)
+    matches.sort(key=lambda row: float(row.get("last_seen", 0.0)), reverse=True)
+    return matches
+
+
+def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
+    """Return every current socket owned by Tekzite and its child processes.
+
+    TCP endpoints come directly from Windows' owner-PID tables. UDP owner-table
+    rows are enriched with Microsoft-Windows-Kernel-Network ETW send/receive
+    events, which provide the actual remote peer, packet/byte counters and
+    last-seen time. The ETW ledger is RAM-only and short-lived. Extremely brief
+    TCP sockets can still exist between 250 ms owner-table snapshots, while UDP
+    peer events are event-driven once the monitor is running.
+    """
+    if os.name != "nt":
+        return {
+            "supported": False, "captured_at": time.time(), "sockets": [],
+            "reason": "Live owner-PID socket enumeration is available on Windows only.",
+        }
+
+    processes = _windows_process_snapshot()
+    owned, processes = _windows_owned_processes(processes, extra_roots=extra_pids)
+    # Start/update the ETW peer filter before reading the owner table. The first
+    # snapshot can legitimately have no peers yet; subsequent event callbacks
+    # populate the RAM ledger without waiting for another packet-table API.
+    udp_peer_state = ensure_udp_peer_monitor(owned)
+    peer_rows = list((udp_peer_state or {}).get("peers") or [])
+
+    network_state = _NETWORK_ENGINE or {}
+    edge_state = _EDGE_SESSION or {}
+    network_proc = network_state.get("process") if isinstance(network_state, dict) else None
+    chromium_proc = edge_state.get("process") if isinstance(edge_state, dict) else None
+    try:
+        network_pid = int(getattr(network_proc, "pid", 0) or 0)
+    except Exception:
+        network_pid = 0
+    try:
+        chromium_pid = int(getattr(chromium_proc, "pid", 0) or 0)
+    except Exception:
+        chromium_pid = 0
+    proxy_port = int(network_state.get("port") or 0) if isinstance(network_state, dict) else 0
+    devtools_port = int(edge_state.get("port") or 0) if isinstance(edge_state, dict) else 0
+
+    proxy_snapshot = connection_overview(start=False, timeout=0.12) if include_proxy_names else {}
+    upstream_names = {}
+    for item in list((proxy_snapshot or {}).get("active_upstreams") or []):
+        key = (
+            _normalize_socket_address(item.get("local_address")), int(item.get("local_port") or 0),
+            _normalize_socket_address(item.get("remote_address")), int(item.get("remote_port") or 0),
+        )
+        upstream_names[key] = str(item.get("host") or "")[:253]
+
+    def decorate(item, peer=None):
+        pid = int(item.get("pid") or 0)
+        process_info = processes.get(pid, {})
+        exe = str(process_info.get("exe") or "")
+        row = dict(item)
+        if peer is not None:
+            row["remote_address"] = _normalize_socket_address(peer.get("remote_address"))
+            row["remote_port"] = int(peer.get("remote_port") or 0)
+            row["state"] = "PEER"
+            row["last_seen"] = float(peer.get("last_seen", 0.0) or 0.0)
+            row["first_seen"] = float(peer.get("first_seen", 0.0) or 0.0)
+            row["tx_packets"] = int(peer.get("tx_packets", 0) or 0)
+            row["rx_packets"] = int(peer.get("rx_packets", 0) or 0)
+            row["tx_bytes"] = int(peer.get("tx_bytes", 0) or 0)
+            row["rx_bytes"] = int(peer.get("rx_bytes", 0) or 0)
+            # If the owner table is bound to 0.0.0.0/::, show the concrete local
+            # address used for this datagram peer in the event-enriched row.
+            try:
+                base_ip = ipaddress.ip_address(_normalize_socket_address(row.get("local_address")))
+            except ValueError:
+                base_ip = None
+            if base_ip is None or base_ip.is_unspecified:
+                concrete = _normalize_socket_address(peer.get("local_address"))
+                if concrete:
+                    row["local_address"] = concrete
+        row["process"] = exe or ("TekziteBrowser.exe" if pid == int(os.getpid()) else "")
+        row["role"] = _socket_role(pid, exe, network_pid, chromium_pid)
+        row["path"] = _socket_path_label(
+            row, network_pid=network_pid, proxy_port=proxy_port, devtools_port=devtools_port,
+        )
+        local_address = _normalize_socket_address(row.get("local_address"))
+        remote_address = _normalize_socket_address(row.get("remote_address"))
+        row["local_address"] = local_address
+        row["remote_address"] = remote_address
+        host = ""
+        if pid == network_pid and remote_address:
+            host = upstream_names.get((
+                local_address, int(row.get("local_port") or 0),
+                remote_address, int(row.get("remote_port") or 0),
+            ), "")
+        if not host and remote_address:
+            try:
+                remote_ip = ipaddress.ip_address(remote_address)
+            except ValueError:
+                remote_ip = None
+            if remote_ip is not None and remote_ip.is_loopback:
+                if proxy_port and int(row.get("remote_port") or 0) == proxy_port:
+                    host = "Tekzite Network"
+                elif devtools_port and int(row.get("remote_port") or 0) == devtools_port:
+                    host = "Chromium DevTools"
+                else:
+                    host = "localhost"
+        row["hostname"] = host
+        row["key"] = "|".join([
+            str(pid), str(row.get("protocol") or ""), str(row.get("family") or ""),
+            local_address, str(int(row.get("local_port") or 0)), remote_address,
+            str(int(row.get("remote_port") or 0)), str(row.get("state") or ""),
+        ])
+        return row
+
+    rows = []
+    for item in _windows_socket_rows():
+        pid = int(item.get("pid") or 0)
+        if pid not in owned:
+            continue
+        if str(item.get("protocol") or "") == "UDP":
+            peers = _udp_peer_candidates(peer_rows, item)
+            if peers:
+                rows.extend(decorate(item, peer) for peer in peers)
+                continue
+        rows.append(decorate(item))
+
+    rows.sort(key=lambda row: (
+        0 if str(row.get("path") or "").startswith("Direct") else 1,
+        0 if str(row.get("state")) in {"ESTABLISHED", "PEER"} else 1,
+        str(row.get("role") or ""), int(row.get("pid") or 0),
+        str(row.get("protocol") or ""), int(row.get("local_port") or 0),
+        -float(row.get("last_seen", 0.0) or 0.0),
+    ))
+    return {
+        "supported": True,
+        "captured_at": time.time(),
+        "sockets": rows,
+        "owned_pids": sorted(int(pid) for pid in owned),
+        "network_pid": network_pid,
+        "chromium_pid": chromium_pid,
+        "proxy_port": proxy_port,
+        "devtools_port": devtools_port,
+        "udp_peer_monitor": {
+            "status": str((udp_peer_state or {}).get("status") or "unknown"),
+            "reason": str((udp_peer_state or {}).get("reason") or ""),
+            "peer_count": len(peer_rows),
+        },
+        "sampling_note": (
+            "TCP uses owner-PID snapshots; UDP remote peers are enriched from live "
+            "Microsoft-Windows-Kernel-Network ETW events."
+        ),
+    }
+
+
+def stop_live_socket_peer_monitor():
+    """Stop the optional ETW peer session when the Live Socket View closes."""
+    stop_udp_peer_monitor()
+
+def reverse_dns_hostname(address: str) -> str:
+    """Best-effort PTR lookup for one IP. Intended for background UI workers."""
+    address = _normalize_socket_address(address)
+    if not address:
+        return ""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return ""
+    if ip.is_loopback:
+        return "localhost"
+    try:
+        name = socket.gethostbyaddr(address)[0]
+        return str(name or "").strip().rstrip(".")[:253]
+    except Exception:
+        return ""
 
 def loopback_debug():
     """Return the Python loopback allow-list and recent denied attempts."""
@@ -2228,6 +2804,1092 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
         "or place chromium.exe beside Tekzite. Microsoft Edge is intentionally "
         "not used as Tekzite's browser backend."
     )
+
+
+_GOOGLE_AUTH_COOKIE_NAMES = frozenset({
+    "SID", "HSID", "SSID", "APISID", "SAPISID", "LSID", "SIDCC",
+    "__Secure-1PSID", "__Secure-3PSID",
+    "__Secure-1PAPISID", "__Secure-3PAPISID",
+    "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+    "__Secure-1PSIDCC", "__Secure-3PSIDCC",
+    "__Secure-OSID", "__Host-1PLSID", "__Host-3PLSID",
+    "LOGIN_INFO", "__Host-GAPS",
+})
+
+
+def _google_cookie_db_candidates(profile):
+    root = Path(str(profile or ""))
+    return (
+        root / "Default" / "Network" / "Cookies",
+        root / "Default" / "Cookies",
+        root / "Network" / "Cookies",
+        root / "Cookies",
+    )
+
+
+def _live_sqlite_snapshot(db_path):
+    """Create a consistent local snapshot of a live SQLite database.
+
+    Chromium keeps its Cookies database in WAL mode. Copying only ``Cookies``
+    therefore misses freshly committed sign-in cookies while the browser is
+    still open. Prefer SQLite's online backup API, which includes live WAL
+    state, and fall back to copying the DB/WAL/SHM bundle when Windows sharing
+    rules prevent a direct read.
+    """
+    db_path = Path(db_path)
+    temp_dir = Path(tempfile.mkdtemp(prefix="tekzite-live-sqlite-"))
+    snapshot_path = temp_dir / db_path.name
+    source = dest = None
+    try:
+        try:
+            uri = db_path.resolve().as_uri() + "?mode=ro"
+            source = sqlite3.connect(uri, uri=True, timeout=0.35)
+            dest = sqlite3.connect(str(snapshot_path), timeout=0.35)
+            source.backup(dest, pages=128, sleep=0.01)
+            dest.close(); dest = None
+            source.close(); source = None
+            return temp_dir, snapshot_path
+        except Exception:
+            try:
+                if dest is not None:
+                    dest.close()
+            except Exception:
+                pass
+            try:
+                if source is not None:
+                    source.close()
+            except Exception:
+                pass
+            dest = source = None
+
+        copied_main = False
+        for suffix in ("", "-wal", "-shm"):
+            src = Path(str(db_path) + suffix)
+            if not src.is_file():
+                continue
+            dst = temp_dir / (db_path.name + suffix)
+            shutil.copy2(src, dst)
+            copied_main = copied_main or suffix == ""
+        if copied_main:
+            return temp_dir, snapshot_path
+    except Exception:
+        pass
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    return None, None
+
+
+def _chromium_profile_dirs(profile):
+    """Return Chromium profile directories that can contain per-profile state."""
+    root = Path(profile)
+    result = []
+    for candidate in [root / "Default", *sorted(root.glob("Profile *"))]:
+        try:
+            if candidate.is_dir() and candidate not in result:
+                result.append(candidate)
+        except Exception:
+            pass
+    return result
+
+
+def _mark_chromium_profile_exited_cleanly(profile):
+    """Heal stale Chromium crash markers while the profile is fully offline.
+
+    Older Tekzite auth handoffs could force-terminate Chromium, leaving
+    ``profile.exit_type`` set to ``Crashed``. Chromium then keeps showing the
+    restore-pages bubble even after the handoff code itself has been fixed.
+    Only touch Preferences while no Chromium process owns this dedicated
+    Tekzite profile.
+    """
+    profile = str(profile or "")
+    if not profile:
+        return False
+    try:
+        if _profile_chromium_pids(profile):
+            return False
+    except Exception:
+        return False
+
+    changed = False
+    for profile_dir in _chromium_profile_dirs(profile):
+        pref_path = profile_dir / "Preferences"
+        if not pref_path.is_file():
+            continue
+        try:
+            prefs = json.loads(pref_path.read_text(encoding="utf-8"))
+            if not isinstance(prefs, dict):
+                continue
+            profile_prefs = prefs.setdefault("profile", {})
+            if not isinstance(profile_prefs, dict):
+                continue
+            needs_write = (
+                profile_prefs.get("exit_type") != "Normal"
+                or profile_prefs.get("exited_cleanly") is not True
+            )
+            if not needs_write:
+                continue
+            profile_prefs["exit_type"] = "Normal"
+            profile_prefs["exited_cleanly"] = True
+            temp_path = pref_path.with_name(pref_path.name + ".tekzite-clean")
+            temp_path.write_text(
+                json.dumps(prefs, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            os.replace(temp_path, pref_path)
+            changed = True
+        except Exception:
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+    return changed
+
+
+def _chromium_history_db_candidates(profile):
+    for profile_dir in _chromium_profile_dirs(profile):
+        yield profile_dir / "History"
+
+
+def _snapshot_chromium_latest_visit(profile):
+    """Return the newest (url, visit_time, visit_id) from Chromium History.
+
+    The snapshot helper includes SQLite WAL state, which matters while the
+    standalone auth browser is still running. ``None`` means no readable
+    History database was available.
+    """
+    best = None
+    for db_path in _chromium_history_db_candidates(profile):
+        if not db_path.is_file():
+            continue
+        temp_dir = None
+        try:
+            temp_dir, temp_path = _live_sqlite_snapshot(db_path)
+            if temp_path is None or not temp_path.is_file():
+                continue
+            con = sqlite3.connect(str(temp_path), timeout=0.5)
+            try:
+                row = con.execute(
+                    "SELECT urls.url, visits.visit_time, visits.id "
+                    "FROM visits JOIN urls ON urls.id = visits.url "
+                    "ORDER BY visits.visit_time DESC, visits.id DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                con.close()
+            if row:
+                candidate = (str(row[0] or ""), int(row[1] or 0), int(row[2] or 0))
+                if best is None or candidate[1:] > best[1:]:
+                    best = candidate
+        except Exception:
+            continue
+        finally:
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+    return best
+
+
+def _auth_navigation_has_returned(handle):
+    """Detect a fresh standalone-browser navigation back to Tekzite's site.
+
+    This covers the important already-signed-in case where Google simply
+    redirects back to YouTube and no authentication cookie changes at all.
+    """
+    if not isinstance(handle, dict):
+        return False
+    profile = str(handle.get("profile") or "")
+    return_url = str(handle.get("return_url") or "")
+    if not profile or not return_url:
+        return False
+
+    latest = _snapshot_chromium_latest_visit(profile)
+    if not latest:
+        return False
+    baseline = handle.get("history_visit_baseline")
+    if baseline and tuple(latest) == tuple(baseline):
+        return False
+
+    current_url = str(latest[0] or "")
+    launch_url = str(handle.get("url") or "")
+    try:
+        current = urlsplit(current_url)
+        expected = urlsplit(return_url)
+        launch = urlsplit(launch_url)
+        current_host = (current.hostname or "").lower().removeprefix("www.")
+        expected_host = (expected.hostname or "").lower().removeprefix("www.")
+        if not current_host or current_host != expected_host:
+            return False
+        if current_url == launch_url:
+            return False
+        # Never treat an auth-flow endpoint itself as the completed return.
+        path_parts = {part for part in (current.path or "").lower().split("/") if part}
+        if (current.hostname or "").lower() == "accounts.google.com":
+            return False
+        if path_parts.intersection({"signin", "login", "servicelogin", "oauth", "o", "accountchooser"}):
+            return False
+        # If launch and return are on the same host (YouTube commonly is),
+        # require an actual fresh visit rather than merely seeing the launch URL.
+        if launch.hostname and current_url == launch.geturl():
+            return False
+    except Exception:
+        return False
+
+    handle["google_auth_return_visit"] = tuple(latest)
+    return True
+
+
+
+def _standalone_auth_window_snapshot(handle):
+    """Return visible top-level Chromium windows owned by this auth launch.
+
+    The on-disk History/Cookies databases can lag behind the actual UI.  For
+    Google auth we therefore keep a live Win32 view of the exact Chromium
+    window Tekzite launched.  This is deliberately read-only: no CDP or
+    automation switch is added to the auth browser, preserving Google's normal
+    browser compatibility path.
+    """
+    if os.name != "nt" or not isinstance(handle, dict):
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        pids = {
+            int(pid) for pid in (handle.get("browser_pids") or [])
+            if int(pid or 0) > 0
+        }
+        launch_pid = int(handle.get("launch_pid") or 0)
+        if launch_pid > 0:
+            pids.add(launch_pid)
+            try:
+                pids.update(int(pid) for pid in (_windows_descendant_pids(launch_pid) or []))
+            except Exception:
+                pass
+        profile = str(handle.get("profile") or "")
+        if profile:
+            try:
+                pids.update(int(pid) for pid in _profile_chromium_pids(profile))
+            except Exception:
+                pass
+        pids = {pid for pid in pids if pid > 0}
+        if not pids:
+            return []
+
+        user32 = ctypes.windll.user32
+        EnumWindowsProc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+        )
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetWindow.restype = wintypes.HWND
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetClassNameW.restype = ctypes.c_int
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        GW_OWNER = 4
+        windows = []
+
+        @EnumWindowsProc
+        def callback(hwnd, lparam):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value) not in pids:
+                return True
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            if user32.GetWindow(hwnd, GW_OWNER):
+                return True
+            cls = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, cls, len(cls))
+            if not cls.value.startswith("Chrome_WidgetWin"):
+                return True
+            length = max(0, int(user32.GetWindowTextLengthW(hwnd)))
+            title_buf = ctypes.create_unicode_buffer(length + 1)
+            if length:
+                user32.GetWindowTextW(hwnd, title_buf, len(title_buf))
+            windows.append({
+                "hwnd": int(hwnd),
+                "pid": int(pid.value),
+                "class": cls.value,
+                "title": str(title_buf.value or ""),
+            })
+            return True
+
+        user32.EnumWindows(callback, 0)
+        if windows:
+            handle["auth_hwnds"] = [row["hwnd"] for row in windows]
+            handle["auth_window_titles"] = [row["title"] for row in windows]
+        return windows
+    except Exception:
+        return []
+
+
+def _auth_window_title_has_returned(handle):
+    """Use the live auth-window title as an immediate YouTube return signal.
+
+    Chromium can postpone History/WAL writes for seconds even though the visible
+    tab has already reached YouTube.  The Google account page itself does not
+    carry a YouTube window title, so for youtube.com returns the live HWND title
+    is a safe, zero-disk-lag completion signal.  Other sites continue using the
+    cookie/history fallbacks.
+    """
+    if not isinstance(handle, dict):
+        return False
+    return_url = str(handle.get("return_url") or "")
+    try:
+        host = (urlsplit(return_url).hostname or "").lower().removeprefix("www.")
+    except Exception:
+        return False
+    if host not in {"youtube.com", "music.youtube.com"}:
+        return False
+    launched_at = float(handle.get("launched_monotonic") or 0.0)
+    # v10.5.69: the live HWND belongs to the dedicated auth launch, so once its
+    # title has actually become YouTube there is no benefit in holding the
+    # authenticated window on screen for nearly half a second. Keep only a
+    # tiny startup guard against a transient title inherited during window
+    # creation.
+    if launched_at and (time.monotonic() - launched_at) < 0.12:
+        return False
+    windows = _standalone_auth_window_snapshot(handle)
+    for row in windows:
+        title = str(row.get("title") or "").strip().casefold()
+        if "youtube" in title:
+            handle["google_auth_return_hwnd"] = int(row.get("hwnd") or 0)
+            handle["google_auth_return_title"] = str(row.get("title") or "")
+            return True
+    return False
+
+
+def _request_windows_hwnd_close(hwnds, *, synchronous=False, system_close=False):
+    """Close specific HWNDs cooperatively, without depending on PID discovery."""
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        WM_CLOSE = 0x0010
+        WM_SYSCOMMAND = 0x0112
+        SC_CLOSE = 0xF060
+        SMTO_ABORTIFHUNG = 0x0002
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+        ]
+        user32.PostMessageW.restype = wintypes.BOOL
+        user32.SendMessageTimeoutW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+            wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t),
+        ]
+        user32.SendMessageTimeoutW.restype = ctypes.c_size_t
+        requested = []
+        for value in hwnds or []:
+            try:
+                hwnd = wintypes.HWND(int(value))
+            except Exception:
+                continue
+            if not user32.IsWindow(hwnd):
+                continue
+            sent = False
+            if synchronous:
+                result = ctypes.c_size_t()
+                if system_close:
+                    try:
+                        sent = bool(user32.SendMessageTimeoutW(
+                            hwnd, WM_SYSCOMMAND, SC_CLOSE, 0,
+                            SMTO_ABORTIFHUNG, 900, ctypes.byref(result),
+                        ))
+                    except Exception:
+                        sent = False
+                if not sent:
+                    try:
+                        sent = bool(user32.SendMessageTimeoutW(
+                            hwnd, WM_CLOSE, 0, 0,
+                            SMTO_ABORTIFHUNG, 900, ctypes.byref(result),
+                        ))
+                    except Exception:
+                        sent = False
+            else:
+                try:
+                    sent = bool(user32.PostMessageW(hwnd, WM_CLOSE, 0, 0))
+                except Exception:
+                    sent = False
+            if sent:
+                requested.append(int(value))
+        return requested
+    except Exception:
+        return []
+
+def _snapshot_google_auth_cookie_state(profile):
+    """Return a stable fingerprint of Google auth cookies in a Chromium profile.
+
+    ``None`` means the live Cookies database could not be read at all. An empty
+    dict is a successful read with no recognized authenticated Google cookies.
+    Keeping those states separate prevents a transient Windows file-sharing
+    failure from repeatedly resetting the sign-in settle timer.
+    """
+    saw_readable_db = False
+    for db_path in _google_cookie_db_candidates(profile):
+        if not db_path.is_file():
+            continue
+        temp_dir = None
+        try:
+            temp_dir, temp_path = _live_sqlite_snapshot(db_path)
+            if temp_path is None or not temp_path.is_file():
+                continue
+            con = sqlite3.connect(str(temp_path), timeout=0.5)
+            try:
+                rows = con.execute(
+                    "SELECT host_key, name, value, encrypted_value, expires_utc "
+                    "FROM cookies "
+                    "WHERE (host_key LIKE '%.google.com' OR host_key = '.google.com' "
+                    "OR host_key = 'accounts.google.com' OR host_key LIKE '%.youtube.com' "
+                    "OR host_key = '.youtube.com' OR host_key = 'youtube.com')"
+                ).fetchall()
+            finally:
+                con.close()
+            saw_readable_db = True
+
+            snapshot = {}
+            for host, name, value, encrypted, expires in rows:
+                name = str(name or "")
+                if name not in _GOOGLE_AUTH_COOKIE_NAMES:
+                    continue
+                host = str(host or "")
+                plain = str(value or "").encode("utf-8", "replace")
+                encrypted = bytes(encrypted or b"")
+                payload = (
+                    host.encode("utf-8", "replace") + b"\0" +
+                    name.encode("utf-8", "replace") + b"\0" +
+                    plain + b"\0" + encrypted + b"\0" +
+                    str(expires or "").encode("ascii", "replace")
+                )
+                snapshot[(host, name)] = hashlib.sha256(payload).hexdigest()
+            return snapshot
+        except Exception:
+            continue
+        finally:
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+    return {} if saw_readable_db else None
+
+
+def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
+    """Detect settled auth completion from the live HWND, then disk fallbacks.
+
+    The visible auth window is authoritative for YouTube: once its real Win32
+    title has returned to YouTube there is no reason to wait for Chromium to
+    flush History or Cookies. Cookie and History signals remain useful fallback
+    paths for other/older auth transitions.
+    """
+    if not isinstance(handle, dict):
+        return False
+    profile = str(handle.get("profile") or "")
+    if not profile:
+        return False
+
+    window_signal = None
+    if _auth_window_title_has_returned(handle):
+        window_signal = (
+            "window",
+            int(handle.get("google_auth_return_hwnd") or 0),
+            str(handle.get("google_auth_return_title") or ""),
+        )
+
+    # v10.5.69: the live returned HWND is already the strongest completion
+    # signal we have. It is the exact standalone auth window, it has left the
+    # Google account UI, and its visible title is now YouTube. Close on the
+    # first observation instead of forcing a second 0.55 s settle cycle. Disk
+    # based cookie/history signals keep their conservative settling below.
+    if window_signal is not None:
+        handle["google_auth_success_signal"] = window_signal
+        handle["google_auth_cookie_change_at"] = time.monotonic()
+        return True
+
+    current = None
+    signal = None
+    if signal is None:
+        baseline = handle.get("google_auth_cookie_baseline") or {}
+        current = _snapshot_google_auth_cookie_state(profile)
+        cookie_signal = None
+        if current is not None and current:
+            changed = any(
+                baseline.get(key) != value
+                for key, value in current.items()
+                if key[1] in _GOOGLE_AUTH_COOKIE_NAMES
+            )
+            if changed:
+                cookie_signal = ("cookie", tuple(sorted(current.items())))
+
+        return_signal = None
+        if _auth_navigation_has_returned(handle):
+            return_signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
+        signal = return_signal or cookie_signal
+
+        # The title can flip to YouTube while a slower SQLite fallback is in
+        # progress. Re-sample the live HWND before yielding so that transition
+        # is closed in this same detector cycle rather than one poll later.
+        if signal is None and _auth_window_title_has_returned(handle):
+            live_signal = (
+                "window",
+                int(handle.get("google_auth_return_hwnd") or 0),
+                str(handle.get("google_auth_return_title") or ""),
+            )
+            handle["google_auth_success_signal"] = live_signal
+            handle["google_auth_cookie_change_at"] = time.monotonic()
+            return True
+
+    if signal is None:
+        handle["google_auth_success_signal"] = None
+        handle["google_auth_cookie_change_at"] = None
+        return False
+
+    now = time.monotonic()
+    if handle.get("google_auth_success_signal") != signal:
+        handle["google_auth_success_signal"] = signal
+        handle["google_auth_cookie_change_at"] = now
+        if current is not None:
+            handle["google_auth_cookie_last_snapshot"] = dict(current)
+        return False
+
+    changed_at = handle.get("google_auth_cookie_change_at")
+    if changed_at is None:
+        handle["google_auth_cookie_change_at"] = now
+        return False
+    required_settle = max(0.8, float(settle_seconds))
+    return (now - float(changed_at)) >= required_settle
+
+
+def _request_windows_window_close(pids, *, synchronous: bool = False, system_close: bool = False):
+    """Ask every top-level window owned by *pids* to close normally.
+
+    ``WM_CLOSE`` is the same cooperative shutdown path used by a window's X
+    button.  The synchronous mode uses ``SendMessageTimeout`` so Chromium gets
+    a bounded chance to process the close before Tekzite continues.  No process
+    termination happens here; preserving Chromium's clean-exit bookkeeping is
+    essential because this profile is reopened immediately after Google auth.
+    """
+    if os.name != "nt":
+        return []
+    pid_set = {int(pid) for pid in (pids or []) if int(pid or 0) > 0}
+    if not pid_set:
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        EnumWindowsProc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+        )
+        WM_CLOSE = 0x0010
+        WM_SYSCOMMAND = 0x0112
+        SC_CLOSE = 0xF060
+        SMTO_ABORTIFHUNG = 0x0002
+        requested = []
+
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+        ]
+        user32.PostMessageW.restype = wintypes.BOOL
+        user32.SendMessageTimeoutW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+            wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t),
+        ]
+        user32.SendMessageTimeoutW.restype = ctypes.c_size_t
+
+        @EnumWindowsProc
+        def callback(hwnd, lparam):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value) not in pid_set:
+                return True
+
+            sent = False
+            if synchronous:
+                result = ctypes.c_size_t()
+                if system_close:
+                    try:
+                        sent = bool(user32.SendMessageTimeoutW(
+                            hwnd, WM_SYSCOMMAND, SC_CLOSE, 0,
+                            SMTO_ABORTIFHUNG, 700, ctypes.byref(result),
+                        ))
+                    except Exception:
+                        sent = False
+                if not sent:
+                    try:
+                        sent = bool(user32.SendMessageTimeoutW(
+                            hwnd, WM_CLOSE, 0, 0,
+                            SMTO_ABORTIFHUNG, 700, ctypes.byref(result),
+                        ))
+                    except Exception:
+                        sent = False
+            else:
+                try:
+                    sent = bool(user32.PostMessageW(hwnd, WM_CLOSE, 0, 0))
+                except Exception:
+                    sent = False
+
+            if sent:
+                requested.append(int(hwnd))
+            return True
+
+        user32.EnumWindows(callback, 0)
+        return requested
+    except Exception:
+        return []
+
+
+def close_standalone_auth_chromium(handle, force: bool = False):
+    """Close the standalone auth browser without dirtying Chromium's profile.
+
+    ``force`` now means a stronger *cooperative* close (SC_CLOSE/WM_CLOSE with a
+    timeout), not ``taskkill /F``.  A forced process termination was the reason
+    Chromium later displayed "wasn't shut down correctly" and offered to
+    restore pages after a successful Google login.
+    """
+    if not isinstance(handle, dict) or os.name != "nt":
+        return False
+    pids = {
+        int(pid) for pid in (handle.get("browser_pids") or [])
+        if int(pid or 0) > 0
+    }
+    profile = str(handle.get("profile") or "")
+    if profile:
+        try:
+            pids.update(int(pid) for pid in _profile_chromium_pids(profile))
+        except Exception:
+            pass
+    launch_pid = int(handle.get("launch_pid") or 0)
+    if launch_pid:
+        pids.add(launch_pid)
+
+    handle["browser_pids"] = sorted(pids)
+
+    # Prefer the exact visible HWND captured for this auth launch. This avoids
+    # depending on Chromium's process model after account redirects and makes
+    # the close target identical to the window the user sees on screen.
+    windows = _standalone_auth_window_snapshot(handle)
+    hwnds = [
+        int(row.get("hwnd") or 0) for row in windows
+        if int(row.get("hwnd") or 0) > 0
+    ]
+    if not hwnds:
+        hwnds = [
+            int(hwnd) for hwnd in (handle.get("auth_hwnds") or [])
+            if int(hwnd or 0) > 0
+        ]
+    closed = _request_windows_hwnd_close(
+        hwnds, synchronous=bool(force), system_close=bool(force)
+    ) if hwnds else []
+    if not closed and pids:
+        closed = _request_windows_window_close(
+            pids, synchronous=bool(force), system_close=bool(force)
+        )
+    if not closed:
+        return False
+
+    handle["auto_close_requested"] = True
+    handle.setdefault("auto_close_requested_at", time.monotonic())
+    if force:
+        handle["auto_close_cooperative_escalated"] = True
+        # Give Chromium a short bounded interval to flush cookies/preferences
+        # and release the profile after the synchronous close request.
+        deadline = time.monotonic() + 2.4
+        while time.monotonic() < deadline:
+            try:
+                if profile and not _profile_chromium_pids(profile):
+                    break
+            except Exception:
+                break
+            time.sleep(0.06)
+    return True
+
+
+
+def _close_embedded_chromium_cleanly_for_auth_unlocked(timeout: float = 6.0):
+    """Release Tekzite's shared Chromium profile through Browser.close.
+
+    Google auth temporarily reopens the same profile in a normal Chromium
+    window.  Killing the hidden DWM source process with taskkill made Chromium
+    record a crash, which surfaced as a "restore pages" bubble in the auth
+    window.  This handoff path therefore refuses to force-kill the profile.
+    """
+    session = _EDGE_SESSION
+    if not session:
+        return True
+
+    profile = str(session.get("profile") or "")
+    process = session.get("process")
+    close_requested = False
+
+    # Browser.close is Chromium's own graceful browser-shutdown primitive.  It
+    # flushes preferences/cookies and marks the profile as exited cleanly.
+    try:
+        _browser_cdp_call(session, "Browser.close", {}, timeout=1.4)
+        close_requested = True
+    except Exception:
+        # Browser.close can tear down the websocket before a reply arrives, so
+        # check whether the browser is already on its way out before falling
+        # back to the native close path.
+        try:
+            close_requested = not bool(profile and _profile_chromium_pids(profile))
+        except Exception:
+            close_requested = False
+
+    if not close_requested and os.name == "nt":
+        pids = []
+        try:
+            if profile:
+                pids.extend(_profile_chromium_pids(profile))
+        except Exception:
+            pass
+        try:
+            if process is not None and getattr(process, "pid", None):
+                pids.append(int(process.pid))
+        except Exception:
+            pass
+        close_requested = bool(_request_windows_window_close(
+            pids, synchronous=True, system_close=True
+        ))
+
+    deadline = time.monotonic() + max(2.0, float(timeout))
+    native_retry_at = time.monotonic() + 1.6
+    while time.monotonic() < deadline:
+        try:
+            live_profile_pids = list(_profile_chromium_pids(profile)) if profile else []
+        except Exception:
+            live_profile_pids = []
+        try:
+            process_alive = bool(process is not None and process.poll() is None)
+        except Exception:
+            process_alive = False
+        if not live_profile_pids and not process_alive:
+            # Reuse the normal bookkeeping cleanup now that the process is gone;
+            # its termination branch cannot fire once poll() reports exit.
+            _close_embedded_chromium_unlocked(clear_profile=False)
+            return True
+
+        if os.name == "nt" and time.monotonic() >= native_retry_at:
+            retry_pids = list(live_profile_pids)
+            try:
+                if process_alive and getattr(process, "pid", None):
+                    retry_pids.append(int(process.pid))
+            except Exception:
+                pass
+            _request_windows_window_close(
+                retry_pids, synchronous=True, system_close=True
+            )
+            native_retry_at = time.monotonic() + 1.8
+        time.sleep(0.07)
+
+    # Deliberately do not taskkill here. A dirty shutdown is worse than failing
+    # the auth handoff because it guarantees Chromium's crash-recovery prompt on
+    # the next launch and risks losing the just-written sign-in state.
+    return False
+
+
+def _standalone_auth_window_geometry():
+    """Return a centered, guaranteed-visible rectangle on the primary work area."""
+    default = (80, 80, 1200, 820)
+    if os.name != "nt":
+        return default
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG), ("top", wintypes.LONG),
+                ("right", wintypes.LONG), ("bottom", wintypes.LONG),
+            ]
+
+        rect = RECT()
+        SPI_GETWORKAREA = 0x0030
+        if not ctypes.windll.user32.SystemParametersInfoW(
+            SPI_GETWORKAREA, 0, ctypes.byref(rect), 0
+        ):
+            return default
+
+        work_w = max(640, int(rect.right - rect.left))
+        work_h = max(480, int(rect.bottom - rect.top))
+        width = min(1280, max(900, work_w - 120))
+        height = min(900, max(650, work_h - 120))
+        width = min(width, work_w)
+        height = min(height, work_h)
+        x = int(rect.left + max(0, (work_w - width) // 2))
+        y = int(rect.top + max(0, (work_h - height) // 2))
+        return (x, y, width, height)
+    except Exception:
+        return default
+
+
+def _force_standalone_auth_window_onscreen(pids, geometry):
+    """Move Chromium's real top-level auth window into the visible work area."""
+    if os.name != "nt":
+        return False
+    pid_set = {int(pid) for pid in (pids or []) if int(pid or 0) > 0}
+    if not pid_set:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetWindow.restype = wintypes.HWND
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT,
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+
+        GW_OWNER = 4
+        SWP_NOACTIVATE = 0x0010
+        SWP_SHOWWINDOW = 0x0040
+        HWND_TOP = wintypes.HWND(0)
+        x, y, width, height = map(int, geometry)
+        moved = []
+
+        @EnumWindowsProc
+        def callback(hwnd, lparam):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value) not in pid_set:
+                return True
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            if user32.GetWindow(hwnd, GW_OWNER):
+                return True
+            if user32.SetWindowPos(
+                hwnd, HWND_TOP, x, y, width, height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            ):
+                moved.append(int(hwnd))
+            return True
+
+        user32.EnumWindows(callback, 0)
+        return bool(moved)
+    except Exception:
+        return False
+
+
+def start_standalone_auth_chromium(url: str, return_url: str = ""):
+    """Launch a normal, visible Chromium window for authentication.
+
+    The window shares Tekzite's persistent web profile but deliberately has no
+    remote-debugging port, no CDP controller and no --app mode.  The returned
+    handle tracks the actual profile-owning browser PID(s), so a launcher handoff
+    cannot make Tekzite restart its embedded helper while auth is still open.
+    """
+    if os.name != "nt":
+        raise RuntimeError(
+            "Standalone authentication handoff is currently implemented for Windows"
+        )
+
+    target_url = str(url or "").strip()
+    parts = urlsplit(target_url)
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        raise ValueError("Authentication handoff requires a normal http/https URL")
+
+    with _EDGE_SESSION_LOCK:
+        session = _EDGE_SESSION or {}
+        executable = str(session.get("executable") or "")
+        profile = str(session.get("profile") or _persistent_edge_profile_dir())
+        if not executable:
+            executable = next(iter(_chromium_candidates()), "")
+        if not executable or not os.path.isfile(executable):
+            raise RuntimeError("No Chromium executable is available for authentication")
+
+        # Authentication reuses Tekzite's web profile, so hand it over only
+        # after Chromium has performed a clean Browser.close. Force-killing the
+        # DWM source here sets Chromium's crash bit and causes the restore-pages
+        # prompt visible after login.
+        if not _close_embedded_chromium_cleanly_for_auth_unlocked(timeout=6.0):
+            raise RuntimeError(
+                "Chromium did not release the Tekzite profile cleanly for sign-in"
+            )
+
+        if _profile_chromium_pids(profile):
+            raise RuntimeError(
+                "Chromium still owns the Tekzite profile after graceful sign-in handoff"
+            )
+
+        _clear_devtools_active_port(profile)
+        _clear_chromium_profile_locks(profile)
+        # Heal crash metadata left by older force-kill auth handoffs before the
+        # standalone browser ever reads the profile. This removes the persistent
+        # "restore pages" bubble even for users upgrading from v10.5.63.
+        _mark_chromium_profile_exited_cleanly(profile)
+        google_auth_cookie_baseline = _snapshot_google_auth_cookie_state(profile) or {}
+        history_visit_baseline = _snapshot_chromium_latest_visit(profile)
+
+        x, y, width, height = _standalone_auth_window_geometry()
+        command = [
+            executable,
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-mode",
+            # Belt-and-suspenders protection for a profile that still carries
+            # crash state Chromium keeps somewhere outside Preferences.
+            "--disable-session-crashed-bubble",
+            f"--window-position={x},{y}",
+            f"--window-size={width},{height}",
+            "--new-window",
+            target_url,
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            startupinfo=None,
+        )
+
+        # Chromium may keep this launcher as the browser process or hand the
+        # command to another process. Wait for the stable profile owner(s).
+        launched_at = time.monotonic()
+        browser_pids = []
+        stable_rounds = 0
+        last_pids = []
+        while time.monotonic() - launched_at < 4.0:
+            current = sorted(set(_profile_chromium_pids(profile)))
+            if current:
+                if current == last_pids:
+                    stable_rounds += 1
+                else:
+                    stable_rounds = 0
+                    last_pids = list(current)
+                browser_pids = list(current)
+
+                launcher_alive = process.poll() is None
+                # If the launcher handed off, require the replacement PID list
+                # to settle. If it stayed alive, a couple of stable samples are
+                # enough to know the real browser PID.
+                if stable_rounds >= (2 if launcher_alive else 3):
+                    break
+            elif process.poll() is not None and time.monotonic() - launched_at > 1.0:
+                # Give a handoff a little time to publish the replacement process.
+                pass
+            time.sleep(0.10)
+
+        if not browser_pids and process.poll() is None:
+            browser_pids = [int(process.pid)]
+
+        # Command-line geometry normally wins, but the shared profile remembers
+        # Tekzite's historical -32000 DWM source placement. Force the actual
+        # top-level window on-screen after Chromium has created it as well.
+        for _ in range(8):
+            if _force_standalone_auth_window_onscreen(browser_pids, (x, y, width, height)):
+                break
+            time.sleep(0.10)
+
+        launch_handle = {
+            "process": process,
+            "launch_pid": int(process.pid),
+            "browser_pids": list(browser_pids),
+            "profile": profile,
+            "executable": executable,
+            "url": target_url,
+            "return_url": str(return_url or ""),
+            "window_geometry": (x, y, width, height),
+            "google_auth_cookie_baseline": dict(google_auth_cookie_baseline),
+            "history_visit_baseline": tuple(history_visit_baseline) if history_visit_baseline else None,
+            "google_auth_cookie_last_snapshot": dict(google_auth_cookie_baseline),
+            "google_auth_cookie_change_at": None,
+            "auto_close_requested": False,
+            "command_flags": [arg for arg in command[1:] if str(arg).startswith("--")],
+            "remote_debugging": False,
+            "cdp_control": False,
+            "launched_monotonic": time.monotonic(),
+            "auth_hwnds": [],
+            "auth_window_titles": [],
+        }
+        # Capture the actual top-level HWND immediately. Subsequent auth
+        # completion and close requests can then target the exact window the
+        # user is looking at instead of rediscovering it from process state.
+        _standalone_auth_window_snapshot(launch_handle)
+        return launch_handle
+
+
+def standalone_auth_chromium_running(handle):
+    """Return True while the real auth browser, not merely its launcher, exists."""
+    if not isinstance(handle, dict):
+        return False
+
+    profile = str(handle.get("profile") or "")
+    if profile:
+        try:
+            live_profile_pids = sorted(set(int(pid) for pid in _profile_chromium_pids(profile)))
+            if live_profile_pids:
+                handle["browser_pids"] = live_profile_pids
+        except Exception:
+            pass
+
+    pids = []
+    for pid in handle.get("browser_pids") or []:
+        try:
+            if _pid_is_alive(int(pid)):
+                pids.append(int(pid))
+        except Exception:
+            pass
+    if pids:
+        handle["browser_pids"] = pids
+        return True
+
+    process = handle.get("process")
+    try:
+        if process is not None and process.poll() is None:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def wait_for_standalone_auth_chromium_release(handle, timeout: float = 6.0):
+    """Wait for auth Chromium to release Tekzite's shared profile completely."""
+    if not isinstance(handle, dict):
+        return True
+
+    profile = str(handle.get("profile") or "")
+    deadline = time.monotonic() + max(1.0, float(timeout))
+    while time.monotonic() < deadline:
+        if standalone_auth_chromium_running(handle):
+            time.sleep(0.08)
+            continue
+        if profile and _profile_chromium_pids(profile):
+            time.sleep(0.08)
+            continue
+        # Chromium can exit a fraction before its singleton files disappear.
+        if profile and _profile_recovery_needed(profile):
+            time.sleep(0.08)
+            continue
+        return True
+
+    # If no live browser owns the profile anymore, stale singleton crumbs are
+    # safe to remove. Never delete them while a tracked process is alive.
+    if profile and not _profile_chromium_pids(profile):
+        _clear_chromium_profile_locks(profile)
+        return not _profile_recovery_needed(profile)
+    return False
 
 
 def _pick_devtools_page(port, session=None, target_id=None):
@@ -4754,6 +6416,31 @@ def _resize_existing_dwm_thumbnail_fast(session, width: int, height: int):
         return None
 
 
+def detach_embedded_chromium_dwm_thumbnail():
+    """Synchronously unregister Tekzite's DWM thumbnail without killing Chromium."""
+    session = _EDGE_SESSION
+    if not session or os.name != "nt":
+        return False
+    thumb = session.get("dwm_thumbnail_handle")
+    if not thumb:
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+        dwmapi.DwmUnregisterThumbnail.argtypes = [wintypes.HANDLE]
+        dwmapi.DwmUnregisterThumbnail.restype = HRESULT
+        dwmapi.DwmUnregisterThumbnail(wintypes.HANDLE(_hwnd_int(thumb)))
+    except Exception:
+        pass
+    session["dwm_thumbnail_handle"] = None
+    session["dwm_thumbnail_registered"] = False
+    session["dwm_thumbnail_source"] = None
+    session["dwm_thumbnail_destination"] = None
+    session["dwm_thumbnail_visible"] = False
+    return True
+
+
 def request_embedded_chromium_dwm_recrop():
     """Force the next DWM resize through the full crop-discovery path."""
     if not _EDGE_SESSION:
@@ -5501,6 +7188,11 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
     session = _start_persistent_chromium_session(
         launch_geometry=launch_geometry, launch_url=bootstrap_launch_url
     )
+    # v10.5.68: these are per-navigation facts, not persistent-session facts.
+    # Leaving the hot-reuse marker set after one refresh made a later new-target
+    # or recovery navigation inherit the wrong presentation path.
+    session["hot_navigation_reused_native_surface"] = False
+    session["hot_navigation_surface_probe_suppressed"] = False
     hot_native_navigation = bool(
         attach_native
         and session_was_running
@@ -5579,6 +7271,19 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
             session["presentation_mode"] = "native"
             session["embedded_after_first_frame"] = True
             session["hot_navigation_reused_native_surface"] = True
+            # v10.5.68: attached/first-frame diagnostics belong to the cold frame
+            # gate. This hot path returns the same persistent session dictionary,
+            # so leaving those values behind made the UI mistake previous-page
+            # evidence for proof about the new renderer and run a premature screen
+            # probe during the compositor swap.
+            for stale_key in (
+                "attached_frame_visual", "attached_frame_text_len",
+                "attached_frame_nodes", "first_frame_text_len",
+                "visible_surface_blank", "visible_surface_span",
+                "visible_surface_dominant_ratio",
+            ):
+                session.pop(stale_key, None)
+            session["hot_navigation_surface_probe_suppressed"] = True
             return session
         session["presentation_mode"] = "native"
         # A tab that previously used the CDP software surface may still have a
@@ -5591,6 +7296,26 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
         attach_embedded_chromium(parent_hwnd, width, height)
         session["embedded_after_first_frame"] = True
         attached_ready = _wait_for_attached_first_frame(session, timeout=2.0)
+        # v10.5.67: the first DWM registration can be valid a fraction before
+        # Chromium's replacement RenderWidgetHost reaches its final geometry.
+        # A single failed 2 s gate used to fall through and let the UI reveal
+        # whatever DComp backing surface happened to exist, which is the same
+        # race behind intermittent "Preparing Chromium frame" / black startup.
+        # Cold bootstrap is hidden, so one bounded full recrop + readiness retry
+        # is safe and far cheaper than exposing a broken frame and recovering
+        # after the user can already see it.
+        if not attached_ready:
+            session["attached_frame_retry_attempted"] = True
+            try:
+                session["dwm_force_full_recrop"] = True
+                resize_embedded_chromium(width, height)
+            except Exception as exc:
+                session["attached_frame_retry_error"] = type(exc).__name__
+            attached_ready = _wait_for_attached_first_frame(session, timeout=2.0)
+            session["attached_frame_retry_succeeded"] = bool(attached_ready)
+        else:
+            session["attached_frame_retry_attempted"] = False
+            session["attached_frame_retry_succeeded"] = True
         if attached_ready:
             session["first_frame_ready"] = True
             session["first_frame_committed"] = True
@@ -6681,17 +8406,35 @@ def _refresh_dwm_input_metrics(session, target_id=None, timeout: float = 1.0):
         dpr = float(value.get("dpr") or 1.0)
         vv = float(value.get("vv") or 1.0)
 
+        # v10.5.70: input must follow the pixels the user can actually see.
+        # After maximize, the DWM destination/source crop can already have the
+        # new viewport while the cached RenderWidgetHost measurement still
+        # describes the pre-maximize window. Using that stale size makes text
+        # selection and clicks drift away from the visible cursor. The committed
+        # 1:1 DWM thumbnail contract is therefore authoritative for pointer
+        # scaling; live render-host geometry remains a diagnostic fallback.
+        visible_size = session.get("dwm_thumbnail_pixel_contract")
         render_size = (
             session.get("dwm_render_size_after_chrome_expand")
             or session.get("dwm_source_render_size")
             or session.get("render_host_embedded_size")
         )
         rw = rh = 0.0
-        if render_size:
+        metric_source = "devicePixelRatio"
+        for candidate, source_name in (
+            (visible_size, "dwm-visible-contract/css-viewport"),
+            (render_size, "render-host/css-viewport"),
+        ):
+            if not candidate:
+                continue
             try:
-                rw, rh = float(render_size[0]), float(render_size[1])
+                cw, ch = float(candidate[0]), float(candidate[1])
             except Exception:
-                rw = rh = 0.0
+                continue
+            if cw > 0.0 and ch > 0.0:
+                rw, rh = cw, ch
+                metric_source = source_name
+                break
 
         sx = (rw / iw) if rw > 0.0 and iw > 0.0 else 0.0
         sy = (rh / ih) if rh > 0.0 and ih > 0.0 else 0.0
@@ -6723,11 +8466,26 @@ def _refresh_dwm_input_metrics(session, target_id=None, timeout: float = 1.0):
         session["dwm_input_render_pixels"] = (rw, rh)
         session["dwm_input_css_scale_x"] = float(sx)
         session["dwm_input_css_scale_y"] = float(sy)
-        session["dwm_input_scale_source"] = "render-host/css-viewport" if rw and rh and iw and ih else "devicePixelRatio"
+        session["dwm_input_scale_source"] = metric_source if rw and rh and iw and ih else "devicePixelRatio"
         session["dwm_input_metrics_error"] = None
         return float(sx), float(sy)
     except Exception as exc:
         session["dwm_input_metrics_error"] = f"{type(exc).__name__}: {exc}"
+        return get_embedded_chromium_input_scale()
+
+
+def refresh_embedded_chromium_dwm_input_metrics(target_id=None, timeout: float = 0.8):
+    """Refresh the DWM native-pixel -> CSS hit-test contract after a viewport jump."""
+    session = _EDGE_SESSION or {}
+    if not session or session.get("presentation_mode") == "software":
+        return get_embedded_chromium_input_scale()
+    try:
+        return _refresh_dwm_input_metrics(
+            session,
+            target_id=target_id or session.get("target_id"),
+            timeout=max(0.25, float(timeout)),
+        )
+    except Exception:
         return get_embedded_chromium_input_scale()
 
 
@@ -7281,9 +9039,34 @@ def embedded_chromium_history(delta: int):
             pass
 
 
-def close_embedded_chromium(clear_profile=False):
-    """Serialize shutdown against concurrent Chromium bootstrap/recovery."""
+def close_embedded_chromium(clear_profile=False, graceful=False, timeout=6.0):
+    """Serialize shutdown against concurrent Chromium bootstrap/recovery.
+
+    Normal application exit should ask Chromium to close itself so its cookie
+    store, local storage and profile preferences are durably flushed.  The old
+    unconditional ``taskkill /F`` path could discard a just-completed logout
+    and make Google/YouTube appear signed back in on the next launch.  Recovery
+    callers keep the historical force-close behavior unless they explicitly
+    request ``graceful=True``.
+    """
     with _EDGE_SESSION_LOCK:
+        if graceful and _EDGE_SESSION:
+            session = _EDGE_SESSION
+            profile = str(session.get("profile") or "")
+            if _close_embedded_chromium_cleanly_for_auth_unlocked(timeout=timeout):
+                if clear_profile and profile:
+                    removed = bool(remove_profile_tree(profile))
+                    try:
+                        _COOKIE_JAR.clear()
+                        fetch_bytes.cache_clear()
+                        fetch_document.cache_clear()
+                    except Exception:
+                        pass
+                    return removed
+                return True
+            # A truly hung helper must not keep Tekzite alive forever.  Only
+            # after the bounded graceful close has failed do we fall back to
+            # the existing teardown path.
         return _close_embedded_chromium_unlocked(clear_profile=clear_profile)
 
 

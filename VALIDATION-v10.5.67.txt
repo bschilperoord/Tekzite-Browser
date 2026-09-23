@@ -1,0 +1,21 @@
+Tekzite Browser v10.5.67 validation
+
+Focus: intermittent black refresh + Chromium first-frame preparation race
+
+Automated validation:
+- Python source compilation: PASS
+- Current Python regression suite: 458/458 PASS
+- Hot same-target native navigation preserves the mapped DWM surface: PASS
+- Hot navigation completion bypasses the fixed timed DWM re-reveal: PASS
+- Cold native bootstrap performs one hidden full-recrop/readiness retry: PASS
+- Existing DWM white-surface, taskbar restore, resize and auth regressions: PASS
+- Release metadata synchronization: PASS
+- Chromium extension JavaScript syntax checks: PASS
+- Environment doctor: no blocking setup issues (full DWM/runtime smoke test remains Windows-only)
+
+Windows smoke test target:
+1. Open a normal Chromium-backed page in Tekzite.
+2. Refresh repeatedly with F5/Ctrl+R and verify the last good page remains visible while the new document begins painting.
+3. Verify no intermittent full black page appears after refresh.
+4. Cold-start Tekzite several times and verify “Preparing Chromium frame” always transitions into a usable page without exposing a dead black DWM destination.
+5. Repeat maximize/restore and taskbar minimize/restore to verify the existing DWM recovery paths remain intact.

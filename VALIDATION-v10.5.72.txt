@@ -1,0 +1,18 @@
+Tekzite Browser v10.5.72 validation
+
+Focus: process-level live socket visibility with hostname enrichment.
+
+Validated in this build:
+- Tools -> Network Connections opens the new Live Socket View.
+- Windows owner-PID tables are read with GetExtendedTcpTable/GetExtendedUdpTable for TCP/UDP and IPv4/IPv6.
+- Socket rows are filtered to Tekzite plus its descendant Chromium/network-helper processes instead of globally matching every Chromium installation.
+- Role/process, PID, protocol/family, local endpoint, hostname, remote endpoint, TCP state and route classification are exposed.
+- Direct public sockets outside Tekzite Network are labeled Direct external.
+- Active helper upstreams are correlated with the exact requested hostname in RAM only; URL paths, headers, query strings and page contents remain absent.
+- Optional reverse DNS runs asynchronously and is bounded so hostname enrichment cannot block the socket dashboard.
+- Live UI sampling cadence is 250 ms. UDP remote endpoints are not invented because Windows' UDP owner table does not expose them.
+- Focused v10.5.71/v10.5.72 socket/ledger regressions: PASS.
+- Release metadata synchronized to v10.5.72.
+- Full current Python regression suite: 487/487 PASS.
+- Chromium extension JavaScript syntax checks: PASS.
+- Environment doctor: no blocking setup issues; Windows-only socket/DWM behavior still requires real Windows smoke testing.

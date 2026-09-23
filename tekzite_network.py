@@ -7,6 +7,7 @@ TLS remains end-to-end: CONNECT tunnels bytes without decrypting HTTPS.
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import ipaddress
@@ -41,6 +42,144 @@ _PRIVACY_STATS = {
     "ads_blocked": 0,
     "https_upgrades": 0,
 }
+
+# v10.5.71: privacy-preserving, current-session connection overview.
+# Only destination host/port/protocol and aggregate status live in RAM. URL
+# paths, query strings, headers and payloads are intentionally never retained.
+INSTANCE_TOKEN = ""
+CONNECTION_OVERVIEW_MAX_ROWS = 512
+_CONNECTION_OVERVIEW_LOCK = threading.RLock()
+_CONNECTION_OVERVIEW_STARTED_AT = time.time()
+_CONNECTION_OVERVIEW_ROWS = {}
+# Active upstream sockets are kept only in RAM so the browser UI can attach the
+# original requested hostname to the exact Windows TCP socket.  This avoids
+# misleading PTR names for CDN endpoints and never stores URL paths/content.
+_ACTIVE_UPSTREAMS = {}
+
+
+def _connection_overview_payload():
+    with _CONNECTION_OVERVIEW_LOCK:
+        rows = sorted(
+            (dict(row) for row in _CONNECTION_OVERVIEW_ROWS.values()),
+            key=lambda row: (int(row.get("active", 0) or 0) > 0, float(row.get("last_seen", 0) or 0)),
+            reverse=True,
+        )
+        return {
+            "started_at": float(_CONNECTION_OVERVIEW_STARTED_AT),
+            "updated_at": time.time(),
+            "connections": rows[:CONNECTION_OVERVIEW_MAX_ROWS],
+            "active_upstreams": [dict(row) for row in _ACTIVE_UPSTREAMS.values()],
+        }
+
+
+def _socket_endpoint_parts(value):
+    try:
+        address = str(value[0]).split("%", 1)[0]
+        port = int(value[1])
+        return address, port
+    except Exception:
+        return "", 0
+
+
+def _register_active_upstream(sock: socket.socket, host: str, protocol: str):
+    """Associate one live helper socket with the requested host, RAM-only."""
+    try:
+        local_address, local_port = _socket_endpoint_parts(sock.getsockname())
+        remote_address, remote_port = _socket_endpoint_parts(sock.getpeername())
+    except Exception:
+        return None
+    if not local_port or not remote_port:
+        return None
+    key = (local_address, local_port, remote_address, remote_port)
+    row = {
+        "host": str(host or "").strip().rstrip(".").lower()[:253],
+        "protocol": str(protocol or "TCP").upper()[:16],
+        "local_address": local_address[:128],
+        "local_port": local_port,
+        "remote_address": remote_address[:128],
+        "remote_port": remote_port,
+        "opened_at": time.time(),
+    }
+    with _CONNECTION_OVERVIEW_LOCK:
+        _ACTIVE_UPSTREAMS[key] = row
+    return key
+
+
+def _unregister_active_upstream(key):
+    if key is None:
+        return
+    with _CONNECTION_OVERVIEW_LOCK:
+        _ACTIVE_UPSTREAMS.pop(key, None)
+
+
+def _record_connection(host: str, port: int, protocol: str, status: str, *, active_delta: int = 0, count: bool = True):
+    """Record one destination in RAM without retaining URL/content information."""
+    host = str(host or "").strip().rstrip(".").lower()[:253]
+    if not host:
+        return
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 0
+    protocol = str(protocol or "TCP").upper()[:16]
+    status = str(status or "unknown").lower()[:32]
+    key = (host, port, protocol, status)
+    now = time.time()
+    with _CONNECTION_OVERVIEW_LOCK:
+        row = _CONNECTION_OVERVIEW_ROWS.get(key)
+        if row is None:
+            if len(_CONNECTION_OVERVIEW_ROWS) >= CONNECTION_OVERVIEW_MAX_ROWS:
+                inactive = [
+                    (k, r) for k, r in _CONNECTION_OVERVIEW_ROWS.items()
+                    if int(r.get("active", 0) or 0) <= 0
+                ]
+                if inactive:
+                    oldest_key, _ = min(inactive, key=lambda item: float(item[1].get("last_seen", 0) or 0))
+                    _CONNECTION_OVERVIEW_ROWS.pop(oldest_key, None)
+            row = {
+                "host": host, "port": port, "protocol": protocol, "status": status,
+                "count": 0, "active": 0, "first_seen": now, "last_seen": now,
+            }
+            _CONNECTION_OVERVIEW_ROWS[key] = row
+        if count:
+            row["count"] = int(row.get("count", 0) or 0) + 1
+            row["last_seen"] = now
+        if active_delta:
+            row["active"] = max(0, int(row.get("active", 0) or 0) + int(active_delta))
+            row["last_seen"] = now
+
+
+def _serve_internal_connection_overview(client: socket.socket, method: str, target: str, headers) -> bool:
+    """Serve the RAM-only ledger to Tekzite Python over the existing proxy port.
+
+    The endpoint is loopback-only and authenticated with the helper's random
+    per-launch instance token. Chromium/web content never receives that token.
+    """
+    if str(method or "").upper() != "GET":
+        return False
+    try:
+        parts = urlsplit(str(target or ""))
+        host = (parts.hostname or "").lower().rstrip(".")
+        path = parts.path or "/"
+    except Exception:
+        return False
+    if host != "tekzite.internal" or path != "/__connections":
+        return False
+    supplied = _header_value(headers, "X-Tekzite-Instance-Token") or ""
+    expected = str(INSTANCE_TOKEN or "")
+    if not expected or not hmac.compare_digest(str(supplied), expected):
+        client.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+        return True
+    payload = json.dumps(_connection_overview_payload(), separators=(",", ":")).encode("utf-8")
+    client.sendall(
+        b"HTTP/1.1 200 OK\r\n"
+        b"Connection: close\r\n"
+        b"Cache-Control: no-store\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii")
+        + payload
+    )
+    return True
 
 # v4.54: browser telemetry is denied in the proxy before DNS or an upstream
 # socket is opened.  This list is deliberately limited to browser/vendor
@@ -184,8 +323,9 @@ def _is_tracker_host(host: str) -> bool:
     return host in TRACKER_HOSTS or any(host.endswith(suffix) for suffix in TRACKER_SUFFIXES)
 
 
-def _deny_tracker(client: socket.socket, host: str, method: str):
+def _deny_tracker(client: socket.socket, host: str, method: str, port: int | None = None):
     _privacy_stat("trackers_blocked")
+    _record_connection(host, port or (443 if str(method).upper() == "CONNECT" else 80), "HTTPS" if str(method).upper() == "CONNECT" else "HTTP", "blocked-tracker")
     _log("tracker_blocked", host=host, method=method)
     client.sendall(
         b"HTTP/1.1 403 Forbidden\r\n"
@@ -210,8 +350,9 @@ def _is_ad_host(host: str) -> bool:
     host = (host or "").strip().rstrip(".").lower()
     return host in ADBLOCK_HOSTS or any(host.endswith(suffix) for suffix in ADBLOCK_SUFFIXES)
 
-def _deny_ad(client: socket.socket, host: str, method: str):
+def _deny_ad(client: socket.socket, host: str, method: str, port: int | None = None):
     _privacy_stat("ads_blocked")
+    _record_connection(host, port or (443 if str(method).upper() == "CONNECT" else 80), "HTTPS" if str(method).upper() == "CONNECT" else "HTTP", "blocked-ad")
     _log("ad_blocked", host=host, method=method)
     client.sendall(
         b"HTTP/1.1 403 Forbidden\r\n"
@@ -232,8 +373,9 @@ def _is_browser_telemetry_host(host: str) -> bool:
     host = (host or "").strip().rstrip(".").lower()
     return host in TELEMETRY_HOSTS or any(host.endswith(suffix) for suffix in TELEMETRY_SUFFIXES)
 
-def _deny_telemetry(client: socket.socket, host: str, method: str):
+def _deny_telemetry(client: socket.socket, host: str, method: str, port: int | None = None):
     _privacy_stat("telemetry_blocked")
+    _record_connection(host, port or (443 if str(method).upper() == "CONNECT" else 80), "HTTPS" if str(method).upper() == "CONNECT" else "HTTP", "blocked-telemetry")
     _log("telemetry_blocked", host=host, method=method)
     client.sendall(
         b"HTTP/1.1 403 Forbidden\r\n"
@@ -535,6 +677,8 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             if not target or len(target) > 16384 or any(ord(ch) < 32 or ord(ch) == 127 for ch in target):
                 raise ValueError("invalid HTTP request target")
             method_upper = method.upper()
+            if _serve_internal_connection_overview(client, method_upper, target, headers):
+                return
             if method_upper == "CONNECT":
                 self._connect_tunnel(client, target)
             else:
@@ -549,21 +693,29 @@ class ProxyHandler(socketserver.BaseRequestHandler):
     def _connect_tunnel(self, client, target):
         host, port = _split_host_port(target, 443)
         if _is_browser_telemetry_host(host):
-            _deny_telemetry(client, host, "CONNECT")
+            _deny_telemetry(client, host, "CONNECT", port)
             return
         if _is_tracker_host(host):
-            _deny_tracker(client, host, "CONNECT")
+            _deny_tracker(client, host, "CONNECT", port)
             return
         if _is_ad_host(host):
-            _deny_ad(client, host, "CONNECT")
+            _deny_ad(client, host, "CONNECT", port)
             return
         _log("connect", host=host, port=port)
-        upstream = _open_upstream_connection(host, port, timeout=CONNECT_TIMEOUT)
+        try:
+            upstream = _open_upstream_connection(host, port, timeout=CONNECT_TIMEOUT)
+        except Exception:
+            _record_connection(host, port, "HTTPS", "failed")
+            raise
+        _record_connection(host, port, "HTTPS", "allowed", active_delta=1)
+        upstream_key = _register_active_upstream(upstream, host, "HTTPS")
         _tune_latency_socket(upstream)
         try:
             client.sendall(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: Tekzite-Network/1\r\n\r\n")
             _relay(client, upstream)
         finally:
+            _unregister_active_upstream(upstream_key)
+            _record_connection(host, port, "HTTPS", "allowed", active_delta=-1, count=False)
             try:
                 upstream.close()
             except Exception:
@@ -585,16 +737,17 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             path = target or "/"
 
         if _is_browser_telemetry_host(host):
-            _deny_telemetry(client, host, method.upper())
+            _deny_telemetry(client, host, method.upper(), port)
             return
         if _is_tracker_host(host):
-            _deny_tracker(client, host, method.upper())
+            _deny_tracker(client, host, method.upper(), port)
             return
         if _is_ad_host(host):
-            _deny_ad(client, host, method.upper())
+            _deny_ad(client, host, method.upper(), port)
             return
         if HTTPS_FIRST and int(port) == 80 and not _is_local_network_host(host):
             _privacy_stat("https_upgrades")
+            _record_connection(host, port, "HTTP", "https-upgraded")
             location_host = host
             if ":" in host and not host.startswith("["):
                 location_host = f"[{host}]"
@@ -609,7 +762,14 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             )
             return
         _log("http", method=method.upper(), host=host, port=port, path=path[:512])
-        upstream = _open_upstream_connection(host, port, timeout=CONNECT_TIMEOUT)
+        protocol = "HTTPS" if int(port) == 443 else "HTTP"
+        try:
+            upstream = _open_upstream_connection(host, port, timeout=CONNECT_TIMEOUT)
+        except Exception:
+            _record_connection(host, port, protocol, "failed")
+            raise
+        _record_connection(host, port, protocol, "allowed", active_delta=1)
+        upstream_key = _register_active_upstream(upstream, host, protocol)
         _tune_latency_socket(upstream)
         upstream.settimeout(IDLE_TIMEOUT)
         try:
@@ -650,6 +810,8 @@ class ProxyHandler(socketserver.BaseRequestHandler):
                     break
                 client.sendall(chunk)
         finally:
+            _unregister_active_upstream(upstream_key)
+            _record_connection(host, port, protocol, "allowed", active_delta=-1, count=False)
             try:
                 upstream.close()
             except Exception:
@@ -696,6 +858,7 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 def main(argv=None):
     global LOG_LEVEL, ALLOW_BROWSER_TELEMETRY, ADBLOCK_ENABLED, ADBLOCK_POLICY
     global TRACKER_BLOCKING, HTTPS_FIRST, PRIVACY_STATS_PATH, _PRIVACY_STATS
+    global INSTANCE_TOKEN, _CONNECTION_OVERVIEW_STARTED_AT, _CONNECTION_OVERVIEW_ROWS, _ACTIVE_UPSTREAMS
     # The helper accepts Chromium on loopback, but it never needs to initiate
     # a loopback connection itself. Its public upstream TCP connections remain
     # unaffected by this process-local policy.
@@ -724,6 +887,10 @@ def main(argv=None):
     HTTPS_FIRST = not bool(args.disable_https_first)
     ADBLOCK_POLICY = args.adblock_policy
     PRIVACY_STATS_PATH = args.privacy_stats
+    INSTANCE_TOKEN = str(args.instance_token or "")
+    _CONNECTION_OVERVIEW_STARTED_AT = time.time()
+    _CONNECTION_OVERVIEW_ROWS = {}
+    _ACTIVE_UPSTREAMS = {}
     _PRIVACY_STATS = {
         "started_at": time.time(),
         "telemetry_blocked": 0,

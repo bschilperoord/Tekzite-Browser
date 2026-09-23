@@ -6,7 +6,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version_1031():
-    assert 'BROWSER_VERSION = "10.5.54"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.73"' in MAIN
 
 
 def test_steady_state_dwm_resize_has_fast_path_without_flush():

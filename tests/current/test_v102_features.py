@@ -13,7 +13,7 @@ EXT = (ROOT / 'chromium_zoom_extension' / 'features.js').read_text(encoding='utf
 
 
 def test_release_is_v1020():
-    assert main.BROWSER_VERSION == '10.5.54'
+    assert main.BROWSER_VERSION == '10.5.73'
 
 
 def test_profile_slug_and_state_root_are_isolated(tmp_path, monkeypatch):

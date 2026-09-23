@@ -9,7 +9,7 @@ NET = Path(net.__file__).read_text(encoding="utf-8")
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.54"
+    assert main.BROWSER_VERSION == "10.5.73"
 
 
 def test_raw_dwm_destination_has_no_visible_debug_caption():

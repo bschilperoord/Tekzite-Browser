@@ -1,6 +1,6 @@
-Place the Windows application icon here as:
+Bundled Tekzite application icons:
 
-    tekzite.ico
+- tekzite.png  -> runtime Tk window icon source
+- tekzite.ico  -> Windows executable / installer icon
 
-The PyInstaller build works without it. The Inno Setup installer currently expects
-this icon, so add it before compiling the installer.
+The Windows build and installer both use these files automatically when present.

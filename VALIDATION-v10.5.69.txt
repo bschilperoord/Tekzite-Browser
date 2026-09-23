@@ -1,0 +1,14 @@
+Tekzite Browser v10.5.69 validation
+
+Focus: faster Google/YouTube auth-window close and durable YouTube sign-out persistence.
+
+Validated in this build:
+- Live returned YouTube HWND/title closes on the first authoritative observation.
+- Auth polling cadence is 70 ms; slower cookie/history fallbacks remain conservative.
+- Live HWND is rechecked after disk fallback work to avoid an extra polling lap.
+- Normal application shutdown requests Chromium Browser.close before force fallback.
+- A successful graceful shutdown does not invoke the force-teardown path.
+- Fresh cookie/profile changes such as YouTube sign-out receive a clean Chromium flush opportunity.
+- Release metadata synchronized to v10.5.69.
+- Current Python regression suite: 471/471 PASS.
+- Environment doctor: no blocking setup issues; Windows DWM/auth behavior requires real Windows smoke test.

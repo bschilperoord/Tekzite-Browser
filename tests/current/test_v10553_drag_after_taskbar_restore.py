@@ -7,7 +7,7 @@ SOURCE = Path(main.__file__).read_text(encoding="utf-8")
 
 
 def test_release_version_is_10553():
-    assert main.BROWSER_VERSION == "10.5.54"
+    assert main.BROWSER_VERSION == "10.5.73"
 
 
 def test_minimize_invalidates_cached_native_drag_hwnd():

@@ -1,0 +1,22 @@
+Tekzite Browser v10.5.64 validation
+
+Focus: clean Google-auth Chromium handoff
+
+- Python compile (main.py + engine/net.py): PASS
+- Current regression suite: 443 tests PASS
+- Mocked Chromium extension feature checks: PASS
+- tools/doctor.py: PASS (Linux warning expected; DWM runtime is Windows-only)
+- tools/sync_version.py 10.5.64 --check: PASS
+
+Regression coverage added:
+- embedded auth handoff uses Browser.close and contains no profile-process termination fallback
+- standalone auth escalation remains cooperative via SC_CLOSE / WM_CLOSE
+- successful auth still schedules the one-shot authenticated return-page refresh
+
+Windows smoke-test target:
+1. Start Tekzite and open YouTube signed out.
+2. Start Google sign-in.
+3. Complete authentication in the visible Chromium window.
+4. Verify the auth window closes itself.
+5. Verify no “Chromium wasn't shut down correctly / restore pages” bubble appears.
+6. Verify Tekzite returns to YouTube already signed in without manual F5.
