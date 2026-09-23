@@ -50,7 +50,17 @@ jobs:
 
       - name: Run real Chromium/CDP Linux smoke
         shell: bash
-        run: xvfb-run -a python tools/linux_smoke.py
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Linux Chromium smoke attempt $attempt/3"
+            if xvfb-run -a python tools/linux_smoke.py; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Chromium/CDP smoke failed after 3 fresh attempts." >&2
+          exit 1
 
       - name: Build Linux x86_64 executable
         shell: bash
