@@ -24,12 +24,11 @@ def main() -> int:
         print("Linux smoke skipped: not running on Linux")
         return 0
 
-    # Hosted Linux runners can expose a distro Chromium wrapper alongside a
-    # directly executable Chrome. Prefer the direct Chrome binary for this
-    # integration smoke, while normal Tekzite desktop discovery remains
-    # Chromium-first unless TEKZITE_CHROMIUM is explicitly set by the user.
+    # Prefer distro Chromium first so CI exercises the same launch path used by
+    # Arch/CachyOS whenever the runner exposes it. Fall back to Chrome only when
+    # no Chromium-family distro binary is available.
     if not os.environ.get("TEKZITE_CHROMIUM"):
-        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        for name in ("chromium", "chromium-browser", "ungoogled-chromium", "google-chrome", "google-chrome-stable"):
             found = shutil.which(name)
             if found:
                 os.environ["TEKZITE_CHROMIUM"] = found

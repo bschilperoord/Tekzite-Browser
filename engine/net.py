@@ -5110,6 +5110,21 @@ def _apply_privacy_profile_preferences(profile_dir):
         pass
 
 
+def _chromium_launch_target_args(launch_url=None, platform_name=None):
+    """Return the Chromium argument that creates Tekzite's initial page target.
+
+    Windows keeps app mode because the native DWM path expects Chromium's app
+    window.  Linux headless mode must use a positional URL: some Chromium builds
+    expose only extension/service-worker targets when --app is combined with
+    --headless=new, leaving Tekzite's CDP compositor with no debuggable page.
+    """
+    target = str(launch_url or "about:blank")
+    platform_name = os.name if platform_name is None else str(platform_name)
+    if platform_name == "nt":
+        return [f"--app={target}"]
+    return [target]
+
+
 def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_url=None):
     """Serialize Chromium bootstrap/recovery so only one helper can win."""
     with _EDGE_SESSION_LOCK:
@@ -5247,7 +5262,6 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
                     f"--window-position={launch_x},{launch_y}",
                     f"--window-size={launch_w},{launch_h}",
-                    f"--app={str(launch_url or 'about:blank')}",
                 ]
                 if os.name != "nt":
                     # Linux Preview presents Chromium through Tekzite's existing
@@ -5263,6 +5277,11 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                         command.append("--no-sandbox")
                         _CHROMIUM_LAUNCH_DEBUG["linux_root_no_sandbox"] = True
                     _CHROMIUM_LAUNCH_DEBUG["linux_headless_software_backend"] = True
+                # Keep the initial page target platform-correct. In particular,
+                # Linux headless Chromium gets a positional URL instead of
+                # --app=..., which avoids service-worker-only DevTools target lists
+                # seen on Arch/CachyOS Chromium.
+                command.extend(_chromium_launch_target_args(launch_url))
                 if os.environ.get("TEKZITE_DOWNLOAD_PROMPT") == "1":
                     command.append("--download-prompt-for-download")
                 # v7.3 typography guard: Chromium's best Windows text path is
