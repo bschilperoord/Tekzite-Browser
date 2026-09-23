@@ -1,9 +1,9 @@
-name: Build Tekzite Browser v10.5.57 Windows icon test
+name: Build Tekzite Browser v10.5.58 Windows icon test
 
 on:
   push:
     branches:
-      - build/v10.5.57-icon
+      - build/v10.5.58-icon
 
 permissions:
   contents: read
@@ -15,9 +15,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Apply v10.5.57 native identity changes
+      - name: Apply v10.5.58 native identity changes
         shell: pwsh
-        run: python .build/apply-v10.5.57.py
+        run: python .build/apply-v10.5.58.py
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -161,7 +161,7 @@ jobs:
           @'
           from pathlib import Path
           source = Path("main.py").read_text(encoding="utf-8")
-          assert 'BROWSER_VERSION = "10.5.57"' in source
+          assert 'BROWSER_VERSION = "10.5.58"' in source
           assert 'Tekzite.Browser' in source
           assert 'WM_SETICON' in source
           assert 'GWLP_HWNDPARENT = -8' in source
@@ -171,6 +171,9 @@ jobs:
           assert 'self._apply_frameless_app_style()' in source
           assert 'def _rearm_dwm_input_after_maximize(self):' in source
           assert 'refresh_embedded_chromium_dwm_input_metrics' in source
+          assert 'def _is_google_auth_url(url):' in source
+          assert 'def _maybe_start_google_auth_handoff(self, url, previous_url="", tab=None):' in source
+          assert 'start_standalone_auth_chromium' in source
           maximize = source[source.index('    def _toggle_maximize(self):'):source.index('    def _schedule_taskbar_restore_check', source.index('    def _toggle_maximize(self):'))]
           assert 'self.root.after_idle(self._rearm_dwm_input_after_maximize)' in maximize
           assert 'self.root.after(55, self._rearm_dwm_input_after_maximize)' in maximize
@@ -179,7 +182,29 @@ jobs:
           assert minimize.index('self.root.overrideredirect(False)') < minimize.index('self._apply_frameless_app_style()') < minimize.index('self.root.iconify()')
           assert Path('assets/tekzite.ico').is_file()
           assert Path('assets/tekzite.png').is_file()
-          print('v10.5.57 native identity + persistent taskbar checks passed')
+
+          from main import BrowserApp
+          rejected = (
+              "https://accounts.google.com/v3/signin/rejected?"
+              "continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3F"
+              "action_handle_signin%3Dtrue%26next%3Dhttps%253A%252F%252Fwww.youtube.com%252F"
+          )
+          assert BrowserApp._is_google_auth_url(rejected)
+          launch, ret = BrowserApp._google_auth_handoff_urls(
+              rejected, "https://www.youtube.com/"
+          )
+          assert launch.startswith("https://www.youtube.com/signin")
+          assert ret == "https://www.youtube.com/"
+
+          import inspect
+          import engine.net as net
+          auth_src = inspect.getsource(net.start_standalone_auth_chromium)
+          assert "--new-window" in auth_src
+          assert "--remote-debugging" not in auth_src
+          assert "--app=" not in auth_src
+          assert '"remote_debugging": False' in auth_src
+          assert '"cdp_control": False' in auth_src
+          print('v10.5.58 native identity, taskbar, maximize input, and Google auth checks passed')
           '@ | python -
 
       - name: Build Windows x64 EXE
@@ -193,22 +218,22 @@ jobs:
           Write-Host "Product: $($exe.VersionInfo.ProductName)"
           Write-Host "Version: $($exe.VersionInfo.ProductVersion)"
           if ($exe.VersionInfo.ProductName -ne "Tekzite Browser") { throw "Unexpected product name" }
-          if ($exe.VersionInfo.ProductVersion -ne "10.5.57") { throw "Unexpected product version" }
+          if ($exe.VersionInfo.ProductVersion -ne "10.5.58") { throw "Unexpected product version" }
 
       - name: Package build
         shell: pwsh
         run: |
-          $name = "Tekzite-Browser-v10.5.57-Windows-x64.exe"
+          $name = "Tekzite-Browser-v10.5.58-Windows-x64.exe"
           Copy-Item .\dist\TekziteBrowser.exe ".\$name" -Force
-          Compress-Archive -Path ".\$name" -DestinationPath ".\Tekzite-Browser-v10.5.57-Windows-x64.zip" -CompressionLevel Optimal
+          Compress-Archive -Path ".\$name" -DestinationPath ".\Tekzite-Browser-v10.5.58-Windows-x64.zip" -CompressionLevel Optimal
           Get-FileHash ".\$name" -Algorithm SHA256 | Format-List
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: Tekzite-Browser-v10.5.57-Windows-x64
+          name: Tekzite-Browser-v10.5.58-Windows-x64
           path: |
-            Tekzite-Browser-v10.5.57-Windows-x64.exe
-            Tekzite-Browser-v10.5.57-Windows-x64.zip
+            Tekzite-Browser-v10.5.58-Windows-x64.exe
+            Tekzite-Browser-v10.5.58-Windows-x64.zip
           if-no-files-found: error
           compression-level: 0
