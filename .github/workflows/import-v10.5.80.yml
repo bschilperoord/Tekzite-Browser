@@ -1,0 +1,60 @@
+name: Import Tekzite v10.5.80 source
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Apply v10.5.80 source patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git config core.autocrlf false
+          git reset --hard HEAD
+
+          $parts = Get-ChildItem ".release\v10.5.80.patch.xz.b64.*" | Sort-Object Name
+          if ($parts.Count -ne 6) { throw "Expected 6 source patch chunks, found $($parts.Count)" }
+
+          $b64 = ($parts | ForEach-Object { (Get-Content -Raw $_.FullName).Trim() }) -join ""
+          [IO.File]::WriteAllBytes(".release\v10.5.80.patch.xz", [Convert]::FromBase64String($b64))
+
+          $hash = (Get-FileHash ".release\v10.5.80.patch.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = "e7ca6ab0fb0ba93d3d05afc449ecc5c1ba5d39fd68ee777601644d945b983275"
+          if ($hash -ne $expected) { throw "Patch checksum mismatch: $hash" }
+
+          python -c "import lzma,pathlib; p=pathlib.Path(r'.release\v10.5.80.patch.xz'); pathlib.Path(r'.release\v10.5.80.patch').write_bytes(lzma.decompress(p.read_bytes()))"
+
+          git apply --check ".release\v10.5.80.patch"
+          git apply ".release\v10.5.80.patch"
+
+          python tools\sync_version.py 10.5.80
+
+          Remove-Item ".release" -Recurse -Force
+          Remove-Item ".github\workflows\import-v10.5.80.yml" -Force
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+
+          if (git diff --cached --quiet) {
+            throw "Import produced no changes."
+          }
+
+          git commit -m "Release Tekzite Browser v10.5.80"
+          git push origin HEAD:main
