@@ -3,7 +3,7 @@ name: Build Tekzite Browser v10.5.61 Windows icon test
 on:
   push:
     branches:
-      - build/v10.5.61-auth-handoff-stability
+      - build/v10.5.61-auth-autoclose
 
 permissions:
   contents: read
