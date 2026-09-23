@@ -1,9 +1,9 @@
-name: Build Tekzite Browser v10.5.60 Windows icon test
+name: Build Tekzite Browser v10.5.61 Windows icon test
 
 on:
   push:
     branches:
-      - build/v10.5.60-auth-handoff-stability
+      - build/v10.5.61-auth-handoff-stability
 
 permissions:
   contents: read
@@ -15,9 +15,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Apply v10.5.60 native identity changes
+      - name: Apply v10.5.61 native identity changes
         shell: pwsh
-        run: python .build/apply-v10.5.60.py
+        run: python .build/apply-v10.5.61.py
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -161,7 +161,7 @@ jobs:
           @'
           from pathlib import Path
           source = Path("main.py").read_text(encoding="utf-8")
-          assert 'BROWSER_VERSION = "10.5.60"' in source
+          assert 'BROWSER_VERSION = "10.5.61"' in source
           assert 'Tekzite.Browser' in source
           assert 'WM_SETICON' in source
           assert 'GWLP_HWNDPARENT = -8' in source
@@ -212,13 +212,23 @@ jobs:
           assert hasattr(net, "standalone_auth_chromium_running")
           assert hasattr(net, "wait_for_standalone_auth_chromium_release")
           assert hasattr(net, "detach_embedded_chromium_dwm_thumbnail")
+          assert hasattr(net, "standalone_google_auth_succeeded")
+          assert hasattr(net, "close_standalone_auth_chromium")
           assert 'wait_for_standalone_auth_chromium_release' in source
           assert 'def _poll_google_auth_profile_release(self):' in source
           assert 'def _suspend_chromium_for_external_auth(self):' in source
           assert 'detach_embedded_chromium_dwm_thumbnail()' in source
           assert 'self._destroy_dwm_host_for_taskbar()' in source
           assert 'self.root.after(90, self._launch_google_auth_worker, launch_url)' in source
-          print('v10.5.60 auth handoff teardown stabilization checks passed')
+          assert 'standalone_google_auth_succeeded' in source
+          assert 'close_standalone_auth_chromium' in source
+
+          auth_cookie_src = inspect.getsource(net.standalone_google_auth_succeeded)
+          assert '_GOOGLE_AUTH_COOKIE_NAMES' in auth_cookie_src
+          assert 'google_auth_cookie_change_at' in auth_cookie_src
+          close_src = inspect.getsource(net.close_standalone_auth_chromium)
+          assert 'WM_CLOSE = 0x0010' in close_src
+          print('v10.5.61 successful Google auth auto-close checks passed')
           '@ | python -
 
       - name: Build Windows x64 EXE
@@ -232,22 +242,22 @@ jobs:
           Write-Host "Product: $($exe.VersionInfo.ProductName)"
           Write-Host "Version: $($exe.VersionInfo.ProductVersion)"
           if ($exe.VersionInfo.ProductName -ne "Tekzite Browser") { throw "Unexpected product name" }
-          if ($exe.VersionInfo.ProductVersion -ne "10.5.60") { throw "Unexpected product version" }
+          if ($exe.VersionInfo.ProductVersion -ne "10.5.61") { throw "Unexpected product version" }
 
       - name: Package build
         shell: pwsh
         run: |
-          $name = "Tekzite-Browser-v10.5.60-Windows-x64.exe"
+          $name = "Tekzite-Browser-v10.5.61-Windows-x64.exe"
           Copy-Item .\dist\TekziteBrowser.exe ".\$name" -Force
-          Compress-Archive -Path ".\$name" -DestinationPath ".\Tekzite-Browser-v10.5.60-Windows-x64.zip" -CompressionLevel Optimal
+          Compress-Archive -Path ".\$name" -DestinationPath ".\Tekzite-Browser-v10.5.61-Windows-x64.zip" -CompressionLevel Optimal
           Get-FileHash ".\$name" -Algorithm SHA256 | Format-List
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: Tekzite-Browser-v10.5.60-Windows-x64
+          name: Tekzite-Browser-v10.5.61-Windows-x64
           path: |
-            Tekzite-Browser-v10.5.60-Windows-x64.exe
-            Tekzite-Browser-v10.5.60-Windows-x64.zip
+            Tekzite-Browser-v10.5.61-Windows-x64.exe
+            Tekzite-Browser-v10.5.61-Windows-x64.zip
           if-no-files-found: error
           compression-level: 0
