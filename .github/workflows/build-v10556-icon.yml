@@ -164,9 +164,16 @@ jobs:
           assert 'BROWSER_VERSION = "10.5.56"' in source
           assert 'Tekzite.Browser' in source
           assert 'WM_SETICON' in source
+          assert 'GWLP_HWNDPARENT = -8' in source
+          assert 'WS_EX_APPWINDOW = 0x00040000' in source
+          assert 'SWP_FRAMECHANGED = 0x0020' in source
+          assert 'def _taskbar_presence_guard(self):' in source
+          assert 'self._apply_frameless_app_style()' in source
+          minimize = source[source.index('    def _minimize_window(self):'):source.index('    def _restore_frameless_after_minimize', source.index('    def _minimize_window(self):'))]
+          assert minimize.index('self.root.overrideredirect(False)') < minimize.index('self._apply_frameless_app_style()') < minimize.index('self.root.iconify()')
           assert Path('assets/tekzite.ico').is_file()
           assert Path('assets/tekzite.png').is_file()
-          print('v10.5.56 native identity/icon checks passed')
+          print('v10.5.56 native identity + persistent taskbar checks passed')
           '@ | python -
 
       - name: Build Windows x64 EXE
