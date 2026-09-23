@@ -3,7 +3,7 @@ name: Build Tekzite Browser v10.5.58 Windows icon test
 on:
   push:
     branches:
-      - build/v10.5.58-icon
+      - build/v10.5.58-google-auth
 
 permissions:
   contents: read
