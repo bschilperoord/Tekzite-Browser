@@ -50,7 +50,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          git fetch origin "refs/heads/$env:SEED_BRANCH:refs/remotes/origin/$env:SEED_BRANCH"
+          git fetch origin "refs/heads/$($env:SEED_BRANCH):refs/remotes/origin/$($env:SEED_BRANCH)"
           if ($LASTEXITCODE -ne 0) { throw "Could not fetch release seed branch" }
 
           $parts = @(git ls-tree -r --name-only "origin/$env:SEED_BRANCH" -- .release |
