@@ -56,6 +56,10 @@ jobs:
         shell: bash
         run: ./build_linux.sh
 
+      - name: Smoke packaged Linux compositor
+        shell: bash
+        run: xvfb-run -a ./dist-linux/TekziteBrowser --linux-package-smoke
+
       - name: Package Linux preview
         id: package
         shell: bash
