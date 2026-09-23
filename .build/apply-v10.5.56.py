@@ -174,15 +174,127 @@ if "self._windows_app_user_model_id_set" not in main:
 
 style_start = main.index("    def _apply_frameless_app_style(self):")
 style_end = main.index("    def _make_window_control(", style_start)
-style_block = main[style_start:style_end]
-if "self._apply_native_windows_icon()" not in style_block:
-    style_block = replace_once(
-        style_block,
-        "            self._apply_window_rounding()\n",
-        "            self._apply_window_rounding()\n            self._apply_native_windows_icon()\n",
-        "frameless icon refresh",
-    )
-    main = main[:style_start] + style_block + main[style_end:]
+style_block = '''    def _apply_frameless_app_style(self):
+        """Keep Tekzite's real top-level Win32 wrapper permanently taskbar-eligible."""
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            self.root.update_idletasks()
+            hwnd = int(self._current_native_root_hwnd() or self._native_root_hwnd() or 0)
+            if not hwnd:
+                return False
+
+            GWL_EXSTYLE = -20
+            GWLP_HWNDPARENT = -8
+            GW_OWNER = 4
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+
+            get_long = user32.GetWindowLongW
+            set_long = user32.SetWindowLongW
+            get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+            get_long.restype = ctypes.c_long
+            set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+            set_long.restype = ctypes.c_long
+
+            user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetWindow.restype = wintypes.HWND
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                ctypes.c_int, ctypes.c_int, wintypes.UINT,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
+
+            changed = False
+            exstyle = int(get_long(wintypes.HWND(hwnd), GWL_EXSTYLE)) & 0xFFFFFFFF
+            wanted = (exstyle & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            if wanted != exstyle:
+                set_long(wintypes.HWND(hwnd), GWL_EXSTYLE, ctypes.c_long(wanted).value)
+                changed = True
+
+            # An owned top-level window can disappear from the taskbar even when
+            # WS_EX_APPWINDOW is set. The real Tekzite root must stay unowned.
+            owner = int(user32.GetWindow(wintypes.HWND(hwnd), GW_OWNER) or 0)
+            if owner:
+                set_owner = getattr(user32, "SetWindowLongPtrW", None)
+                if set_owner is not None:
+                    set_owner.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+                    set_owner.restype = ctypes.c_void_p
+                    set_owner(wintypes.HWND(hwnd), GWLP_HWNDPARENT, None)
+                else:
+                    user32.SetWindowLongW(wintypes.HWND(hwnd), GWLP_HWNDPARENT, 0)
+                changed = True
+
+            wrapper_changed = int(getattr(self, "_taskbar_identity_hwnd", 0) or 0) != hwnd
+            if changed or wrapper_changed:
+                self._taskbar_identity_hwnd = hwnd
+                user32.SetWindowPos(
+                    wintypes.HWND(hwnd), wintypes.HWND(0),
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                    SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                )
+                self._window_rounding_signature = None
+                self._apply_window_rounding()
+                self._apply_native_windows_icon()
+            return True
+        except Exception:
+            return False
+
+    def _schedule_taskbar_presence_guard(self, delay=1200):
+        """Continuously verify taskbar identity without changing window visibility."""
+        if sys.platform != "win32":
+            return
+        previous = getattr(self, "_taskbar_presence_guard_after_id", None)
+        if previous is not None:
+            try:
+                self.root.after_cancel(previous)
+            except Exception:
+                pass
+        try:
+            self._taskbar_presence_guard_after_id = self.root.after(
+                max(250, int(delay)), self._taskbar_presence_guard
+            )
+        except Exception:
+            self._taskbar_presence_guard_after_id = None
+
+    def _taskbar_presence_guard(self):
+        self._taskbar_presence_guard_after_id = None
+        try:
+            if not bool(self.root.winfo_exists()):
+                return
+            # Apply to normal, maximized and minimized roots. This does not call
+            # deiconify or ShowWindow, so a minimized browser stays minimized.
+            self._apply_frameless_app_style()
+        except Exception:
+            pass
+        self._schedule_taskbar_presence_guard(1200)
+
+'''
+main = main[:style_start] + style_block + main[style_end:]
+
+minimize_old = '''        try:
+            self.root.overrideredirect(False)
+            self.root.iconify()
+'''
+minimize_new = '''        try:
+            self.root.overrideredirect(False)
+            self.root.update_idletasks()
+            # override-redirect(False) can create a fresh Tk wrapper. Mark that
+            # wrapper as an app window before iconifying so the taskbar button
+            # cannot vanish during the minimize transition.
+            self._apply_frameless_app_style()
+            self.root.iconify()
+'''
+main = replace_once(main, minimize_old, minimize_new, "taskbar-safe minimize transition")
 
 write("main.py", main)
 
