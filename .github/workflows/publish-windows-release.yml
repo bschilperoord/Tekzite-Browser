@@ -146,6 +146,11 @@ jobs:
           $ErrorActionPreference = "Stop"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The GITHUB_TOKEN may push application source, but GitHub blocks it from
+          # creating/updating workflow files. Keep the authorized workflows from
+          # the triggering main commit; workflows are synchronized separately.
+          git restore --source="origin/main" -- .github/workflows
+          if ($LASTEXITCODE -ne 0) { throw "Could not restore authorized workflow files" }
           git add -A
           git diff --cached --quiet
           if ($LASTEXITCODE -ne 0) {
