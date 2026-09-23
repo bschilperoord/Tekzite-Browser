@@ -1,0 +1,85 @@
+name: Import Linux runtime backend
+
+on:
+  push:
+    branches: [linux-port]
+    paths:
+      - ".linux-port/linux81-runtime.patch.xz.b64"
+      - ".github/workflows/import-linux-runtime.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  import-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout linux-port
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: linux-port
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+
+      - name: Install runtime and test dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth python3-tk
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
+
+      - name: Apply validated Linux runtime patch
+        shell: bash
+        run: |
+          set -euxo pipefail
+          base64 -d .linux-port/linux81-runtime.patch.xz.b64 | xz -d > /tmp/linux81-runtime.patch
+          git apply --check /tmp/linux81-runtime.patch
+          git apply /tmp/linux81-runtime.patch
+          chmod +x build_linux.sh run_linux.sh install_linux.sh
+
+      - name: Full regression suite
+        shell: bash
+        run: python -m pytest -q
+
+      - name: Chromium extension checks
+        shell: bash
+        run: node tests/current/test_extension_features.cjs
+
+      - name: Linux environment doctor
+        shell: bash
+        run: python tools/doctor.py
+
+      - name: Real Chromium Linux smoke
+        shell: bash
+        run: |
+          set -euxo pipefail
+          command -v google-chrome || command -v chromium || command -v chromium-browser || true
+          xvfb-run -a python tools/linux_smoke.py
+
+      - name: Commit verified runtime backend
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -f .linux-port/linux81-runtime.patch.xz.b64
+          rm -f .github/workflows/import-linux-runtime.yml
+          rmdir .linux-port 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Linux preview: renderer, process and socket backend"
+          git push origin HEAD:linux-port
