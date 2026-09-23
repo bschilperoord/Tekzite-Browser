@@ -1,0 +1,93 @@
+name: Linux Preview
+
+on:
+  push:
+    branches: [linux-port]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-preview:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout linux-port
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+
+      - name: Install Linux runtime dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth python3-tk
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run regression suite
+        run: python -m pytest -q
+
+      - name: Test Chromium extension scripts
+        run: node tests/current/test_extension_features.cjs
+
+      - name: Run Linux environment doctor
+        run: python tools/doctor.py
+
+      - name: Run real Chromium/CDP Linux smoke
+        shell: bash
+        run: xvfb-run -a python tools/linux_smoke.py
+
+      - name: Build Linux x86_64 executable
+        shell: bash
+        run: ./build_linux.sh
+
+      - name: Package Linux preview
+        id: package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version="$(python - <<'PY'
+          import re
+          from pathlib import Path
+          source = Path("main.py").read_text(encoding="utf-8")
+          m = re.search(r'BROWSER_VERSION\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', source)
+          if not m:
+              raise SystemExit("Could not determine BROWSER_VERSION")
+          print(m.group(1))
+          PY
+          )"
+          name="Tekzite-Browser-v${version}-Linux-x86_64-preview"
+          rm -rf package-linux
+          mkdir -p "package-linux/${name}"
+          install -m 0755 dist-linux/TekziteBrowser "package-linux/${name}/TekziteBrowser"
+          install -m 0644 packaging/linux/tekzite-browser.desktop "package-linux/${name}/tekzite-browser.desktop"
+          install -m 0644 packaging/linux/README.md "package-linux/${name}/README-LINUX.md"
+          cp LICENSE "package-linux/${name}/LICENSE"
+          tar -C package-linux -czf "${name}.tar.gz" "${name}"
+          sha256sum "${name}.tar.gz" > SHA256SUMS-Linux.txt
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Linux preview artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            ${{ steps.package.outputs.name }}.tar.gz
+            SHA256SUMS-Linux.txt
+          if-no-files-found: error
+          compression-level: 0
