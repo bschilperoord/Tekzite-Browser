@@ -1,9 +1,9 @@
-name: Build Tekzite Browser v10.5.58 Windows icon test
+name: Build Tekzite Browser v10.5.59 Windows icon test
 
 on:
   push:
     branches:
-      - build/v10.5.58-google-auth
+      - build/v10.5.59-google-auth
 
 permissions:
   contents: read
@@ -15,9 +15,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Apply v10.5.58 native identity changes
+      - name: Apply v10.5.59 native identity changes
         shell: pwsh
-        run: python .build/apply-v10.5.58.py
+        run: python .build/apply-v10.5.59.py
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -161,7 +161,7 @@ jobs:
           @'
           from pathlib import Path
           source = Path("main.py").read_text(encoding="utf-8")
-          assert 'BROWSER_VERSION = "10.5.58"' in source
+          assert 'BROWSER_VERSION = "10.5.59"' in source
           assert 'Tekzite.Browser' in source
           assert 'WM_SETICON' in source
           assert 'GWLP_HWNDPARENT = -8' in source
@@ -200,11 +200,20 @@ jobs:
           import engine.net as net
           auth_src = inspect.getsource(net.start_standalone_auth_chromium)
           assert "--new-window" in auth_src
+          assert "--window-position=" in auth_src
+          assert "--window-size=" in auth_src
+          assert "_force_standalone_auth_window_onscreen" in auth_src
+          assert "_profile_chromium_pids(profile)" in auth_src
+          assert '"browser_pids": list(browser_pids)' in auth_src
           assert "--remote-debugging" not in auth_src
           assert "--app=" not in auth_src
           assert '"remote_debugging": False' in auth_src
           assert '"cdp_control": False' in auth_src
-          print('v10.5.58 native identity, taskbar, maximize input, and Google auth checks passed')
+          assert hasattr(net, "standalone_auth_chromium_running")
+          assert hasattr(net, "wait_for_standalone_auth_chromium_release")
+          assert 'wait_for_standalone_auth_chromium_release' in source
+          assert 'def _poll_google_auth_profile_release(self):' in source
+          print('v10.5.59 visible/stable Google auth handoff checks passed')
           '@ | python -
 
       - name: Build Windows x64 EXE
@@ -218,22 +227,22 @@ jobs:
           Write-Host "Product: $($exe.VersionInfo.ProductName)"
           Write-Host "Version: $($exe.VersionInfo.ProductVersion)"
           if ($exe.VersionInfo.ProductName -ne "Tekzite Browser") { throw "Unexpected product name" }
-          if ($exe.VersionInfo.ProductVersion -ne "10.5.58") { throw "Unexpected product version" }
+          if ($exe.VersionInfo.ProductVersion -ne "10.5.59") { throw "Unexpected product version" }
 
       - name: Package build
         shell: pwsh
         run: |
-          $name = "Tekzite-Browser-v10.5.58-Windows-x64.exe"
+          $name = "Tekzite-Browser-v10.5.59-Windows-x64.exe"
           Copy-Item .\dist\TekziteBrowser.exe ".\$name" -Force
-          Compress-Archive -Path ".\$name" -DestinationPath ".\Tekzite-Browser-v10.5.58-Windows-x64.zip" -CompressionLevel Optimal
+          Compress-Archive -Path ".\$name" -DestinationPath ".\Tekzite-Browser-v10.5.59-Windows-x64.zip" -CompressionLevel Optimal
           Get-FileHash ".\$name" -Algorithm SHA256 | Format-List
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: Tekzite-Browser-v10.5.58-Windows-x64
+          name: Tekzite-Browser-v10.5.59-Windows-x64
           path: |
-            Tekzite-Browser-v10.5.58-Windows-x64.exe
-            Tekzite-Browser-v10.5.58-Windows-x64.zip
+            Tekzite-Browser-v10.5.59-Windows-x64.exe
+            Tekzite-Browser-v10.5.59-Windows-x64.zip
           if-no-files-found: error
           compression-level: 0
