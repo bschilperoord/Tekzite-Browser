@@ -46,7 +46,7 @@ a = Analysis(
     pathex=[str(project)],
     binaries=[(str(helper), ".")],
     datas=datas,
-    hiddenimports=[], hookspath=[], hooksconfig={}, runtime_hooks=[],
+    hiddenimports=["tkinter", "PIL.ImageTk", "PIL._tkinter_finder"], hookspath=[], hooksconfig={}, runtime_hooks=[],
     excludes=["pytest", "numpy", "pygame", "matplotlib", "pandas", "scipy", "IPython", "psutil"],
     noarchive=False, optimize=1,
 )
@@ -66,6 +66,12 @@ python -m PyInstaller \
   build/linux-browser-spec/TekziteBrowser-Linux.spec
 
 [[ -x dist-linux/TekziteBrowser ]] || { echo "Linux executable was not produced" >&2; exit 1; }
+
+echo "Verifying Pillow/Tk compositor modules are bundled..."
+archive_listing="$(python -m PyInstaller.utils.cliutils.archive_viewer -l dist-linux/TekziteBrowser)"
+grep -Fq "PIL.ImageTk" <<<"$archive_listing" || { echo "Missing bundled PIL.ImageTk" >&2; exit 1; }
+grep -Fq "PIL._tkinter_finder" <<<"$archive_listing" || { echo "Missing bundled PIL._tkinter_finder" >&2; exit 1; }
+
 rm -f ./tekzite-network
 
 echo
