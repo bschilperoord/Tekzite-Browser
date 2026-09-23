@@ -6480,28 +6480,67 @@ def wait_for_standalone_auth_chromium_release(handle, timeout: float = 6.0):
 
 
 def _pick_devtools_page(port, session=None, target_id=None):
-    """Return a debuggable page target.
+    """Return a debuggable page target, tolerating short target-list gaps.
 
-    v4.40 keeps one Chromium page target per Tekzite tab.  ``target_id``
-    selects that exact target; when omitted, the session's current target is
-    used for backwards compatibility with the pre-tab single-page bridge.
+    Chromium can briefly expose an empty ``/json/list`` while a headless page
+    target is being created, replaced or navigated. On Linux that gap is more
+    visible because Tekzite's software compositor asks for frames immediately.
+    Treat the empty list as transient while the browser process is still alive
+    instead of turning one missed poll into a failed tab load.
     """
-    pages = _devtools_json(port, "/json/list", timeout=1.0)
     wanted = target_id or (session or {}).get("target_id")
-    if wanted:
-        for page in pages:
-            if page.get("id") == wanted and page.get("webSocketDebuggerUrl"):
-                return page
-    candidates = [
-        page for page in pages
-        if page.get("type") == "page" and page.get("webSocketDebuggerUrl")
-        and not str(page.get("url", "")).startswith("chrome-extension://")
-    ]
+    deadline = time.monotonic() + (1.5 if os.name != "nt" else 0.35)
+    pages = []
+    candidates = []
+    last_error = None
+
+    while True:
+        try:
+            pages = _devtools_json(port, "/json/list", timeout=0.45)
+            last_error = None
+        except Exception as exc:
+            last_error = exc
+            pages = []
+
+        if wanted:
+            for page in pages:
+                if page.get("id") == wanted and page.get("webSocketDebuggerUrl"):
+                    return page
+
+        candidates = [
+            page for page in pages
+            if page.get("type") == "page" and page.get("webSocketDebuggerUrl")
+            and not str(page.get("url", "")).startswith("chrome-extension://")
+        ]
+        if candidates:
+            break
+
+        if time.monotonic() >= deadline:
+            break
+
+        process = (session or {}).get("process")
+        try:
+            if process is not None and process.poll() is not None:
+                break
+        except Exception:
+            pass
+        time.sleep(0.03)
+
     if not candidates:
-        raise RuntimeError("Chromium bridge exposed no debuggable page")
-    # App-mode startup should expose exactly one page. Prefer about:blank if
-    # Edge also created an internal/background page for its own UI.
-    page = next((p for p in candidates if p.get("url") == "about:blank"), candidates[0])
+        details = ", ".join(
+            f"{str(page.get('type') or '?')}:{str(page.get('url') or '')[:120]}"
+            for page in pages[:8]
+        ) or "empty target list"
+        if last_error is not None:
+            details = f"{details}; last DevTools error: {last_error}"
+        raise RuntimeError(f"Chromium bridge exposed no debuggable page ({details})")
+
+    # App-mode/headless startup should expose one ordinary page. Prefer a
+    # neutral bootstrap surface when Chromium reports multiple candidates.
+    page = next(
+        (p for p in candidates if str(p.get("url") or "").lower() in {"about:blank", "chrome://newtab/"}),
+        candidates[0],
+    )
     if session is not None:
         session["target_id"] = page.get("id")
     return page
