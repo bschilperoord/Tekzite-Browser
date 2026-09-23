@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Tekzite Browser
+Comment=Privacy-focused Chromium browser shell with causal connection forensics
+Exec=TekziteBrowser %U
+Icon=tekzite
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;text/html;
+StartupNotify=true
