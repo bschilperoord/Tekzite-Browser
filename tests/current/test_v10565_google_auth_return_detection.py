@@ -9,7 +9,7 @@ import engine.net as net
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.73"  # sync_version updates this pin for the release
+    assert main.BROWSER_VERSION == "10.5.80"  # sync_version updates this pin for the release
 
 
 def test_clean_exit_repair_heals_old_crash_marker(tmp_path, monkeypatch):

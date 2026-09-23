@@ -18,7 +18,7 @@ BUILD = (ROOT / 'build_windows.ps1').read_text(encoding='utf-8')
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == '10.5.73'
+    assert main.BROWSER_VERSION == '10.5.80'
 
 
 def test_network_helper_kill_requires_instance_identity():
@@ -54,9 +54,10 @@ def test_page_metadata_and_favicon_fetch_are_bounded():
     assert "slice(0, 1024)" in NET
     assert "slice(0, 32768)" in NET
     assert "slice(0, 8192)" in NET
-    assert "r.body.getReader" in NET
-    assert "total > 524288" in NET
-    assert "reader.cancel" in NET
+    assert "MAX_FAVICON_BYTES = 512 * 1024" in NET
+    assert "response.read(MAX_FAVICON_BYTES + 1)" in NET
+    assert "declared > MAX_FAVICON_BYTES" in NET
+    assert "_favicon_target_is_local" in NET
 
 
 def test_dangerous_download_open_is_blocked_twice():

@@ -5,7 +5,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_is_v10539():
-    assert 'BROWSER_VERSION = "10.5.73"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.80"' in MAIN
 
 
 def test_shared_dialog_factory_centers_before_open_animation():

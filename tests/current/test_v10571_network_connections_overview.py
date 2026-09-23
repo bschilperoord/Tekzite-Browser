@@ -13,7 +13,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.73"  # sync_version updates this pin
+    assert main.BROWSER_VERSION == "10.5.80"  # sync_version updates this pin
 
 
 def test_proxy_connection_ledger_is_ram_only_and_tracks_lifecycle(monkeypatch):

@@ -32,7 +32,7 @@ def _ipv6_payload(pid, size, daddr, saddr, dport, sport):
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.73"  # sync_version updates this pin
+    assert main.BROWSER_VERSION == "10.5.80"  # sync_version updates this pin
 
 
 def test_kernel_network_udp_ipv4_send_and_receive_map_remote_peer_correctly():

@@ -1,3 +1,75 @@
+# v10.5.80 - Connection Forensics showcase + minimal favicon networking
+
+This is the first published build to bundle Tekzite's complete **Connection Forensics** stack introduced across v10.5.74-v10.5.80. **Tools -> Network Connections** can correlate Windows process/socket ownership, Tekzite Network upstreams, exact requested hostnames, Chromium request metadata, JavaScript initiator stacks and response evidence into a causal path from process to script to network response.
+
+- Promotes the Live Socket View as a first-class audit feature: **process -> socket -> proxy -> hostname -> request -> JavaScript caller -> response**.
+- Shows request purpose/resource type, page/worker/extension context, sanitized JavaScript caller and async stack, connection reuse evidence, response status/MIME/encoded bytes, redirect lineage, cache/service-worker delivery and TLS metadata when Chromium exposes them.
+- Retains recent short-lived TCP connect/accept and UDP peer events through the Windows Kernel-Network ETW layer while the view is open, without packet payload capture.
+- Adds on-demand caller-source inspection: bounded source excerpts, local pretty-printing of one-line/minified bundles, containing-function context, network-primitive tracing and local decoding of inline Source Map v3 data. External source maps are reported but never fetched automatically.
+- Uses conservative evidence labels such as **Strong opener**, **Likely opener**, **Reused connection**, **Host activity** and **Unattributed** instead of claiming that every related request created a socket or that unexplained traffic is telemetry.
+- Keeps the forensic ledger bounded and RAM-only. Full URLs, query strings, header values, cookies, request/response bodies, packet payloads and complete JavaScript source are not retained.
+- Removes the page-context `fetch(..., credentials:'include')` helper that previously downloaded favicons from inside website JavaScript context.
+- Chromium now supplies only the favicon URL; Tekzite fetches the icon as explicit browser-owned traffic through Tekzite Network.
+- The dedicated favicon fetch sends no page/session cookies, Authorization, Origin or Referer headers and ignores response cookies.
+- Enforces the existing 512 KiB streaming cap before image decode and caches only bounded favicon bytes in RAM.
+- Rejects explicit loopback/private/link-local/local-name favicon targets and redirects into local address space, while Tekzite Network continues to block public-name DNS rebinding.
+- Adds a short-lived hostname-only internal-activity marker so the Live Socket View can label the resulting upstream as **Tekzite favicon fetch / Tekzite Browser internal** instead of attributing it to page JavaScript.
+
+# v10.5.79 - Internal Runtime.evaluate provenance
+
+- Adds `tekzite-internal://...` `sourceURL` provenance tags to Tekzite-owned Runtime.evaluate helpers so CDP attribution can distinguish browser-injected code from website scripts.
+- Keeps the page hostname separately as execution context rather than presenting it as the origin of Tekzite-owned code.
+- Makes internal caller provenance visible in the Live Socket View and causal timeline without retaining helper source text in the ledger.
+
+# v10.5.78 - Deep JavaScript caller inspector
+
+- Pretty-prints minified/one-line caller scripts on demand while preserving the authoritative CDP generated-source caller coordinate.
+- Finds the best-effort containing JavaScript function and shows a bounded formatted function context.
+- Traces visible browser network primitives (`fetch`, XHR, WebSocket, EventSource, sendBeacon, WebTransport) inside/near the caller while masking strings, comments and regex literals to reduce false positives.
+- Captures `Debugger.scriptParsed` metadata on the temporary source-inspection websocket.
+- Decodes inline Source Map v3 data locally, including original filename/name/line mapping and bounded `sourcesContent` excerpts when supplied.
+- Reports external source-map availability without automatically downloading the map, keeping investigation traffic from contaminating the audit.
+- Hides inline source-map payloads from generated-source display excerpts.
+- Keeps all full script/source-map content transient and out of the network ledger and disk.
+
+# v10.5.77 - Causal request timeline and response evidence
+
+- Adds a **Request timeline** to the Live Socket View so network activity can be followed chronologically from page/worker target through initiator/script caller to destination and Chromium connection reuse state.
+- Adds conservative destination relation labels (**Same host**, **Parent/subdomain**, **Same site (heuristic)**, **Cross-site**) without treating the heuristic as a browser security boundary.
+- Retains response status, MIME type, encoded transfer bytes, cache/service-worker/prefetch delivery, redirect host lineage, failure/blocked/CORS reason and WebSocket-close state as RAM-only metadata.
+- Adds TLS/security evidence exposed by Chromium: security state, TLS protocol, cipher and certificate issuer.
+- Preserves asynchronous JavaScript stack boundaries such as timers/Promise continuations when Chromium supplies stack descriptions.
+- Adds privacy-preserving request/response header **presence hints** (Cookie, Authorization, Origin, Referer and Set-Cookie) while immediately discarding all header values; absence of a hint is explicitly not treated as proof that Chromium sent no such header.
+- Expands socket Details into a causal trace and keeps full URLs, query strings, headers, cookies, bodies, packet payloads and complete script source out of the retained audit ledger.
+
+# v10.5.76 - On-demand caller script source excerpts
+
+- Adds **Show script source** to the Live Socket View attribution Details dialog for JavaScript-initiated requests.
+- Retains only Chromium's opaque target/script identifiers in the RAM audit ledger; complete script URLs and source text still are not stored by the live monitor.
+- Fetches source only after explicit user action over a separate temporary DevTools websocket, so source lookup cannot consume or reorder the long-lived Network attribution event stream.
+- Displays a bounded excerpt around the exact caller line/column with a caret marker. Very long/minified lines are clipped around the call site instead of dumping an entire bundle into the UI.
+- Drops the complete source immediately after deriving the excerpt; nothing is written to disk or added to the connection ledger.
+- Gracefully reports parser/browser-generated requests, navigated-away targets, and scripts that Chromium can no longer resolve rather than fabricating source.
+
+# v10.5.75 - Script-to-socket forensics and recent TCP events
+
+- Adds sanitized JavaScript caller attribution to the Live Socket View: origin hostname, final script filename, function name, line/column and an up-to-eight-frame call chain, without retaining full script paths, query strings or script contents.
+- Adds **Script caller** and **Match** columns plus a socket-attribution Details dialog with the full sanitized caller chain and Chromium connection-reuse verdict.
+- Uses Chromium `connectionReused` together with exact requested hostname and socket-open timing to distinguish **Strong opener**, **Likely opener**, **Probable opener**, **Reused connection**, **Endpoint activity** and **Host activity** instead of falsely assigning every HTTP/2 request as the socket creator.
+- Adds dedicated WebSocket creation attribution and clearer request-purpose labels for Fetch, XHR, WebSocket, EventSource and beacon/ping traffic.
+- Extends the existing `Microsoft-Windows-Kernel-Network` ETW monitor with TCP connect/accept events. Short-lived flows that disappear between Windows owner-table samples remain briefly visible as **RECENT** rows.
+- Keeps all new network-forensics metadata bounded, RAM-only and active only while the Live Socket View is open; no packet payload, full URL, header, cookie, request/response body or script source text is captured.
+
+# v10.5.74 - Live request attribution
+
+- **Tools -> Network Connections** now correlates live sockets with RAM-only Chromium CDP `Network.requestWillBeSent` metadata so public upstreams can show why they exist instead of only an IP/hostname.
+- Adds **Purpose**, **Resource**, and **Initiator** columns. Page navigations, parser loads, script loads, preloads, workers/service workers and exposed extension targets are classified separately when Chromium exposes the corresponding DevTools target.
+- Only host-level attribution is retained: destination host/port, target scope, resource type and initiator hostname/type. Full URLs, paths, query strings, request/response headers, cookies and payloads are discarded immediately.
+- `Network.responseReceived` metadata can correlate a directly owned Chromium endpoint back to its recent request when Chromium reports the remote address/port.
+- Fixes PyInstaller one-file Tekzite Network child PIDs being mislabeled as **Direct external**. The complete network-helper descendant tree is now classified as **Tekzite Network** / **Tekzite Network upstream**.
+- Active proxy tunnels now retain the Chromium-side loopback endpoint tuple in RAM, allowing `chrome.exe -> Tekzite Network` sockets to show the exact current CONNECT destination while the tunnel is alive.
+- **Unattributed** is intentionally neutral: it means no matching page/extension CDP request has been observed since the Live Socket View opened, not that the destination is telemetry. Refreshing the page after opening the view gives the most complete attribution pass.
+
 # v10.5.73 - UDP remote peer tracing
 
 - Live Socket View now augments Windows UDP owner-table rows with `Microsoft-Windows-Kernel-Network` ETW send/receive events, exposing the actual remote UDP IP and port.

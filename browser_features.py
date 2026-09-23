@@ -1150,11 +1150,11 @@ class BrowserFeatures:
 
         win, tree, controls = self._feature_window(
             'Live Socket View',
-            ('Role', 'Process', 'PID', 'Proto', 'Local endpoint', 'Hostname', 'Remote endpoint', 'State', 'Traffic', 'Seen', 'Path'),
-            (120, 155, 65, 60, 195, 235, 195, 90, 170, 85, 180),
+            ('Role', 'Process', 'PID', 'Proto', 'Local endpoint', 'Hostname', 'Relation', 'Remote endpoint', 'State', 'Purpose', 'Resource', 'Initiator', 'Script caller', 'Match', 'Traffic', 'Seen', 'Path'),
+            (120, 150, 65, 60, 185, 220, 140, 185, 85, 150, 125, 200, 300, 105, 160, 80, 175),
         )
         self._network_connections_window = win
-        win.geometry('1770x650')
+        win.geometry('2500x700')
         try:
             win.minsize(980, 480)
         except Exception:
@@ -1165,7 +1165,7 @@ class BrowserFeatures:
             text=(
                 'Live Windows sockets for Tekzite + its Chromium/helper children. '
                 'TCP endpoints come from the Windows owner table; UDP remote peers are correlated from live Kernel-Network ETW events. '
-                'Proxy hostnames are exact; other remote IPs can use background PTR lookup.'
+                'Proxy hostnames are exact; CDP attribution adds causal request metadata, same-site/cross-site relation, response evidence, initiator and sanitized JavaScript call stacks. Script source is fetched only on demand in Details, locally pretty-printed/source-map inspected, and is not retained.'
             ),
             bg=self.ui['bg'], fg=self.ui['muted'], anchor='w', justify='left',
             wraplength=1650,
@@ -1231,6 +1231,9 @@ class BrowserFeatures:
             if str(row.get('state') or '') == 'LISTEN':
                 return ''
             host = str(row.get('hostname') or '')
+            destination = str(row.get('destination_host') or '')
+            if destination and host == 'Tekzite Network':
+                return f'Tekzite Network → {destination}'
             if host:
                 return host
             address = str(row.get('remote_address') or '').split('%', 1)[0]
@@ -1284,8 +1287,14 @@ class BrowserFeatures:
                 f"{row.get('protocol') or ''}/{row.get('family') or ''}",
                 endpoint(row.get('local_address'), row.get('local_port')),
                 hostname_for(row),
+                row.get('request_domain_relation') or '',
                 endpoint(row.get('remote_address'), row.get('remote_port')),
                 row.get('state') or '',
+                row.get('request_purpose') or '',
+                row.get('request_resource') or '',
+                row.get('request_initiator') or '',
+                row.get('request_script') or '',
+                row.get('request_match_quality') or '',
                 traffic_for(row),
                 seen_for(row),
                 row.get('path') or '',
@@ -1318,21 +1327,30 @@ class BrowserFeatures:
             udp = sum(1 for row in rows if row.get('protocol') == 'UDP')
             established = sum(1 for row in rows if row.get('state') == 'ESTABLISHED')
             listeners = sum(1 for row in rows if row.get('state') == 'LISTEN')
+            recent_tcp = sum(1 for row in rows if row.get('protocol') == 'TCP' and row.get('state') == 'RECENT')
             direct = sum(1 for row in rows if str(row.get('path') or '').startswith('Direct'))
             udp_peers = sum(1 for row in rows if row.get('protocol') == 'UDP' and row.get('state') == 'PEER')
             pids = {int(row.get('pid') or 0) for row in rows if int(row.get('pid') or 0) > 0}
             direct_text = f' • {direct} Direct external' if direct else ''
-            peer_text = f' • {udp_peers} UDP peer(s)' if udp_peers else ''
+            peer_text = (f' • {udp_peers} UDP peer(s)' if udp_peers else '') + (f' • {recent_tcp} recent TCP' if recent_tcp else '')
             udp_monitor = (snapshot or {}).get('udp_peer_monitor') or {}
             etw_status = str(udp_monitor.get('status') or '')
             etw_reason = str(udp_monitor.get('reason') or '')
-            etw_text = ' • UDP ETW active' if etw_status == 'running' else ''
+            etw_text = ' • Network ETW active' if etw_status == 'running' else ''
             if etw_status in {'error', 'permission', 'unsupported'} and etw_reason:
-                etw_text = f' • UDP peer ETW: {etw_reason}'
+                etw_text = f' • Network ETW: {etw_reason}'
+            audit = (snapshot or {}).get('request_audit') or {}
+            audit_status = str(audit.get('status') or '')
+            audit_reason = str(audit.get('reason') or '')
+            audit_text = ''
+            if audit_status in {'running', 'starting'}:
+                audit_text = f" • CDP attribution {int(audit.get('target_count') or 0)} target(s)/{int(audit.get('request_count') or 0)} req"
+            elif audit_reason:
+                audit_text = f' • CDP attribution: {audit_reason}'
             status_var.set(
                 f'{len(rows)} live socket(s) • {len(pids)} process(es) • '
                 f'{tcp} TCP • {udp} UDP • {established} established • {listeners} listener(s)'
-                f'{peer_text}{direct_text}{etw_text} • 250 ms snapshots'
+                f'{peer_text}{direct_text}{etw_text}{audit_text} • 250 ms snapshots'
             )
 
         def collect_snapshot():
@@ -1385,7 +1403,7 @@ class BrowserFeatures:
 
         def copy_rows():
             rows = last_rows.get('rows') or []
-            lines = ['Role\tProcess\tPID\tProtocol\tLocal endpoint\tHostname\tRemote endpoint\tState\tTraffic\tSeen\tPath']
+            lines = ['Role\tProcess\tPID\tProtocol\tLocal endpoint\tHostname\tRelation\tRemote endpoint\tState\tPurpose\tResource\tInitiator\tScript caller\tMatch\tTraffic\tSeen\tPath']
             for row in rows:
                 values = row_values(row)
                 lines.append('\t'.join(str(value) for value in values))
@@ -1395,6 +1413,433 @@ class BrowserFeatures:
                 status_var.set(f'Copied {len(rows)} live socket row(s).')
             except Exception:
                 status_var.set('Could not copy live socket view.')
+
+        def show_selected_details(_event=None):
+            selection = tree.selection()
+            if not selection:
+                status_var.set('Select a socket row first.')
+                return 'break'
+            try:
+                index = tree.index(selection[0])
+                row = (last_rows.get('rows') or [])[index]
+            except Exception:
+                status_var.set('That socket row is no longer present.')
+                return 'break'
+
+            detail = self._new_animated_toplevel(win)
+            detail.title('Tekzite Socket Attribution')
+            detail.geometry('920x650')
+            detail.transient(win)
+            detail.configure(bg=self.ui['bg'])
+            text = tk.Text(
+                detail, bg=self.ui['field'], fg=self.ui['text'], insertbackground=self.ui['text'],
+                wrap='word', relief='flat', font=(self._ui_monospace_font_family, self._font_size(9)),
+                padx=14, pady=12,
+            )
+            text.pack(fill='both', expand=True, padx=12, pady=(12, 6))
+            lines = [
+                'SOCKET',
+                f"Role:              {row.get('role') or ''}",
+                f"Process / PID:     {row.get('process') or ''} / {row.get('pid') or ''}",
+                f"Protocol:          {row.get('protocol') or ''}/{row.get('family') or ''}",
+                f"State:             {row.get('state') or ''}",
+                f"Local endpoint:    {endpoint(row.get('local_address'), row.get('local_port'))}",
+                f"Remote endpoint:   {endpoint(row.get('remote_address'), row.get('remote_port'))}",
+                f"Hostname:          {hostname_for(row)}",
+                f"Path:              {row.get('path') or ''}",
+                '',
+                'REQUEST ATTRIBUTION',
+                f"Match:              {row.get('request_match_quality') or 'Unattributed'}",
+                f"Domain relation:    {row.get('request_domain_relation') or 'Unknown'}",
+                f"Purpose:            {row.get('request_purpose') or ''}",
+                f"Method / resource:  {(row.get('request_method') or '')} / {(row.get('request_resource') or '')}",
+                f"Target host:        {row.get('request_target_host') or ''}",
+                f"Initiator:          {row.get('request_initiator') or ''}",
+                f"Script caller:      {row.get('request_script') or '(none observed)'}",
+                f"HTTP transport:     {row.get('request_transport') or ''}",
+                f"CDP connection ID:  {row.get('request_connection_id') or ''}",
+                f"Connection reused:  {row.get('request_connection_reused') if row.get('request_connection_reused') is not None else 'unknown'}",
+                f"Response:           {row.get('request_response_status') or ''} {row.get('request_response_mime') or ''}".rstrip(),
+                f"Encoded bytes:      {_format_bytes(row.get('request_encoded_bytes')) if row.get('request_encoded_bytes') else ''}",
+                f"Delivery:           {'service worker' if row.get('request_from_service_worker') else ('cache' if row.get('request_from_cache') else ('network' if row.get('request_response_status') else ''))}",
+                f"TLS:                {' / '.join(v for v in (str(row.get('request_security_state') or ''), str(row.get('request_tls_protocol') or ''), str(row.get('request_tls_cipher') or ''), str(row.get('request_tls_issuer') or '')) if v)}",
+                f"Observed headers:   {', '.join(name for name, present in (('Cookie', row.get('request_observed_cookie')), ('Authorization', row.get('request_observed_authorization')), ('Origin', row.get('request_observed_origin')), ('Referer', row.get('request_observed_referer')), ('Set-Cookie response', row.get('request_observed_set_cookie'))) if present) or '(none exposed by this CDP event)'}",
+                f"Redirect:           {(row.get('request_redirect_from_host') or '') + (' → ' if row.get('request_redirect_from_host') and row.get('request_redirect_to_host') else '') + (row.get('request_redirect_to_host') or '')}",
+                f"Failure:            {(row.get('request_blocked_reason') or row.get('request_failure_text') or '') if row.get('request_loading_failed') else ''}",
+            ]
+            stack = list(row.get('request_script_stack') or [])
+            if stack:
+                lines.extend(['', 'SANITIZED JAVASCRIPT CALL CHAIN'])
+                for number, frame in enumerate(stack, 1):
+                    lines.append(f"  {number:>2}. {frame.get('label') or ''}")
+            lines.extend([
+                '',
+                'INTERPRETATION',
+                'Strong opener = exact requested hostname + socket-open timing + Chromium reported that the request did NOT reuse an existing connection.',
+                'Likely opener = exact requested hostname + timing match, but Chromium did not provide a reuse verdict.',
+                'Probable opener = exact remote endpoint + timing/new-connection evidence without an exact hostname correlation.',
+                'Reused connection = Chromium explicitly reported that this request used an already-open connection.',
+                'Endpoint activity = CDP observed traffic to the exact remote IP:port, but Tekzite cannot prove that request created this TCP connection.',
+                'Host activity = the destination hostname matches recent CDP traffic; HTTP/2 connection reuse can carry many later requests.',
+                'The live audit retains no full URL, query string, headers, cookies, bodies, or script source. Source excerpts are fetched from Chromium only when requested and discarded after display.',
+            ])
+            text.insert('1.0', '\n'.join(lines))
+            text.configure(state='disabled')
+            bar = tk.Frame(detail, bg=self.ui['bg'])
+            bar.pack(fill='x', padx=12, pady=(0, 12))
+
+            # v10.5.76 compatibility: features.net.get_network_request_script_excerpt remains available for callers that need the raw bounded excerpt.
+            def show_script_source():
+                target_id = str(row.get('request_target_id') or '')
+                script_id = str(row.get('request_script_id') or '')
+                line = int(row.get('request_script_line') or 0)
+                column = int(row.get('request_script_column') or 0)
+                source_win = self._new_animated_toplevel(detail)
+                source_win.title('Tekzite JavaScript Inspector')
+                source_win.geometry('1080x620')
+                source_win.transient(detail)
+                source_win.configure(bg=self.ui['bg'])
+                source_text = tk.Text(
+                    source_win, bg=self.ui['field'], fg=self.ui['text'], insertbackground=self.ui['text'],
+                    wrap='none', relief='flat', font=(self._ui_monospace_font_family, self._font_size(9)),
+                    padx=14, pady=12,
+                )
+                ybar = ttk.Scrollbar(source_win, orient='vertical', command=source_text.yview)
+                xbar = ttk.Scrollbar(source_win, orient='horizontal', command=source_text.xview)
+                source_text.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+                ybar.pack(side='right', fill='y', padx=(0, 12), pady=(12, 44))
+                xbar.pack(side='bottom', fill='x', padx=(12, 24), pady=(0, 4))
+                source_text.pack(fill='both', expand=True, padx=(12, 0), pady=(12, 0))
+                source_text.insert('1.0', 'Reading the live script from Chromium…')
+                source_text.configure(state='disabled')
+                source_status = tk.StringVar(value='Generated source is analyzed in memory only; external source maps are never fetched automatically.')
+                source_bar = tk.Frame(source_win, bg=self.ui['bg'])
+                source_bar.pack(side='bottom', fill='x', padx=12, pady=(4, 10))
+                tk.Label(
+                    source_bar, textvariable=source_status, bg=self.ui['bg'], fg=self.ui['muted'], anchor='w',
+                ).pack(side='left', fill='x', expand=True, padx=(4, 8))
+
+                copied = {'text': ''}
+                def copy_excerpt():
+                    if not copied['text']:
+                        return
+                    try:
+                        self.root.clipboard_clear(); self.root.clipboard_append(copied['text'])
+                        source_status.set('Copied the displayed JavaScript analysis report.')
+                    except Exception:
+                        source_status.set('Could not copy the source excerpt.')
+
+                copy_button = self._feature_button(source_bar, 'Copy report', copy_excerpt)
+                copy_button.configure(state='disabled')
+                self._feature_button(source_bar, 'Close', source_win.destroy)
+                source_win.bind('<Escape>', lambda event: source_win.destroy())
+
+                if not target_id or not script_id:
+                    source_text.configure(state='normal')
+                    source_text.delete('1.0', 'end')
+                    source_text.insert('1.0', 'No live script identifier was captured for this request.\n\nParser-initiated requests and some Chromium-generated requests do not have a JavaScript caller.')
+                    source_text.configure(state='disabled')
+                    source_status.set('No JavaScript source is available for this row.')
+                    return
+
+                future = self._executor.submit(
+                    features.net.get_network_request_script_analysis,
+                    target_id, script_id, line, column, 8,
+                )
+                def finish_source():
+                    if not source_win.winfo_exists():
+                        return
+                    if not future.done():
+                        source_win.after(30, finish_source)
+                        return
+                    try:
+                        result = future.result() or {}
+                    except Exception as exc:
+                        result = {'ok': False, 'reason': str(exc), 'text': ''}
+                    source_text.configure(state='normal')
+                    source_text.delete('1.0', 'end')
+                    if result.get('ok'):
+                        source_map = result.get('source_map') if isinstance(result.get('source_map'), dict) else {}
+                        mapped = source_map.get('mapped') if isinstance(source_map.get('mapped'), dict) else {}
+                        report = [
+                            f"Caller: {row.get('request_script') or '(script)'}",
+                            f"Generated source: {int(result.get('source_chars') or 0):,} characters, {int(result.get('line_count') or 0):,} lines",
+                            f"Pretty caller: line {int(result.get('pretty_line') or 0)}:{int(result.get('pretty_column') or 0)}" if result.get('pretty_ok') else f"Pretty-print: unavailable ({result.get('pretty_reason') or 'formatter limit'})",
+                            f"Containing function: {result.get('function_signature') or '(not confidently identified)'}",
+                            f"Source map: {source_map.get('label') or 'No source map advertised'}",
+                        ]
+                        if source_map.get('kind') == 'external':
+                            report.append('Source-map policy: external map advertised but not fetched automatically, so inspection creates no extra network request.')
+                        if mapped:
+                            original = f"{mapped.get('source_file') or '(original source)'}:{mapped.get('line') or 0}:{mapped.get('column') or 0}"
+                            if mapped.get('name'):
+                                original += f"  name={mapped.get('name')}"
+                            report.append(f"Original source-map position: {original}")
+
+                        primitives = list(result.get('network_primitives') or [])
+                        report.extend(['', 'NETWORK PRIMITIVE TRACE'])
+                        if primitives:
+                            for number, primitive in enumerate(primitives, 1):
+                                distance = int(primitive.get('distance') or 0)
+                                delta = f"+{distance}" if distance >= 0 else str(distance)
+                                report.append(
+                                    f"  {number:>2}. {primitive.get('name') or 'network API'} @ generated "
+                                    f"{primitive.get('line') or 0}:{primitive.get('column') or 0} "
+                                    f"({primitive.get('direction') or ''}, offset {delta})"
+                                )
+                        else:
+                            report.append('  No direct fetch/XHR/WebSocket/EventSource/sendBeacon/WebTransport primitive was visible inside the identified function or nearby source window.')
+
+                        if result.get('pretty_text'):
+                            report.extend(['', 'PRETTY-PRINTED CALLER CONTEXT', str(result.get('pretty_text') or '')])
+                        if result.get('function_text'):
+                            report.extend(['', 'CONTAINING FUNCTION CONTEXT', str(result.get('function_text') or '')])
+                        if source_map.get('original_excerpt'):
+                            report.extend(['', 'ORIGINAL SOURCE VIA INLINE SOURCE MAP', str(source_map.get('original_excerpt') or '')])
+                        if result.get('raw_text'):
+                            report.extend(['', 'RAW GENERATED CALLER CONTEXT', str(result.get('raw_text') or '')])
+                        report.extend([
+                            '',
+                            'PRIVACY / EVIDENCE',
+                            'The full generated script exists only during this on-demand analysis and is not inserted into the network ledger or written to disk.',
+                            'Inline source maps are decoded locally. External source-map URLs are reported but not downloaded automatically.',
+                            'Pretty-printing and containing-function detection are display heuristics; the captured CDP caller coordinates remain the authoritative generated position.',
+                        ])
+                        shown = '\n'.join(report)
+                        source_text.insert('1.0', shown)
+                        copied['text'] = shown
+                        copy_button.configure(state='normal')
+                        source_status.set('Live JavaScript analysis complete. Full source discarded after bounded excerpts were produced.')
+                    else:
+                        source_text.insert('1.0', str(result.get('reason') or 'The live script source is no longer available.'))
+                        source_status.set('Source lookup failed; the page may have navigated or replaced the script.')
+                    source_text.configure(state='disabled')
+                source_win.after(10, finish_source)
+
+            source_button = self._feature_button(bar, 'Show script source', show_script_source)
+            if not row.get('request_script'):
+                source_button.configure(state='disabled')
+            self._feature_button(bar, 'Close', detail.destroy)
+            detail.bind('<Escape>', lambda event: detail.destroy())
+            return 'break'
+
+        def show_request_timeline():
+            timeline, req_tree, req_controls = self._feature_window(
+                'Causal Request Timeline',
+                ('Time', 'Hostname', 'Relation', 'Method', 'Resource', 'Status', 'Bytes', 'Delivery', 'Purpose', 'Initiator', 'Script caller', 'Connection'),
+                (110, 230, 150, 70, 105, 70, 90, 120, 150, 190, 310, 150),
+            )
+            timeline.geometry('1900x720')
+            timeline.transient(win)
+            try:
+                timeline.minsize(980, 480)
+            except Exception:
+                pass
+            req_status = tk.StringVar(value='Reading Chromium request timeline…')
+            req_search = tk.StringVar(value='')
+            req_live = tk.BooleanVar(value=True)
+            req_rows = {'rows': []}
+            req_after = {'id': None}
+            req_alive = {'value': True}
+
+            note = tk.Label(
+                timeline,
+                text=(
+                    'Chronological RAM-only CDP request evidence. Full URLs, query strings, headers, cookies and bodies are not retained. '
+                    '“Same site (heuristic)” is informational, not a browser security boundary. Response bytes are Chromium encoded transfer bytes, not packet capture.'
+                ),
+                bg=self.ui['bg'], fg=self.ui['muted'], anchor='w', justify='left', wraplength=1500,
+            )
+            note.pack(side='top', fill='x', padx=18, pady=(12, 0), before=req_tree)
+
+            def req_delivery(row):
+                if row.get('loading_failed'):
+                    reason = row.get('blocked_reason') or row.get('failure_text') or 'failed'
+                    return f'failed: {reason}'[:120]
+                if row.get('response_from_service_worker'):
+                    return 'service worker'
+                if row.get('request_served_from_cache') or row.get('response_from_disk_cache') or row.get('response_from_prefetch_cache'):
+                    return 'cache'
+                if row.get('response_status'):
+                    return 'network'
+                if row.get('resource_type') == 'WebSocket' and row.get('websocket_closed'):
+                    return 'WebSocket closed'
+                return 'pending'
+
+            def req_connection(row):
+                proto = str(row.get('response_protocol') or '')
+                cid = str(row.get('connection_id') or '')
+                reused = row.get('connection_reused')
+                prefix = 'reused' if reused is True else ('new' if reused is False else 'unknown')
+                bits = [prefix]
+                if proto: bits.append(proto)
+                if cid: bits.append('#' + cid)
+                return ' '.join(bits)
+
+            def req_time(row):
+                stamp = float(row.get('wall_time') or row.get('first_seen') or 0.0)
+                if stamp <= 0:
+                    return ''
+                lt = time.localtime(stamp)
+                ms = int((stamp - int(stamp)) * 1000) % 1000
+                return time.strftime('%H:%M:%S', lt) + f'.{ms:03d}'
+
+            def req_values(row):
+                initiator = str(row.get('initiator_label') or '') or str(row.get('initiator_type') or '')
+                if not row.get('initiator_label') and row.get('initiator_host'):
+                    initiator += f" @ {row.get('initiator_host')}"
+                return (
+                    req_time(row), row.get('host') or '', row.get('domain_relation') or 'Unknown',
+                    row.get('method') or '', row.get('resource_type') or '',
+                    row.get('response_status') or ('ERR' if row.get('loading_failed') else ''),
+                    _format_bytes(row.get('encoded_data_length')) if row.get('encoded_data_length') else '',
+                    req_delivery(row), row.get('purpose') or '', initiator,
+                    row.get('script_source') or '', req_connection(row),
+                )
+
+            def apply_requests(snapshot):
+                if not req_alive['value'] or not timeline.winfo_exists():
+                    return
+                rows = list((snapshot or {}).get('requests') or [])
+                query = req_search.get().strip().casefold()
+                if query:
+                    rows = [row for row in rows if query in ' '.join(str(row.get(k) or '') for k in (
+                        'host', 'domain_relation', 'method', 'resource_type', 'purpose', 'initiator_host',
+                        'script_source', 'response_mime_type', 'failure_text', 'blocked_reason', 'tls_issuer'
+                    )).casefold()]
+                rows.sort(key=lambda row: float(row.get('first_seen') or 0.0), reverse=True)
+                req_rows['rows'] = rows
+                for iid in req_tree.get_children():
+                    req_tree.delete(iid)
+                for index, row in enumerate(rows):
+                    req_tree.insert('', 'end', iid=f'req:{index}', values=req_values(row))
+                req_status.set(
+                    f"{len(rows)} shown • {int((snapshot or {}).get('request_count') or 0)} retained • "
+                    f"{int((snapshot or {}).get('target_count') or 0)} target(s) • RAM only"
+                )
+
+            def req_refresh():
+                if not req_alive['value'] or not timeline.winfo_exists():
+                    return
+                try:
+                    apply_requests(features.net.network_request_audit_snapshot())
+                except Exception as exc:
+                    req_status.set(f'Could not read request timeline: {exc}')
+                if req_live.get() and req_alive['value'] and timeline.winfo_exists():
+                    req_after['id'] = timeline.after(400, req_refresh)
+
+            def selected_request():
+                sel = req_tree.selection()
+                if not sel:
+                    return None
+                try:
+                    return req_rows['rows'][req_tree.index(sel[0])]
+                except Exception:
+                    return None
+
+            def show_request_details(_event=None):
+                row = selected_request()
+                if row is None:
+                    req_status.set('Select a request first.')
+                    return 'break'
+                detail = self._new_animated_toplevel(timeline)
+                detail.title('Tekzite Causal Request Details')
+                detail.geometry('960x720')
+                detail.transient(timeline)
+                detail.configure(bg=self.ui['bg'])
+                body = tk.Text(
+                    detail, bg=self.ui['field'], fg=self.ui['text'], insertbackground=self.ui['text'],
+                    wrap='word', relief='flat', font=(self._ui_monospace_font_family, self._font_size(9)),
+                    padx=14, pady=12,
+                )
+                body.pack(fill='both', expand=True, padx=12, pady=(12, 6))
+                redirect = ''
+                if row.get('redirect_from_host') or row.get('redirect_to_host'):
+                    redirect = f"{row.get('redirect_from_host') or '?'} --{row.get('redirect_status') or ''}--> {row.get('redirect_to_host') or row.get('host') or '?'}"
+                failure = row.get('blocked_reason') or row.get('cors_error') or row.get('failure_text') or ''
+                causal = [
+                    str(row.get('target_host') or '(target)'),
+                    str(row.get('script_source') or (row.get('initiator_type') or 'request')),
+                    f"{row.get('method') or ''} {row.get('resource_type') or ''}".strip(),
+                    str(row.get('host') or '(destination)'),
+                    req_connection(row),
+                ]
+                lines = [
+                    'CAUSAL REQUEST TRACE',
+                    '  ' + '  →  '.join(part for part in causal if part),
+                    '',
+                    f"Time:              {req_time(row)}",
+                    f"Destination:       {row.get('host') or ''}:{row.get('port') or ''}",
+                    f"Domain relation:   {row.get('domain_relation') or 'Unknown'}",
+                    f"Purpose:           {row.get('purpose') or ''}",
+                    f"Method/resource:   {row.get('method') or ''} / {row.get('resource_type') or ''}",
+                    f"Has request body:  {bool(row.get('has_post_data'))}",
+                    f"Initial priority:  {row.get('initial_priority') or ''}",
+                    f"Initiator:         {row.get('initiator_label') or ((str(row.get('initiator_type') or '') + (' @ ' + str(row.get('initiator_host')) if row.get('initiator_host') else '')).strip())}",
+                    f"Internal source:   {row.get('internal_source_id') or ''}",
+                    f"Script caller:     {row.get('script_source') or '(none observed)'}",
+                    f"Redirect:          {redirect}",
+                    '',
+                    'RESPONSE / DELIVERY',
+                    f"Status / MIME:     {row.get('response_status') or ''} / {row.get('response_mime_type') or ''}",
+                    f"Encoded bytes:     {_format_bytes(row.get('encoded_data_length')) if row.get('encoded_data_length') else ''}",
+                    f"Delivery:          {req_delivery(row)}",
+                    f"Transport:         {row.get('response_protocol') or ''}",
+                    f"Connection:        {req_connection(row)}",
+                    f"Remote endpoint:   {endpoint(row.get('remote_address'), row.get('remote_port'))}",
+                    f"TLS:               {' / '.join(v for v in (str(row.get('security_state') or ''), str(row.get('tls_protocol') or ''), str(row.get('tls_cipher') or ''), str(row.get('tls_issuer') or '')) if v)}",
+                    f"Observed headers:  {', '.join(name for name, present in (('Cookie', row.get('observed_cookie_header')), ('Authorization', row.get('observed_authorization_header')), ('Origin', row.get('observed_origin_header')), ('Referer', row.get('observed_referer_header')), ('Set-Cookie response', row.get('observed_set_cookie_header'))) if present) or '(none exposed by this CDP event)'}",
+                    f"Failure:           {failure}",
+                ]
+                stack = list(row.get('script_stack') or [])
+                if stack:
+                    lines.extend(['', 'SANITIZED JAVASCRIPT CALL CHAIN'])
+                    for number, frame in enumerate(stack, 1):
+                        lines.append(f"  {number:>2}. {frame.get('label') or ''}")
+                lines.extend([
+                    '', 'PRIVACY BOUNDARY',
+                    'No full URL, query string, request/response header values, cookies, body, packet payload, or full script source is retained in this timeline. Header names above are presence hints only; absence is not proof that Chromium sent no such header.',
+                ])
+                body.insert('1.0', '\n'.join(lines)); body.configure(state='disabled')
+                bar = tk.Frame(detail, bg=self.ui['bg']); bar.pack(fill='x', padx=12, pady=(0, 12))
+                self._feature_button(bar, 'Close', detail.destroy)
+                detail.bind('<Escape>', lambda event: detail.destroy())
+                return 'break'
+
+            def copy_requests():
+                lines = ['Time\tHostname\tRelation\tMethod\tResource\tStatus\tBytes\tDelivery\tPurpose\tInitiator\tScript caller\tConnection']
+                lines.extend('\t'.join(str(value) for value in req_values(row)) for row in req_rows['rows'])
+                try:
+                    self.root.clipboard_clear(); self.root.clipboard_append('\n'.join(lines))
+                    req_status.set(f"Copied {len(req_rows['rows'])} request row(s).")
+                except Exception:
+                    req_status.set('Could not copy request timeline.')
+
+            def close_timeline():
+                req_alive['value'] = False
+                if req_after.get('id'):
+                    try: timeline.after_cancel(req_after['id'])
+                    except Exception: pass
+                timeline.destroy()
+
+            self._feature_button(req_controls, 'Refresh now', req_refresh)
+            self._feature_button(req_controls, 'Copy all', copy_requests)
+            self._feature_button(req_controls, 'Details', show_request_details)
+            req_tree.bind('<Double-1>', show_request_details)
+            tk.Label(req_controls, text='Filter:', bg=self.ui['bg'], fg=self.ui['muted']).pack(side='left', padx=(10, 4))
+            entry = tk.Entry(req_controls, textvariable=req_search, width=26, bg=self.ui['field'], fg=self.ui['text'], insertbackground=self.ui['text'], relief='flat')
+            entry.pack(side='left', padx=(0, 6))
+            entry.bind('<Return>', lambda event: req_refresh())
+            tk.Checkbutton(
+                req_controls, text='Live', variable=req_live, command=req_refresh,
+                bg=self.ui['bg'], fg=self.ui['text'], selectcolor=self.ui['field'], activebackground=self.ui['bg'],
+                activeforeground=self.ui['text'], highlightthickness=0, bd=0,
+            ).pack(side='left', padx=(4, 4))
+            self._feature_button(req_controls, 'Close', close_timeline)
+            tk.Label(req_controls, textvariable=req_status, bg=self.ui['bg'], fg=self.ui['muted'], anchor='e').pack(side='right', fill='x', expand=True, padx=(12, 4))
+            timeline.protocol('WM_DELETE_WINDOW', close_timeline)
+            req_refresh()
+            return 'break'
 
         def toggle_auto():
             if auto_var.get():
@@ -1431,6 +1876,9 @@ class BrowserFeatures:
 
         self._feature_button(controls, 'Refresh now', refresh)
         self._feature_button(controls, 'Copy all', copy_rows)
+        self._feature_button(controls, 'Details', show_selected_details)
+        self._feature_button(controls, 'Request timeline', show_request_timeline)
+        tree.bind('<Double-1>', show_selected_details)
         tk.Checkbutton(
             controls, text='Live', variable=auto_var, command=toggle_auto,
             bg=self.ui['bg'], fg=self.ui['text'], selectcolor=self.ui['field'],
@@ -1452,8 +1900,10 @@ class BrowserFeatures:
         footer = tk.Label(
             win,
             text=(
-                'Exact site hostnames come from Tekzite Network when available; UDP peers come from RAM-only Kernel-Network ETW metadata. '
-                'PTR enrichment may query your configured DNS. TCP is sampled every 250 ms; UDP peer send/receive discovery is event-driven while this window is open.'
+                'Exact site hostnames come from Tekzite Network. Purpose/resource/script attribution is RAM-only CDP metadata and starts when this window opens; '
+                'refresh the page for a complete attribution pass. The live ledger retains only origin + final filename + function + line/column; source text is fetched only when you press “Show script source”, displayed as a bounded excerpt, and not stored. '
+                '“Strong opener” combines exact hostname/timing with Chromium’s non-reuse signal; weaker labels stay deliberately cautious because HTTP/2 can reuse one socket for many requests. Tekzite-injected Runtime helpers carry a CDP sourceURL provenance tag so their own favicon/UI requests are labelled as Tekzite internal rather than website JavaScript. The Request timeline adds response/cache/TLS/failure evidence without storing payloads. “Unattributed” is not proof of telemetry. '
+                'PTR enrichment may query your configured DNS. Current TCP is sampled every 250 ms, while UDP peers and short-lived recent TCP connects are event-driven through Kernel-Network ETW.'
             ),
             bg=self.ui['bg'], fg=self.ui['muted_dim'], anchor='w', justify='left', wraplength=1650,
         )

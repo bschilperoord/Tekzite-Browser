@@ -5,7 +5,7 @@ import engine.net as net
 
 
 def test_normal_exit_requests_graceful_chromium_profile_flush():
-    assert main.BROWSER_VERSION == "10.5.73"
+    assert main.BROWSER_VERSION == "10.5.80"
     source = inspect.getsource(main.BrowserApp.on_close)
     assert "close_embedded_chromium(" in source
     assert "graceful=True" in source

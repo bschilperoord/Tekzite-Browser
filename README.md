@@ -2,19 +2,69 @@
 
 Tekzite Browser is an experimental Windows desktop browser shell built in Python/Tk around a real Chromium renderer. Tekzite keeps its own tabs, omnibox, menus, preferences and interaction layer while Chromium handles web standards, JavaScript, media, cookies, canvas, WebGL and page rendering.
 
-> **Current release:** v10.5.73 UltraSpeed for Windows  
+> **Current release:** v10.5.80 UltraSpeed for Windows  
+
+## Connection Forensics: see why a connection exists
+
+Tekzite's **Tools -> Network Connections** is more than a list of IP addresses. It correlates the Windows socket owner, Tekzite Network proxy state, Chromium request metadata and JavaScript initiator evidence so you can follow a live causal chain:
+
+**process -> socket -> proxy -> hostname -> request -> JavaScript caller -> response**
+
+For attributed traffic, Tekzite can show the process/PID, TCP or UDP endpoint, exact proxy-requested hostname, request purpose/resource type, page/worker/extension context, sanitized JavaScript caller and async stack, connection-reuse evidence, response status/MIME/bytes, cache or service-worker delivery, redirect lineage, TLS metadata and recent short-lived TCP/UDP activity. Double-click a row to inspect the evidence, or use **Show script source** to view a bounded excerpt around the exact caller. Minified one-line bundles can be locally pretty-printed and inline source maps can be decoded without generating another network request.
+
+The feature is designed as a **causal audit, not a packet sniffer**. The live ledger is bounded and RAM-only while the monitor is open. It does not retain packet payloads, full URLs, query strings, header values, cookies, request/response bodies or complete script source. Unknown traffic stays **Unattributed** rather than being automatically called telemetry, and HTTP/2 reuse is explicitly separated from evidence that a script actually opened a socket.
+
+### Minimal, explicit favicon networking (v10.5.80)
+
+Tekzite no longer injects a page-context `fetch(..., credentials:'include')` call to retrieve tab favicons. Chromium is asked only for the icon URL. Tekzite then performs a small browser-owned GET through **Tekzite Network**, without page/session cookies, Authorization, Origin or Referer headers. Response cookies are ignored. This removes the confusing case where Tekzite's own favicon helper appeared in CDP as anonymous website JavaScript.
+
+The favicon path is deliberately narrow: only `http`, `https` and bounded `data:` icons are accepted, transfer is capped at 512 KiB, and explicit loopback/private/link-local or conventional local-name targets are rejected before any request is made. Redirects into local address space are rejected as well. The Live Socket View keeps only a short-lived hostname-level marker for this browser-owned request so a matching upstream can be labeled **Tekzite favicon fetch / Tekzite Browser internal** rather than **Unattributed** or page script traffic.
+
+### Deep JavaScript caller inspector (v10.5.78)
+
+**Show script source** in Live Socket View Details is now a deeper JavaScript inspector. One-line/minified bundles are locally pretty-printed around the captured CDP caller coordinate, Tekzite isolates the best-effort containing function, and it scans code-only regions for direct browser network primitives such as `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `navigator.sendBeacon` and `WebTransport`. Strings, comments and regular-expression literals are masked during this scan so text that merely contains `fetch(` is not presented as causal code.
+
+The inspector is source-map aware without contaminating the network audit. `Debugger.scriptParsed` metadata is captured on the temporary source-inspection channel. Inline Source Map v3 data can be decoded locally to show the mapped original filename/name/line and a bounded `sourcesContent` excerpt when present. External source maps are reported by sanitized hostname/final filename but are **not fetched automatically**, because generating a new network request while investigating another request would muddy the evidence. The complete generated script and inline map exist only during the explicit inspection operation; only bounded excerpts are displayed and nothing is added to the persistent/request ledger or written to disk.
+
+### Causal request timeline + response evidence (v10.5.77)
+
+The Live Socket View now includes a **Request timeline** that preserves a short RAM-only causal history while the monitor is open. It combines Chromium request metadata with the existing socket evidence: destination relation, method/resource type, initiator and sanitized script call chain, response status/MIME, encoded bytes, cache/service-worker delivery, redirects, failures, TLS protocol/cipher/issuer and connection-reuse state. This makes it possible to follow **page/worker → script → request → socket/connection → response** without packet payload capture.
+
+Tekzite also records presence-only privacy hints for request/response headers Chromium exposes to the Network event stream: Cookie, Authorization, Origin, Referer and Set-Cookie. Header values are discarded immediately and never enter the audit ledger. A missing hint is not proof that Chromium sent no such header. Async stack descriptions such as timer/Promise boundaries are preserved when CDP supplies them, while full URLs, query strings, headers, bodies, cookies and complete script source remain outside the retained timeline.
+
+### On-demand connection caller source (v10.5.76)
+
+The Live Socket View can now go one step beyond filename/function attribution. Double-click an attributed connection, open **Details**, and choose **Show script source** to ask the live Chromium target for a small source excerpt around the exact caller line and column. The triggering line is marked and long/minified bundles are clipped around the call site so the source viewer remains responsive.
+
+This is deliberately on-demand. The continuous network audit retains only sanitized caller metadata plus opaque target/script IDs. Tekzite opens a separate temporary DevTools channel for the source request, reduces Chromium's returned source immediately to the bounded excerpt, and does not write the complete script source to disk or add it to the connection ledger. Parser/browser-generated requests without a JavaScript caller simply report that no source is available.
+
+### Script-to-socket forensics + recent TCP ETW (v10.5.75)
+
+**Tools -> Network Connections** now goes beyond host-level attribution. For Chromium requests that expose an initiator stack, Tekzite retains a sanitized JavaScript caller chain containing only origin hostname, final script filename, function name and 1-based line/column. The live table adds **Script caller** and **Match** columns, and double-click/Details opens the complete sanitized call chain. `fetch`, XHR, WebSocket, EventSource and beacon/ping traffic are identified separately where Chromium exposes that resource type. Full script URLs/paths, query strings, script contents, request headers, cookies and bodies are not retained.
+
+Socket attribution is deliberately confidence-scored instead of pretending HTTP/2 multiplexing is simple. **Strong opener** requires an exact requested-host match, close socket-open timing and Chromium explicitly reporting `connectionReused = false`. **Likely opener** has exact-host/timing evidence without a reuse verdict; **Probable opener** uses endpoint/timing evidence when an exact hostname is unavailable; **Reused connection**, **Endpoint activity** and **Host activity** are shown when the request is related but must not be claimed as the socket creator.
+
+The Kernel-Network ETW layer now also retains recent TCP connect/accept events for Tekzite-owned PIDs. A very short TCP flow that vanishes before the next 250 ms owner-table snapshot can therefore remain briefly as a **RECENT** row. Current sockets still come from the Windows owner tables; ETW is an ephemeral RAM-only supplement and captures no payloads.
+
+### Live request purpose + initiator attribution (v10.5.74)
+
+**Tools -> Network Connections** can now explain many live web upstreams instead of showing only a socket and hostname. While the Live Socket View is open, Tekzite opens dedicated read-only Chromium DevTools Network observers for exposed page/worker/extension targets and correlates recent `Network.requestWillBeSent` events with Tekzite Network's exact upstream hostname. New **Purpose**, **Resource**, and **Initiator** columns distinguish page navigation/parser/script/preload traffic, workers/service workers, exposed extension targets and other Chromium target classes.
+
+The attribution ledger is bounded, short-lived and RAM-only. Tekzite retains destination hostname/port, target class, resource type and initiator type/hostname, but immediately discards full URLs, paths, query strings, headers, cookies and payloads. Attribution begins when the Live Socket View opens, so refreshing the page gives the most complete picture. An upstream marked **Unattributed** only means that no matching page/extension CDP event has been observed in the live window; it is not automatically labeled telemetry.
+
+This release also fixes PyInstaller one-file `tekzite-network.exe` payload processes being mistaken for generic Tekzite children. The whole helper process tree is now recognized as **Tekzite Network**, so its public sockets are labeled **Tekzite Network upstream** and can receive the exact original requested hostname instead of falling back to PTR.
 
 ### UDP remote peers via live ETW (v10.5.73)
 
 **Tools -> Network Connections** can now resolve the remote peer behind live UDP sockets instead of stopping at the local Windows owner-table endpoint. While the Live Socket View is open, Tekzite starts a RAM-only `Microsoft-Windows-Kernel-Network` ETW consumer for Tekzite/Chromium/helper PIDs and correlates UDP send/receive events with the owning socket. The dashboard shows the remote IP and port, one row per recent peer, TX/RX packet and byte counters, last-seen age, route classification and asynchronous hostname enrichment.
 
-One UDP socket may talk to several destinations, so peers remain separate rows for a short rolling window rather than overwriting each other. The ETW monitor stores metadata only in process memory and stops when the Live Socket View closes; it does not capture packet payloads. If Windows refuses the ETW session, the UI reports the reason and falls back to the local UDP endpoint instead of inventing a remote peer. TCP continues to use the 250 ms Windows owner-table snapshot, while UDP peer discovery is event-driven after the monitor starts.
+One UDP socket may talk to several destinations, so peers remain separate rows for a short rolling window rather than overwriting each other. The ETW monitor stores metadata only in process memory and stops when the Live Socket View closes; it does not capture packet payloads. If Windows refuses the ETW session, the UI reports the reason and falls back to the local UDP endpoint instead of inventing a remote peer. Current TCP sockets use the Windows owner-table snapshot; starting with v10.5.75, Kernel-Network ETW also retains recent TCP connect/accept events so very short-lived flows can remain visible as RECENT rows. UDP peer discovery remains event-driven after the monitor starts.
 
 ### Full live socket view (v10.5.72)
 
 **Tools -> Network Connections** is now a process-level **Live Socket View**. Tekzite reads Windows' owner-PID TCP/UDP tables and shows every current socket owned by Tekzite itself, Chromium, Tekzite Network and their descendants: process role/name, PID, TCP/UDP + IPv4/IPv6, local endpoint, hostname, remote endpoint, TCP state and route classification. Public Chromium sockets that do not go through Tekzite Network are called out as **Direct external**.
 
-For proxied web traffic, the network helper correlates its live upstream socket with the original requested hostname in RAM, so the table can show the real site/subdomain even when the remote IP belongs to a CDN. Other unresolved IPs can be enriched with optional background PTR lookup. No URL paths, headers, query strings or page contents are added to the monitor. Windows' UDP owner table itself exposes only local UDP endpoints. Starting with v10.5.73, Tekzite augments those UDP rows with live Kernel-Network ETW peer events; TCP remains a 250 ms owner-table snapshot, so an extremely short-lived TCP socket can still theoretically exist entirely between samples.
+For proxied web traffic, the network helper correlates its live upstream socket with the original requested hostname in RAM, so the table can show the real site/subdomain even when the remote IP belongs to a CDN. Other unresolved IPs can be enriched with optional background PTR lookup. No URL paths, headers, query strings or page contents are added to the monitor. Windows' UDP owner table itself exposes only local UDP endpoints. Starting with v10.5.73, Tekzite augments those UDP rows with live Kernel-Network ETW peer events. Current TCP state remains owner-table based; starting with v10.5.75, Kernel-Network ETW supplements it with a short-lived RECENT ledger for connect/accept events that disappear between snapshots.
 
 ### Live network connections overview (v10.5.71)
 

@@ -11,7 +11,7 @@ PROXY = (ROOT / "tekzite_network.py").read_text(encoding="utf-8")
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.73"  # sync_version updates this pin
+    assert main.BROWSER_VERSION == "10.5.80"  # sync_version updates this pin
 
 
 def test_proxy_exposes_exact_active_upstream_hostname_without_content(monkeypatch):

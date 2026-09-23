@@ -1,6 +1,6 @@
 from functools import lru_cache
 from urllib.request import Request, urlopen, ProxyHandler, build_opener
-from urllib.parse import unquote_to_bytes, quote
+from urllib.parse import unquote_to_bytes, quote, urljoin
 from http.cookiejar import CookieJar
 import base64
 import io
@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import json
+import re
 import hashlib
 import shutil
 import sqlite3
@@ -22,7 +23,7 @@ import atexit
 import threading
 from pathlib import Path
 from urllib.request import urlopen as _stdlib_urlopen
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, unquote
 from loopback_policy import allow_loopback_port, revoke_loopback_port, snapshot as loopback_policy_snapshot
 from .udp_peer_etw import ensure_udp_peer_monitor, stop_udp_peer_monitor
 
@@ -88,6 +89,23 @@ _NETWORK_ENGINE = None
 _NETWORK_OPENER = None
 _NETWORK_ENGINE_LOG_HANDLE = None
 _NETWORK_ENGINE_LOCK = threading.RLock()
+
+# v10.5.74: request-attribution monitor used only while Live Socket View is
+# active. It observes Chromium CDP Network metadata in RAM and never retains
+# full URLs, paths, query strings, headers, cookies, or payloads.
+_REQUEST_AUDIT_MONITOR = None
+_REQUEST_AUDIT_LOCK = threading.RLock()
+_REQUEST_AUDIT_MAX_AGE = 45.0
+_REQUEST_AUDIT_MAX_RECORDS = 2048
+
+# v10.5.80: browser-owned network work is tracked separately from page CDP
+# requests so Tekzite can explain its own minimal helper traffic without
+# pretending it came from website JavaScript. Records are hostname-only,
+# RAM-only, and short-lived.
+_INTERNAL_NETWORK_ACTIVITY = []
+_INTERNAL_NETWORK_ACTIVITY_LOCK = threading.RLock()
+_INTERNAL_NETWORK_ACTIVITY_MAX_AGE = 15.0
+_INTERNAL_NETWORK_ACTIVITY_MAX_RECORDS = 128
 
 
 def _network_engine_root():
@@ -791,21 +809,60 @@ def _windows_socket_rows():
         return []
 
 
-def _socket_role(pid: int, exe: str, network_pid: int, chromium_pid: int) -> str:
+def _descendant_pid_set(root_pid, processes):
+    """Return one root PID plus descendants from an existing process snapshot."""
+    try:
+        root_pid = int(root_pid or 0)
+    except Exception:
+        root_pid = 0
+    if not root_pid:
+        return set()
+    owned = {root_pid}
+    processes = processes or {}
+    for _ in range(max(2, len(processes) + 1)):
+        before = len(owned)
+        for pid, item in processes.items():
+            try:
+                if int(item.get("ppid") or 0) in owned:
+                    owned.add(int(pid))
+            except Exception:
+                continue
+        if len(owned) == before:
+            break
+    return owned
+
+
+def _pid_matches(pid, values):
+    try:
+        pid = int(pid or 0)
+    except Exception:
+        return False
+    if isinstance(values, (set, frozenset, list, tuple)):
+        try:
+            return pid in {int(value) for value in values if int(value or 0) > 0}
+        except Exception:
+            return False
+    try:
+        return bool(values) and pid == int(values)
+    except Exception:
+        return False
+
+
+def _socket_role(pid: int, exe: str, network_pid=0, chromium_pid=0, *, network_pids=None, chromium_pids=None) -> str:
     pid = int(pid or 0)
     lower = str(exe or "").casefold()
     if pid == int(os.getpid()):
         return "Tekzite UI"
-    if network_pid and pid == int(network_pid):
+    if _pid_matches(pid, network_pids if network_pids is not None else network_pid):
         return "Tekzite Network"
-    if "chrom" in lower or (chromium_pid and pid == int(chromium_pid)):
+    if "chrom" in lower or _pid_matches(pid, chromium_pids if chromium_pids is not None else chromium_pid):
         return "Chromium"
     if exe:
         return "Tekzite child"
     return "Tekzite process"
 
 
-def _socket_path_label(row, *, network_pid=0, proxy_port=0, devtools_port=0):
+def _socket_path_label(row, *, network_pid=0, network_pids=None, proxy_port=0, devtools_port=0):
     state = str(row.get("state") or "")
     protocol = str(row.get("protocol") or "")
     remote = _normalize_socket_address(row.get("remote_address"))
@@ -826,7 +883,7 @@ def _socket_path_label(row, *, network_pid=0, proxy_port=0, devtools_port=0):
             return "Chromium DevTools"
         return "Loopback internal"
     if remote:
-        if network_pid and pid == int(network_pid):
+        if _pid_matches(pid, network_pids if network_pids is not None else network_pid):
             return "Tekzite Network upstream" if protocol != "UDP" else "Tekzite Network UDP"
         return "Direct UDP external" if protocol == "UDP" else "Direct external"
     return "Local endpoint"
@@ -859,15 +916,67 @@ def _udp_peer_candidates(peer_rows, item):
     return matches
 
 
+def _record_internal_network_activity(url, *, purpose, resource=""):
+    """Remember one Tekzite-owned outbound intent without retaining its URL."""
+    try:
+        parts = urlsplit(str(url or ""))
+        host = str(parts.hostname or "").strip().rstrip(".").lower()[:253]
+    except Exception:
+        host = ""
+    if not host:
+        return
+    now = time.time()
+    item = {
+        "host": host,
+        "purpose": str(purpose or "Tekzite internal request")[:160],
+        "resource": str(resource or "")[:80],
+        "seen_at": now,
+    }
+    with _INTERNAL_NETWORK_ACTIVITY_LOCK:
+        cutoff = now - _INTERNAL_NETWORK_ACTIVITY_MAX_AGE
+        _INTERNAL_NETWORK_ACTIVITY[:] = [
+            row for row in _INTERNAL_NETWORK_ACTIVITY
+            if float(row.get("seen_at") or 0.0) >= cutoff
+        ]
+        _INTERNAL_NETWORK_ACTIVITY.append(item)
+        if len(_INTERNAL_NETWORK_ACTIVITY) > _INTERNAL_NETWORK_ACTIVITY_MAX_RECORDS:
+            del _INTERNAL_NETWORK_ACTIVITY[:-_INTERNAL_NETWORK_ACTIVITY_MAX_RECORDS]
+
+
+def _match_internal_network_activity(host, *, around=0.0):
+    """Return recent Tekzite-owned activity for one exact destination host."""
+    host = str(host or "").strip().rstrip(".").lower()
+    if not host:
+        return None
+    now = time.time()
+    cutoff = now - _INTERNAL_NETWORK_ACTIVITY_MAX_AGE
+    try:
+        around = float(around or 0.0)
+    except Exception:
+        around = 0.0
+    with _INTERNAL_NETWORK_ACTIVITY_LOCK:
+        _INTERNAL_NETWORK_ACTIVITY[:] = [
+            row for row in _INTERNAL_NETWORK_ACTIVITY
+            if float(row.get("seen_at") or 0.0) >= cutoff
+        ]
+        matches = [row for row in _INTERNAL_NETWORK_ACTIVITY if row.get("host") == host]
+    if not matches:
+        return None
+    if around > 0:
+        matches.sort(key=lambda row: abs(float(row.get("seen_at") or 0.0) - around))
+        candidate = matches[0]
+        if abs(float(candidate.get("seen_at") or 0.0) - around) <= 5.0:
+            return dict(candidate)
+    return dict(max(matches, key=lambda row: float(row.get("seen_at") or 0.0)))
+
+
 def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
     """Return every current socket owned by Tekzite and its child processes.
 
-    TCP endpoints come directly from Windows' owner-PID tables. UDP owner-table
-    rows are enriched with Microsoft-Windows-Kernel-Network ETW send/receive
-    events, which provide the actual remote peer, packet/byte counters and
-    last-seen time. The ETW ledger is RAM-only and short-lived. Extremely brief
-    TCP sockets can still exist between 250 ms owner-table snapshots, while UDP
-    peer events are event-driven once the monitor is running.
+    Current TCP endpoints come directly from Windows' owner-PID tables. UDP
+    owner-table rows are enriched with Microsoft-Windows-Kernel-Network ETW
+    send/receive events, and TCP connect/accept ETW events retain short-lived
+    flows briefly as RECENT rows. The ETW ledger is RAM-only and short-lived.
     """
     if os.name != "nt":
         return {
@@ -882,6 +991,7 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
     # populate the RAM ledger without waiting for another packet-table API.
     udp_peer_state = ensure_udp_peer_monitor(owned)
     peer_rows = list((udp_peer_state or {}).get("peers") or [])
+    tcp_event_rows = list((udp_peer_state or {}).get("tcp_flows") or [])
 
     network_state = _NETWORK_ENGINE or {}
     edge_state = _EDGE_SESSION or {}
@@ -898,14 +1008,103 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
     proxy_port = int(network_state.get("port") or 0) if isinstance(network_state, dict) else 0
     devtools_port = int(edge_state.get("port") or 0) if isinstance(edge_state, dict) else 0
 
+    # PyInstaller one-file executables may keep the launcher PID while the real
+    # helper payload runs in a child process. Treat the full helper/browser
+    # descendant trees as authoritative so upstream sockets cannot be mislabeled
+    # as direct Chromium/Tekzite traffic.
+    network_pids = _descendant_pid_set(network_pid, processes)
+    chromium_pids = _descendant_pid_set(chromium_pid, processes)
+
     proxy_snapshot = connection_overview(start=False, timeout=0.12) if include_proxy_names else {}
     upstream_names = {}
+    upstream_details = {}
+    proxy_clients = {}
     for item in list((proxy_snapshot or {}).get("active_upstreams") or []):
         key = (
             _normalize_socket_address(item.get("local_address")), int(item.get("local_port") or 0),
             _normalize_socket_address(item.get("remote_address")), int(item.get("remote_port") or 0),
         )
         upstream_names[key] = str(item.get("host") or "")[:253]
+        upstream_details[key] = dict(item)
+        client_address = _normalize_socket_address(item.get("client_address"))
+        client_port = int(item.get("client_port") or 0)
+        proxy_address = _normalize_socket_address(item.get("proxy_address"))
+        proxy_client_port = int(item.get("proxy_port") or proxy_port or 0)
+        if client_address and client_port and proxy_client_port:
+            proxy_clients[(client_address, client_port, proxy_address or "127.0.0.1", proxy_client_port)] = str(item.get("host") or "")[:253]
+
+    request_audit = ensure_network_request_audit_monitor(devtools_port) if devtools_port else {
+        "status": "idle", "reason": "Chromium DevTools is not active.", "hosts": [], "endpoints": []
+    }
+    request_hosts = {str(item.get("host") or "").lower(): item for item in list((request_audit or {}).get("hosts") or []) if item.get("host")}
+    request_rows = list((request_audit or {}).get("requests") or [])
+    audit_started_at = float((request_audit or {}).get("started_at") or 0.0)
+    request_endpoints = {
+        (_normalize_socket_address(item.get("remote_address")), int(item.get("remote_port") or 0)): item
+        for item in list((request_audit or {}).get("endpoints") or [])
+        if _normalize_socket_address(item.get("remote_address")) and int(item.get("remote_port") or 0)
+    }
+
+    def request_for_socket(destination_host, remote_address, remote_port, opened_at=0.0):
+        """Find the most defensible CDP request for one network socket.
+
+        If the socket opened after the CDP audit started and a same-host request
+        lands within a small timestamp window, that request is a likely opener.
+        Otherwise endpoint/host matches are labeled as activity only; they are
+        never presented as causal certainty.
+        """
+        destination_host = str(destination_host or "").strip().rstrip(".").lower()
+        remote_address = _normalize_socket_address(remote_address)
+        try:
+            remote_port = int(remote_port or 0)
+        except Exception:
+            remote_port = 0
+        try:
+            opened_at = float(opened_at or 0.0)
+        except Exception:
+            opened_at = 0.0
+        candidates = []
+        for req in request_rows:
+            host = str(req.get("host") or "").strip().rstrip(".").lower()
+            endpoint_match = bool(
+                remote_address and remote_port
+                and _normalize_socket_address(req.get("remote_address")) == remote_address
+                and int(req.get("remote_port") or 0) == remote_port
+            )
+            host_match = bool(destination_host and host == destination_host)
+            if destination_host:
+                # A CDN IP can serve unrelated hostnames. Once Tekzite Network
+                # gives us the requested hostname, never let an IP:port-only
+                # match from another hostname outrank it.
+                if not host_match:
+                    continue
+            elif not endpoint_match:
+                continue
+            seen = float(req.get("first_seen") or 0.0)
+            delta = abs(seen - opened_at) if opened_at and seen else 999999.0
+            reused = req.get("connection_reused")
+            reuse_rank = 0 if reused is False else 1 if reused is None else 2
+            candidates.append((reuse_rank, 0 if endpoint_match else 1, delta, -seen, req, endpoint_match, host_match))
+        if not candidates:
+            return None, ""
+        candidates.sort(key=lambda item: item[:4])
+        _reuse_rank, _endpoint_rank, delta, _neg_seen, req, endpoint_match, host_match = candidates[0]
+        monitor_covered_open = bool(opened_at and audit_started_at and opened_at >= audit_started_at - 0.20)
+        reused = req.get("connection_reused")
+        if monitor_covered_open and delta <= 2.5:
+            if reused is False and destination_host and host_match:
+                return req, "Strong opener"
+            if reused is False and endpoint_match:
+                return req, "Probable opener"
+            if reused is None and destination_host and host_match:
+                return req, "Likely opener"
+            if reused is None and endpoint_match:
+                return req, "Probable opener"
+        if reused is True:
+            return req, "Reused connection"
+        if endpoint_match:
+            return req, "Endpoint activity"
+        return req, "Host activity"
 
     def decorate(item, peer=None):
         pid = int(item.get("pid") or 0)
@@ -933,20 +1132,40 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
                 if concrete:
                     row["local_address"] = concrete
         row["process"] = exe or ("TekziteBrowser.exe" if pid == int(os.getpid()) else "")
-        row["role"] = _socket_role(pid, exe, network_pid, chromium_pid)
+        row["role"] = _socket_role(
+            pid, exe, network_pid, chromium_pid,
+            network_pids=network_pids, chromium_pids=chromium_pids,
+        )
         row["path"] = _socket_path_label(
-            row, network_pid=network_pid, proxy_port=proxy_port, devtools_port=devtools_port,
+            row, network_pid=network_pid, network_pids=network_pids,
+            proxy_port=proxy_port, devtools_port=devtools_port,
         )
         local_address = _normalize_socket_address(row.get("local_address"))
         remote_address = _normalize_socket_address(row.get("remote_address"))
         row["local_address"] = local_address
         row["remote_address"] = remote_address
         host = ""
-        if pid == network_pid and remote_address:
-            host = upstream_names.get((
+        upstream_detail = None
+        if _pid_matches(pid, network_pids) and remote_address:
+            upstream_key = (
                 local_address, int(row.get("local_port") or 0),
                 remote_address, int(row.get("remote_port") or 0),
-            ), "")
+            )
+            host = upstream_names.get(upstream_key, "")
+            upstream_detail = upstream_details.get(upstream_key)
+            if upstream_detail is not None:
+                row["socket_opened_at"] = float(upstream_detail.get("opened_at") or 0.0)
+        if not host and _pid_matches(pid, chromium_pids) and remote_address:
+            # A Chromium -> local proxy socket can be tied to the exact CONNECT
+            # destination while the tunnel is active. The actual remote endpoint
+            # is still 127.0.0.1; destination_host exposes where that tunnel goes.
+            client_key = (
+                local_address, int(row.get("local_port") or 0),
+                remote_address, int(row.get("remote_port") or 0),
+            )
+            destination = proxy_clients.get(client_key, "")
+            if destination:
+                row["destination_host"] = destination
         if not host and remote_address:
             try:
                 remote_ip = ipaddress.ip_address(remote_address)
@@ -960,6 +1179,115 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
                 else:
                     host = "localhost"
         row["hostname"] = host
+
+        attribution = None
+        exact_destination = str(row.get("destination_host") or host or "").strip().rstrip(".").lower()
+        socket_request, match_quality = request_for_socket(
+            exact_destination, remote_address, int(row.get("remote_port") or 0),
+            row.get("socket_opened_at") or row.get("first_seen") or 0.0,
+        )
+        if exact_destination:
+            attribution = request_hosts.get(exact_destination)
+        if attribution is None and remote_address and int(row.get("remote_port") or 0):
+            attribution = request_endpoints.get((remote_address, int(row.get("remote_port") or 0)))
+
+        # Closed/recent upstreams can outlive Tekzite Network's active socket
+        # map. A CDP response endpoint still gives us the requested hostname.
+        if socket_request and not exact_destination and str(row.get("path") or "").startswith("Tekzite Network upstream"):
+            recovered_host = str(socket_request.get("host") or "").strip().rstrip(".").lower()[:253]
+            if recovered_host:
+                row["destination_host"] = recovered_host
+                row["hostname"] = recovered_host
+                exact_destination = recovered_host
+                attribution = request_hosts.get(recovered_host) or attribution
+
+        if attribution or socket_request:
+            source = socket_request or attribution or {}
+            scopes = list((attribution or {}).get("scopes") or ([source.get("scope")] if source.get("scope") else []))
+            resources = list((attribution or {}).get("resource_types") or ([source.get("resource_type")] if source.get("resource_type") else []))
+            initiators = list((attribution or {}).get("initiators") or [])
+            row["request_scope"] = " + ".join(str(v) for v in scopes[:3] if v) or str(source.get("scope") or (attribution or {}).get("latest_scope") or "")
+            row["request_purpose"] = str(source.get("purpose") or (attribution or {}).get("purpose") or "")
+            row["request_resource"] = ", ".join(str(v) for v in resources[:4] if v) or str(source.get("resource_type") or (attribution or {}).get("latest_resource_type") or "")
+            row["request_initiator"] = str(source.get("initiator_label") or "") or (
+                str(source.get("initiator_type") or "")
+                + (f" @ {source.get('initiator_host')}" if source.get("initiator_host") else "")
+            ) or (initiators[0] if initiators else (
+                str((attribution or {}).get("latest_initiator_label") or "") or (
+                    str((attribution or {}).get("latest_initiator_type") or "")
+                    + (f" @ {(attribution or {}).get('latest_initiator_host')}" if (attribution or {}).get("latest_initiator_host") else "")
+                )
+            ))
+            row["request_target_host"] = str(source.get("target_host") or (attribution or {}).get("latest_target_host") or "")
+            row["request_count"] = int((attribution or {}).get("count") or (1 if socket_request else 0))
+            row["request_attribution"] = "CDP"
+            row["request_match_quality"] = match_quality or ("Endpoint activity" if socket_request else "Host activity")
+            row["request_script"] = str(source.get("script_source") or (attribution or {}).get("latest_script_source") or "")
+            row["request_script_host"] = str(source.get("script_host") or (attribution or {}).get("latest_script_host") or "")
+            row["request_script_file"] = str(source.get("script_file") or (attribution or {}).get("latest_script_file") or "")
+            row["request_script_function"] = str(source.get("script_function") or (attribution or {}).get("latest_script_function") or "")
+            row["request_script_line"] = int(source.get("script_line") or (attribution or {}).get("latest_script_line") or 0)
+            row["request_script_column"] = int(source.get("script_column") or (attribution or {}).get("latest_script_column") or 0)
+            row["request_script_id"] = str(source.get("script_id") or (attribution or {}).get("latest_script_id") or "")[:128]
+            row["request_target_id"] = str(source.get("target_id") or (attribution or {}).get("latest_target_id") or "")[:128]
+            row["request_script_stack"] = [
+                dict(frame) for frame in list(source.get("script_stack") or (attribution or {}).get("latest_script_stack") or [])[:8]
+            ]
+            row["request_connection_id"] = str(source.get("connection_id") or "")
+            row["request_connection_reused"] = source.get("connection_reused")
+            row["request_transport"] = str(source.get("response_protocol") or "")
+            row["request_method"] = str(source.get("method") or (attribution or {}).get("latest_method") or "")
+            row["request_domain_relation"] = str(source.get("domain_relation") or (attribution or {}).get("latest_domain_relation") or "")
+            row["request_response_status"] = int(source.get("response_status") or (attribution or {}).get("latest_response_status") or 0)
+            row["request_response_mime"] = str(source.get("response_mime_type") or (attribution or {}).get("latest_response_mime_type") or "")
+            row["request_encoded_bytes"] = int(source.get("encoded_data_length") or (attribution or {}).get("latest_encoded_data_length") or 0)
+            row["request_from_cache"] = bool(source.get("request_served_from_cache") or source.get("response_from_disk_cache") or source.get("response_from_prefetch_cache"))
+            row["request_from_service_worker"] = bool(source.get("response_from_service_worker"))
+            row["request_loading_failed"] = bool(source.get("loading_failed") or (attribution or {}).get("latest_loading_failed"))
+            row["request_failure_text"] = str(source.get("failure_text") or "")
+            row["request_blocked_reason"] = str(source.get("blocked_reason") or "")
+            row["request_tls_protocol"] = str(source.get("tls_protocol") or "")
+            row["request_tls_cipher"] = str(source.get("tls_cipher") or "")
+            row["request_tls_issuer"] = str(source.get("tls_issuer") or "")
+            row["request_security_state"] = str(source.get("security_state") or "")
+            row["request_observed_cookie"] = bool(source.get("observed_cookie_header"))
+            row["request_observed_authorization"] = bool(source.get("observed_authorization_header"))
+            row["request_observed_origin"] = bool(source.get("observed_origin_header"))
+            row["request_observed_referer"] = bool(source.get("observed_referer_header"))
+            row["request_observed_set_cookie"] = bool(source.get("observed_set_cookie_header"))
+            row["request_redirect_from_host"] = str(source.get("redirect_from_host") or "")
+            row["request_redirect_to_host"] = str(source.get("redirect_to_host") or "")
+        elif str(row.get("path") or "").startswith("Tekzite Network upstream") and exact_destination:
+            internal_activity = _match_internal_network_activity(
+                exact_destination, around=row.get("socket_opened_at") or row.get("first_seen") or 0.0
+            )
+            if internal_activity:
+                row["request_scope"] = "Tekzite internal"
+                row["request_purpose"] = str(internal_activity.get("purpose") or "Tekzite internal request")
+                row["request_resource"] = str(internal_activity.get("resource") or "")
+                row["request_initiator"] = "Tekzite Browser internal"
+                row["request_script"] = ""
+                row["request_script_id"] = ""
+                row["request_target_id"] = ""
+                row["request_script_stack"] = []
+                row["request_match_quality"] = "Internal host activity"
+                row["request_target_host"] = exact_destination
+                row["request_count"] = 1
+                row["request_attribution"] = "Tekzite"
+            else:
+                row["request_scope"] = "Unattributed"
+                row["request_purpose"] = "No page/extension CDP request observed yet"
+                row["request_resource"] = ""
+                row["request_initiator"] = ""
+                row["request_script"] = ""
+                row["request_script_id"] = ""
+                row["request_target_id"] = ""
+                row["request_script_stack"] = []
+                row["request_match_quality"] = "Unattributed"
+                row["request_target_host"] = ""
+                row["request_count"] = 0
+                row["request_attribution"] = "none"
+
         row["key"] = "|".join([
             str(pid), str(row.get("protocol") or ""), str(row.get("family") or ""),
             local_address, str(int(row.get("local_port") or 0)), remote_address,
@@ -968,6 +1296,7 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
         return row
 
     rows = []
+    current_tcp_keys = set()
     for item in _windows_socket_rows():
         pid = int(item.get("pid") or 0)
         if pid not in owned:
@@ -977,6 +1306,37 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
             if peers:
                 rows.extend(decorate(item, peer) for peer in peers)
                 continue
+        if str(item.get("protocol") or "") == "TCP":
+            current_tcp_keys.add((
+                pid, str(item.get("family") or ""),
+                _normalize_socket_address(item.get("local_address")), int(item.get("local_port") or 0),
+                _normalize_socket_address(item.get("remote_address")), int(item.get("remote_port") or 0),
+            ))
+        rows.append(decorate(item))
+
+    # Event-observed TCP connects survive briefly after the Windows owner table
+    # drops them. This closes the 250 ms polling blind spot without pretending a
+    # recently closed flow is still established.
+    for flow in tcp_event_rows:
+        pid = int(flow.get("pid") or 0)
+        if pid not in owned:
+            continue
+        key = (
+            pid, str(flow.get("family") or ""),
+            _normalize_socket_address(flow.get("local_address")), int(flow.get("local_port") or 0),
+            _normalize_socket_address(flow.get("remote_address")), int(flow.get("remote_port") or 0),
+        )
+        if key in current_tcp_keys:
+            continue
+        item = {
+            "pid": pid, "protocol": "TCP", "family": str(flow.get("family") or ""),
+            "local_address": key[2], "local_port": key[3],
+            "remote_address": key[4], "remote_port": key[5],
+            "state": "RECENT", "first_seen": float(flow.get("first_seen") or 0.0),
+            "last_seen": float(flow.get("last_seen") or 0.0),
+            "event_count": int(flow.get("count") or 0),
+            "event_kind": str(flow.get("event") or "connect"),
+        }
         rows.append(decorate(item))
 
     rows.sort(key=lambda row: (
@@ -992,24 +1352,34 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
         "sockets": rows,
         "owned_pids": sorted(int(pid) for pid in owned),
         "network_pid": network_pid,
+        "network_pids": sorted(network_pids),
         "chromium_pid": chromium_pid,
+        "chromium_pids": sorted(chromium_pids),
         "proxy_port": proxy_port,
         "devtools_port": devtools_port,
+        "request_audit": {
+            "status": str((request_audit or {}).get("status") or "unknown"),
+            "reason": str((request_audit or {}).get("reason") or ""),
+            "target_count": int((request_audit or {}).get("target_count") or 0),
+            "request_count": int((request_audit or {}).get("request_count") or 0),
+        },
         "udp_peer_monitor": {
             "status": str((udp_peer_state or {}).get("status") or "unknown"),
             "reason": str((udp_peer_state or {}).get("reason") or ""),
             "peer_count": len(peer_rows),
+            "tcp_recent_count": len(tcp_event_rows),
         },
         "sampling_note": (
-            "TCP uses owner-PID snapshots; UDP remote peers are enriched from live "
-            "Microsoft-Windows-Kernel-Network ETW events."
+            "Current TCP sockets use owner-PID snapshots; recent TCP connect/accept events "
+            "and UDP remote peers are enriched from live Microsoft-Windows-Kernel-Network ETW."
         ),
     }
 
 
 def stop_live_socket_peer_monitor():
-    """Stop the optional ETW peer session when the Live Socket View closes."""
+    """Stop optional UDP ETW + CDP attribution monitors with the Live Socket View."""
     stop_udp_peer_monitor()
+    stop_network_request_audit_monitor()
 
 def reverse_dns_hostname(address: str) -> str:
     """Best-effort PTR lookup for one IP. Intended for background UI workers."""
@@ -2101,10 +2471,13 @@ def _cdp_call(ws, method, params=None, message_id=1, timeout=8.0):
             pass
 
         ws.settimeout(timeout)
+        outbound_params = params or {}
+        if str(method or "") == "Runtime.evaluate":
+            outbound_params = _tag_runtime_evaluate_params(outbound_params, "runtime/evaluate")
         ws.send(json.dumps({
             "id": next_id,
             "method": method,
-            "params": params or {},
+            "params": outbound_params,
         }))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -2117,6 +2490,1954 @@ def _cdp_call(ws, method, params=None, message_id=1, timeout=8.0):
             return payload.get("result", {})
         raise RuntimeError(f"Timed out waiting for CDP {method}")
 
+
+# ---- Live request attribution + socket forensics (v10.5.76) ---------------
+
+def _script_source_excerpt(source, line=0, column=0, *, context_lines=3, max_line_chars=1600, max_total_chars=12000):
+    """Return a bounded, display-only excerpt around one JavaScript caller.
+
+    Source text is never stored by this helper.  Long/minified lines are clipped
+    around the caller column so the details window stays responsive even for
+    multi-megabyte bundles.  Caller line/column values are one-based.
+    """
+    source = str(source or "")
+    try:
+        line = max(0, int(line or 0))
+    except Exception:
+        line = 0
+    try:
+        column = max(0, int(column or 0))
+    except Exception:
+        column = 0
+    try:
+        context_lines = max(0, min(12, int(context_lines)))
+    except Exception:
+        context_lines = 3
+    lines = source.splitlines() or ([source] if source else [])
+    if not lines:
+        return {"ok": False, "reason": "Chromium returned an empty script source.", "text": ""}
+
+    target_index = min(max(0, line - 1 if line else 0), len(lines) - 1)
+    start = max(0, target_index - context_lines)
+    end = min(len(lines), target_index + context_lines + 1)
+    rendered = []
+    truncated = False
+    caret_column = 0
+
+    for idx in range(start, end):
+        raw_line = lines[idx]
+        display_line = raw_line
+        left_cut = 0
+        if len(display_line) > max_line_chars:
+            truncated = True
+            if idx == target_index and column:
+                zero_col = max(0, column - 1)
+                before = min(480, max_line_chars // 2)
+                left_cut = max(0, zero_col - before)
+                right = min(len(display_line), left_cut + max_line_chars)
+                if right - left_cut < max_line_chars and left_cut:
+                    left_cut = max(0, right - max_line_chars)
+                display_line = display_line[left_cut:right]
+                if left_cut:
+                    display_line = "…" + display_line
+                if right < len(raw_line):
+                    display_line += "…"
+            else:
+                display_line = display_line[:max_line_chars] + "…"
+        marker = ">>" if idx == target_index else "  "
+        rendered.append(f"{marker} {idx + 1:>6} | {display_line}")
+        if idx == target_index and column:
+            visual_offset = max(0, column - 1 - left_cut) + (1 if left_cut else 0)
+            caret_column = visual_offset
+            rendered.append(" " * 12 + " " * visual_offset + "^")
+
+    text = "\n".join(rendered)
+    if len(text) > max_total_chars:
+        text = text[:max_total_chars] + "\n… excerpt clipped …"
+        truncated = True
+    return {
+        "ok": True, "text": text, "line": target_index + 1, "column": column,
+        "line_count": len(lines), "source_chars": len(source), "truncated": truncated,
+        "caret_column": caret_column,
+    }
+
+
+_TEKZITE_INTERNAL_SOURCE_SCHEME = "tekzite-internal"
+
+
+def _sanitize_internal_source_tag(value):
+    """Return a bounded path-safe tag for a Tekzite-injected Runtime script."""
+    tag = str(value or "runtime/evaluate").strip().replace("\\", "/").strip("/")
+    tag = re.sub(r"[^A-Za-z0-9._/-]+", "-", tag)
+    tag = re.sub(r"/{2,}", "/", tag).strip("/")[:180]
+    return tag or "runtime/evaluate"
+
+
+def _tag_runtime_evaluate_params(params, internal_source="runtime/evaluate"):
+    """Stamp Tekzite-authored Runtime.evaluate code with CDP-visible provenance.
+
+    Chromium's ``//# sourceURL=`` marker becomes the call-frame URL for network
+    initiators created by evaluated JavaScript.  This lets the live audit tell
+    Tekzite's own helpers apart from website JavaScript without inspecting or
+    pattern-matching source contents.
+    """
+    params = dict(params or {})
+    expression = params.get("expression")
+    if not isinstance(expression, str) or not expression:
+        return params
+    if re.search(r"(?m)^\s*//[#@]\s*sourceURL\s*=", expression):
+        return params
+    tag = _sanitize_internal_source_tag(internal_source)
+    params["expression"] = expression + f"\n//# sourceURL={_TEKZITE_INTERNAL_SOURCE_SCHEME}://{tag}"
+    return params
+
+
+def _audit_internal_source_id(value):
+    """Return a sanitized Tekzite internal source id from one CDP script URL."""
+    try:
+        parts = urlsplit(str(value or ""))
+    except Exception:
+        return ""
+    if str(parts.scheme or "").lower() != _TEKZITE_INTERNAL_SOURCE_SCHEME:
+        return ""
+    pieces = [str(parts.netloc or "").strip("/")] + [part for part in str(parts.path or "").split("/") if part]
+    return _sanitize_internal_source_tag("/".join(part for part in pieces if part))
+
+
+def _audit_url_parts(value):
+    """Return (scheme, hostname, port) without retaining a full URL."""
+    try:
+        parts = urlsplit(str(value or ""))
+        scheme = str(parts.scheme or "").lower()
+        host = str(parts.hostname or "").strip().rstrip(".").lower()[:253]
+        port = int(parts.port or (443 if scheme in {"https", "wss"} else 80 if scheme in {"http", "ws"} else 0))
+        return scheme, host, port
+    except Exception:
+        return "", "", 0
+
+
+def _audit_target_scope(target):
+    """Classify a DevTools target without exposing its complete URL."""
+    target_type = str((target or {}).get("type") or "").strip().lower()
+    scheme, host, _port = _audit_url_parts((target or {}).get("url"))
+    if scheme == "chrome-extension":
+        return "Extension", target_type or "extension", host
+    if scheme in {"chrome", "devtools"} or target_type == "browser":
+        return "Browser internal", target_type or "browser", host
+    if target_type == "page":
+        return "Page", "page", host
+    if target_type == "service_worker":
+        return "Service worker", target_type, host
+    if target_type in {"worker", "shared_worker"}:
+        return "Page worker", target_type, host
+    if target_type == "background_page":
+        return "Extension" if scheme == "chrome-extension" else "Background target", target_type, host
+    return "Other Chromium target", target_type or "other", host
+
+
+# ---- On-demand JavaScript source analysis (v10.5.78) -----------------------
+
+_JS_NETWORK_PATTERNS = (
+    ("fetch", re.compile(r"(?<![\w$])fetch\s*\(")),
+    ("XMLHttpRequest", re.compile(r"(?<![\w$])(?:new\s+)?XMLHttpRequest\s*\(")),
+    ("WebSocket", re.compile(r"(?<![\w$])new\s+WebSocket\s*\(")),
+    ("EventSource", re.compile(r"(?<![\w$])new\s+EventSource\s*\(")),
+    ("sendBeacon", re.compile(r"navigator\s*\.\s*sendBeacon\s*\(")),
+    ("WebTransport", re.compile(r"(?<![\w$])new\s+WebTransport\s*\(")),
+)
+_SOURCE_MAP_DIRECTIVE_RE = re.compile(
+    r"(?://[#@]\s*sourceMappingURL\s*=\s*([^\s]+)|/\*[#@]\s*sourceMappingURL\s*=\s*([^*]+?)\s*\*/)",
+    re.IGNORECASE,
+)
+_SOURCE_MAP_B64 = {ch: i for i, ch in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")}
+
+
+def _source_line_column_to_offset(source, line=0, column=0):
+    """Translate one-based caller coordinates to a bounded Python offset."""
+    source = str(source or "")
+    if not source:
+        return 0
+    try:
+        line = max(1, int(line or 1))
+    except Exception:
+        line = 1
+    try:
+        column = max(1, int(column or 1))
+    except Exception:
+        column = 1
+    starts = [0]
+    for match in re.finditer(r"\n", source):
+        starts.append(match.end())
+    line_index = min(line - 1, len(starts) - 1)
+    start = starts[line_index]
+    end = starts[line_index + 1] - 1 if line_index + 1 < len(starts) else len(source)
+    return min(end, start + max(0, column - 1))
+
+
+def _offset_to_line_column(source, offset):
+    source = str(source or "")
+    offset = max(0, min(len(source), int(offset or 0)))
+    line = source.count("\n", 0, offset) + 1
+    last_nl = source.rfind("\n", 0, offset)
+    column = offset + 1 if last_nl < 0 else offset - last_nl
+    return line, column
+
+
+def _js_regex_can_start(source, slash_index):
+    """Conservative lexical hint for distinguishing /regex/ from division."""
+    source = str(source or "")
+    j = int(slash_index) - 1
+    while j >= 0 and source[j].isspace():
+        j -= 1
+    if j < 0:
+        return True
+    if source[j] in "([{=:;,!?&|+-*%^~<>":
+        return True
+    end = j + 1
+    while j >= 0 and (source[j].isalnum() or source[j] in "_$"):
+        j -= 1
+    word = source[j + 1:end]
+    return word in {
+        "return", "case", "throw", "typeof", "delete", "void", "new",
+        "yield", "await", "else", "do", "instanceof", "in", "of",
+    }
+
+
+def _js_code_mask(source):
+    """Return same-length code with strings/comments/regex literals blanked."""
+    source = str(source or "")
+    chars = list(source)
+    state = "normal"
+    escaped = False
+    regex_class = False
+    i = 0
+    while i < len(source):
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < len(source) else ""
+        if state in {"single", "double", "template"}:
+            if ch not in "\r\n":
+                chars[i] = " "
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif (state == "single" and ch == "'") or (state == "double" and ch == '"') or (state == "template" and ch == "`"):
+                state = "normal"
+            i += 1
+            continue
+        if state == "line_comment":
+            if ch in "\r\n":
+                state = "normal"
+            else:
+                chars[i] = " "
+            i += 1
+            continue
+        if state == "block_comment":
+            if ch not in "\r\n":
+                chars[i] = " "
+            if ch == "*" and nxt == "/":
+                chars[i + 1] = " "
+                i += 2
+                state = "normal"
+                continue
+            i += 1
+            continue
+        if state == "regex":
+            if ch not in "\r\n":
+                chars[i] = " "
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == "[":
+                regex_class = True
+            elif ch == "]" and regex_class:
+                regex_class = False
+            elif ch == "/" and not regex_class:
+                state = "normal"
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            chars[i] = chars[i + 1] = " "
+            state = "line_comment"
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            chars[i] = chars[i + 1] = " "
+            state = "block_comment"
+            i += 2
+            continue
+        if ch == "/" and _js_regex_can_start(source, i):
+            chars[i] = " "
+            state = "regex"
+            regex_class = False
+            i += 1
+            continue
+        if ch == "'":
+            chars[i] = " "
+            state = "single"
+        elif ch == '"':
+            chars[i] = " "
+            state = "double"
+        elif ch == "`":
+            chars[i] = " "
+            state = "template"
+        i += 1
+    return "".join(chars)
+
+
+def _js_pretty_print(source, caller_offset=0, *, max_chars=2_500_000):
+    """Pretty-print generated JavaScript for display without evaluating it.
+
+    This is deliberately a formatter, not an interpreter. Quoted strings and
+    comments are preserved verbatim; structural whitespace is added around
+    braces and semicolons. The requested source offset is mapped into the
+    formatted output so the caller caret can follow a one-line minified bundle.
+    """
+    source = str(source or "")
+    if not source:
+        return {"ok": False, "text": "", "reason": "Empty JavaScript source."}
+    if len(source) > int(max_chars):
+        return {
+            "ok": False, "text": "", "reason": "Script is too large for safe local pretty-printing.",
+            "source_chars": len(source),
+        }
+    caller_offset = max(0, min(len(source), int(caller_offset or 0)))
+    out = []
+    indent = 0
+    at_line_start = True
+    out_line = 1
+    out_col = 1
+    mapped = {"line": 0, "column": 0}
+    pending_space = False
+
+    def emit(text, src_index=None):
+        nonlocal at_line_start, out_line, out_col, pending_space
+        if not text:
+            return
+        if at_line_start:
+            prefix = "  " * max(0, indent)
+            if prefix:
+                out.append(prefix)
+                out_col += len(prefix)
+            at_line_start = False
+        if src_index is not None and src_index == caller_offset and not mapped["line"]:
+            mapped["line"], mapped["column"] = out_line, out_col
+        out.append(text)
+        if "\n" in text:
+            parts = text.split("\n")
+            out_line += len(parts) - 1
+            out_col = len(parts[-1]) + 1
+            at_line_start = parts[-1] == ""
+        else:
+            out_col += len(text)
+        pending_space = False
+
+    def newline():
+        nonlocal at_line_start, out_line, out_col, pending_space
+        if not out or out[-1] != "\n":
+            out.append("\n")
+            out_line += 1
+        out_col = 1
+        at_line_start = True
+        pending_space = False
+
+    def queue_space():
+        nonlocal pending_space
+        pending_space = True
+
+    def flush_space(next_char=""):
+        nonlocal pending_space
+        if not pending_space or at_line_start:
+            pending_space = False
+            return
+        prev = out[-1][-1] if out and out[-1] else ""
+        if prev and prev not in "([{.,:;" and next_char not in ")]},.:;":
+            emit(" ")
+        pending_space = False
+
+    state = "normal"
+    escaped = False
+    regex_class = False
+    i = 0
+    n = len(source)
+    while i < n:
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if state in {"single", "double", "template"}:
+            emit(ch, i)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif (state == "single" and ch == "'") or (state == "double" and ch == '"') or (state == "template" and ch == "`"):
+                state = "normal"
+            i += 1
+            continue
+        if state == "regex":
+            emit(ch, i)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == "[":
+                regex_class = True
+            elif ch == "]" and regex_class:
+                regex_class = False
+            elif ch == "/" and not regex_class:
+                state = "normal"
+            i += 1
+            continue
+        if state == "line_comment":
+            if ch in "\r\n":
+                newline()
+                state = "normal"
+                if ch == "\r" and nxt == "\n":
+                    i += 1
+            else:
+                emit(ch, i)
+            i += 1
+            continue
+        if state == "block_comment":
+            emit(ch, i)
+            if ch == "*" and nxt == "/":
+                emit(nxt, i + 1)
+                i += 2
+                state = "normal"
+                newline()
+                continue
+            i += 1
+            continue
+
+        if ch.isspace():
+            if i == caller_offset and not mapped["line"]:
+                mapped["line"], mapped["column"] = out_line, out_col
+            queue_space()
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            flush_space("/")
+            emit("//", i)
+            i += 2
+            state = "line_comment"
+            continue
+        if ch == "/" and nxt == "*":
+            flush_space("/")
+            emit("/*", i)
+            i += 2
+            state = "block_comment"
+            continue
+        if ch == "/" and _js_regex_can_start(source, i):
+            flush_space("/")
+            emit(ch, i)
+            state = "regex"
+            regex_class = False
+            i += 1
+            continue
+        if ch in "'\"`":
+            flush_space(ch)
+            emit(ch, i)
+            state = {"'": "single", '"': "double", "`": "template"}[ch]
+            i += 1
+            continue
+        if ch == "{":
+            flush_space(ch)
+            emit(ch, i)
+            indent += 1
+            newline()
+            i += 1
+            continue
+        if ch == "}":
+            indent = max(0, indent - 1)
+            if not at_line_start:
+                newline()
+            emit(ch, i)
+            tail = source[i + 1:i + 10].lstrip()
+            if nxt not in ";,)]" and not tail.startswith(("else", "catch", "finally", "while")):
+                newline()
+            i += 1
+            continue
+        if ch == ";":
+            flush_space(ch)
+            emit(ch, i)
+            newline()
+            i += 1
+            continue
+        if ch == ",":
+            flush_space(ch)
+            emit(ch, i)
+            queue_space()
+            i += 1
+            continue
+        if ch == ":":
+            flush_space(ch)
+            emit(ch, i)
+            queue_space()
+            i += 1
+            continue
+        flush_space(ch)
+        emit(ch, i)
+        i += 1
+
+    if caller_offset == len(source) and not mapped["line"]:
+        mapped["line"], mapped["column"] = out_line, out_col
+    return {
+        "ok": True,
+        "text": "".join(out).strip("\n"),
+        "line": int(mapped["line"] or 1),
+        "column": int(mapped["column"] or 1),
+        "source_chars": len(source),
+    }
+
+
+def _js_lexical_brace_spans(source):
+    """Return matched brace spans while ignoring strings and comments."""
+    source = str(source or "")
+    stack = []
+    spans = []
+    state = "normal"
+    escaped = False
+    regex_class = False
+    i = 0
+    while i < len(source):
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < len(source) else ""
+        if state in {"single", "double", "template"}:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif (state == "single" and ch == "'") or (state == "double" and ch == '"') or (state == "template" and ch == "`"):
+                state = "normal"
+            i += 1
+            continue
+        if state == "regex":
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == "[":
+                regex_class = True
+            elif ch == "]" and regex_class:
+                regex_class = False
+            elif ch == "/" and not regex_class:
+                state = "normal"
+            i += 1
+            continue
+        if state == "line_comment":
+            if ch in "\r\n":
+                state = "normal"
+            i += 1
+            continue
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                state = "normal"
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            state = "line_comment"
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            state = "block_comment"
+            i += 2
+            continue
+        if ch == "/" and _js_regex_can_start(source, i):
+            state = "regex"
+            regex_class = False
+            i += 1
+            continue
+        if ch == "'":
+            state = "single"
+            i += 1
+            continue
+        if ch == '"':
+            state = "double"
+            i += 1
+            continue
+        if ch == "`":
+            state = "template"
+            i += 1
+            continue
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            start = stack.pop()
+            spans.append((start, i + 1))
+        i += 1
+    return spans
+
+
+def _js_enclosing_function(source, caller_offset):
+    """Best-effort containing function span/signature for generated JS."""
+    source = str(source or "")
+    caller_offset = max(0, min(len(source), int(caller_offset or 0)))
+    candidates = []
+    patterns = (
+        re.compile(r"(?:async\s+)?function(?:\s*\*)?\s*([A-Za-z_$][\w$]*)?\s*\([^{};]*\)\s*$"),
+        re.compile(r"(?:async\s*)?\([^{};]*\)\s*=>\s*$"),
+        re.compile(r"(?:async\s+)?[A-Za-z_$][\w$]*\s*=>\s*$"),
+        re.compile(r"(?:async\s+)?(?:get\s+|set\s+)?[A-Za-z_$][\w$]*\s*\([^{};]*\)\s*$"),
+    )
+    for start, end in _js_lexical_brace_spans(source):
+        if not (start <= caller_offset < end):
+            continue
+        look_start = max(0, start - 520)
+        tail = source[look_start:start]
+        match = None
+        for pattern in patterns:
+            match = pattern.search(tail)
+            if match:
+                break
+        if match:
+            sig_start = look_start + match.start()
+            signature = re.sub(r"\s+", " ", source[sig_start:start].strip())[:360]
+            keyword = signature.split("(", 1)[0].strip().split()[-1] if "(" in signature and signature.split("(", 1)[0].strip() else ""
+            if keyword in {"if", "for", "while", "switch", "catch", "with"}:
+                continue
+            candidates.append((end - start, sig_start, start, end, signature))
+    if not candidates:
+        return {"found": False}
+    _, sig_start, brace_start, end, signature = min(candidates, key=lambda item: item[0])
+    return {
+        "found": True,
+        "start": sig_start,
+        "brace_start": brace_start,
+        "end": end,
+        "signature": signature or "(anonymous function)",
+    }
+
+
+def _js_network_primitive_trace(source, caller_offset, function_info=None, *, limit=8):
+    """Find visible browser network primitives in/near the caller function."""
+    source = str(source or "")
+    caller_offset = max(0, min(len(source), int(caller_offset or 0)))
+    if function_info and function_info.get("found"):
+        start = int(function_info.get("start") or 0)
+        end = int(function_info.get("end") or len(source))
+    else:
+        start = max(0, caller_offset - 1800)
+        end = min(len(source), caller_offset + 5000)
+    segment = source[start:end]
+    code_segment = _js_code_mask(segment)
+    found = []
+    for name, pattern in _JS_NETWORK_PATTERNS:
+        for match in pattern.finditer(code_segment):
+            absolute = start + match.start()
+            line, column = _offset_to_line_column(source, absolute)
+            found.append({
+                "name": name,
+                "offset": absolute,
+                "line": line,
+                "column": column,
+                "direction": "at/after caller" if absolute >= caller_offset else "before caller",
+                "distance": absolute - caller_offset,
+            })
+    found.sort(key=lambda item: (0 if item["offset"] >= caller_offset else 1, abs(item["distance"])))
+    return found[:max(1, int(limit))]
+
+
+def _source_map_url_from_source(source):
+    matches = list(_SOURCE_MAP_DIRECTIVE_RE.finditer(str(source or "")))
+    if not matches:
+        return ""
+    match = matches[-1]
+    return str(match.group(1) or match.group(2) or "").strip().strip("\"'")[:16384]
+
+
+def _decode_source_map_vlq(segment):
+    values = []
+    value = 0
+    shift = 0
+    for ch in str(segment or ""):
+        digit = _SOURCE_MAP_B64.get(ch)
+        if digit is None:
+            raise ValueError("invalid base64 VLQ digit")
+        continuation = bool(digit & 32)
+        digit &= 31
+        value += digit << shift
+        if continuation:
+            shift += 5
+            if shift > 35:
+                raise ValueError("base64 VLQ value too large")
+            continue
+        negative = bool(value & 1)
+        decoded = value >> 1
+        values.append(-decoded if negative else decoded)
+        value = 0
+        shift = 0
+    if shift:
+        raise ValueError("truncated base64 VLQ value")
+    return values
+
+
+def _source_map_lookup(map_data, generated_line, generated_column):
+    """Map a zero-based generated position through a simple Source Map v3."""
+    if not isinstance(map_data, dict) or int(map_data.get("version") or 0) != 3:
+        return None
+    if isinstance(map_data.get("sections"), list):
+        return None
+    mappings = str(map_data.get("mappings") or "")
+    sources = map_data.get("sources") if isinstance(map_data.get("sources"), list) else []
+    names = map_data.get("names") if isinstance(map_data.get("names"), list) else []
+    source_index = 0
+    original_line = 0
+    original_column = 0
+    name_index = 0
+    best = None
+    for line_no, encoded_line in enumerate(mappings.split(";")):
+        generated_col = 0
+        for encoded_segment in encoded_line.split(",") if encoded_line else []:
+            if not encoded_segment:
+                continue
+            try:
+                values = _decode_source_map_vlq(encoded_segment)
+            except ValueError:
+                continue
+            if not values:
+                continue
+            generated_col += values[0]
+            if len(values) >= 4:
+                source_index += values[1]
+                original_line += values[2]
+                original_column += values[3]
+                if len(values) >= 5:
+                    name_index += values[4]
+                if line_no == int(generated_line) and generated_col <= int(generated_column):
+                    best = (
+                        generated_col,
+                        source_index,
+                        original_line,
+                        original_column,
+                        name_index if len(values) >= 5 else None,
+                    )
+        if line_no >= int(generated_line):
+            break
+    if best is None:
+        return None
+    _generated_col, src_i, orig_line, orig_col, name_i = best
+    source_name = str(sources[src_i]) if 0 <= src_i < len(sources) else ""
+    source_file = source_name.replace("\\", "/").rsplit("/", 1)[-1][:220] or "(original source)"
+    name = str(names[name_i])[:180] if name_i is not None and 0 <= name_i < len(names) else ""
+    return {
+        "source_index": src_i,
+        "source_file": source_file,
+        "line": int(orig_line) + 1,
+        "column": int(orig_col) + 1,
+        "name": name,
+    }
+
+
+def _decode_inline_source_map(source_map_url, generated_line, generated_column):
+    raw = str(source_map_url or "")
+    if not raw.lower().startswith("data:"):
+        return None
+    try:
+        header, payload = raw.split(",", 1)
+    except ValueError:
+        return None
+    try:
+        if ";base64" in header.lower():
+            data = base64.b64decode(payload, validate=False)
+        else:
+            data = unquote_to_bytes(payload)
+        if len(data) > 6 * 1024 * 1024:
+            return {
+                "available": True,
+                "kind": "inline",
+                "reason": "Inline source map is larger than the 6 MB inspection limit.",
+            }
+        parsed = json.loads(data.decode("utf-8", "replace"))
+    except Exception:
+        return {
+            "available": True,
+            "kind": "inline",
+            "reason": "Inline source map could not be decoded safely.",
+        }
+    mapped = _source_map_lookup(parsed, max(0, int(generated_line)), max(0, int(generated_column)))
+    info = {"available": True, "kind": "inline", "mapped": mapped}
+    if mapped:
+        contents = parsed.get("sourcesContent") if isinstance(parsed.get("sourcesContent"), list) else []
+        idx = int(mapped.get("source_index") or 0)
+        if 0 <= idx < len(contents) and isinstance(contents[idx], str):
+            excerpt = _script_source_excerpt(
+                contents[idx], mapped["line"], mapped["column"],
+                context_lines=4, max_line_chars=1800,
+            )
+            if excerpt.get("ok"):
+                info["original_excerpt"] = excerpt.get("text") or ""
+    return info
+
+
+def _sanitize_source_map_advertisement(script_url, source_map_url):
+    source_map_url = str(source_map_url or "").strip()
+    if not source_map_url:
+        return {"available": False, "kind": "none", "label": "No source map advertised"}
+    if source_map_url.lower().startswith("data:"):
+        return {"available": True, "kind": "inline", "label": "Inline Source Map v3 data"}
+    try:
+        absolute = urljoin(str(script_url or ""), source_map_url)
+    except Exception:
+        absolute = source_map_url
+    try:
+        parsed = urlsplit(absolute)
+        host = str(parsed.hostname or "")[:253]
+        filename = str(parsed.path or "").replace("\\", "/").rsplit("/", 1)[-1][:220]
+    except Exception:
+        host, filename = "", ""
+    label = f"{host}/{filename}" if host and filename else (filename or host or "External source map")
+    return {"available": True, "kind": "external", "label": label}
+
+
+def _sanitize_source_map_directive_for_display(text):
+    """Hide source-map payloads/paths from displayed generated-source excerpts."""
+    text = str(text or "")
+    return re.sub(
+        r"(sourceMappingURL\s*=\s*)([^\s*]+)",
+        r"\1[source-map-metadata-omitted]",
+        text, flags=re.IGNORECASE,
+    )
+
+
+def _script_analysis_report(source, line=0, column=0, *, script_url="", source_map_url="", context_lines=7):
+    """Build a bounded human-readable analysis of one live caller script."""
+    source = str(source or "")
+    if not source:
+        return {"ok": False, "reason": "Chromium returned an empty script source.", "text": ""}
+    caller_offset = _source_line_column_to_offset(source, line, column)
+    raw_excerpt = _script_source_excerpt(
+        source, line=line, column=column,
+        context_lines=min(5, int(context_lines)), max_line_chars=1800,
+    )
+    pretty = _js_pretty_print(source, caller_offset)
+    function_info = _js_enclosing_function(source, caller_offset)
+    primitives = _js_network_primitive_trace(source, caller_offset, function_info)
+    map_url = str(source_map_url or "") or _source_map_url_from_source(source)
+    map_info = _sanitize_source_map_advertisement(script_url, map_url)
+    if map_info.get("kind") == "inline":
+        decoded = _decode_inline_source_map(
+            map_url,
+            max(0, int(line or 1) - 1),
+            max(0, int(column or 1) - 1),
+        )
+        if decoded:
+            map_info.update(decoded)
+
+    pretty_excerpt = None
+    if pretty.get("ok"):
+        pretty_excerpt = _script_source_excerpt(
+            pretty.get("text") or "",
+            pretty.get("line") or 1,
+            pretty.get("column") or 1,
+            context_lines=int(context_lines),
+            max_line_chars=1800,
+            max_total_chars=18000,
+        )
+
+    function_excerpt = ""
+    if function_info.get("found"):
+        fn_text = source[int(function_info["start"]):int(function_info["end"])]
+        if len(fn_text) <= 120_000:
+            fn_pretty = _js_pretty_print(
+                fn_text,
+                max(0, caller_offset - int(function_info["start"])),
+                max_chars=120_000,
+            )
+            if fn_pretty.get("ok"):
+                fn_excerpt = _script_source_excerpt(
+                    fn_pretty.get("text") or "",
+                    fn_pretty.get("line") or 1,
+                    fn_pretty.get("column") or 1,
+                    context_lines=10,
+                    max_line_chars=1800,
+                    max_total_chars=24000,
+                )
+                if fn_excerpt.get("ok"):
+                    function_excerpt = fn_excerpt.get("text") or ""
+
+    return {
+        "ok": True,
+        "source_chars": len(source),
+        "line_count": max(1, source.count("\n") + 1),
+        "raw_text": _sanitize_source_map_directive_for_display(raw_excerpt.get("text")) if raw_excerpt.get("ok") else "",
+        "pretty_text": _sanitize_source_map_directive_for_display(pretty_excerpt.get("text")) if pretty_excerpt and pretty_excerpt.get("ok") else "",
+        "pretty_line": int(pretty.get("line") or 0),
+        "pretty_column": int(pretty.get("column") or 0),
+        "pretty_ok": bool(pretty.get("ok")),
+        "pretty_reason": str(pretty.get("reason") or ""),
+        "function_found": bool(function_info.get("found")),
+        "function_signature": str(function_info.get("signature") or "")[:360],
+        "function_text": function_excerpt,
+        "network_primitives": primitives,
+        "source_map": map_info,
+    }
+
+
+def _cdp_call_capture_matching_events(
+    ws, method, params=None, *, event_method="", event_predicate=None,
+    message_id=1, timeout=3.0,
+):
+    """CDP call that retains only matching transient events until response."""
+    lock = getattr(ws, "_cdp_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        try:
+            setattr(ws, "_cdp_lock", lock)
+        except Exception:
+            pass
+    with lock:
+        preferred = max(1, int(message_id or 1))
+        next_id = max(preferred, int(getattr(ws, "_cdp_next_id", 1) or 1))
+        try:
+            setattr(ws, "_cdp_next_id", next_id + 1)
+        except Exception:
+            pass
+        ws.settimeout(timeout)
+        ws.send(json.dumps({"id": next_id, "method": method, "params": params or {}}))
+        deadline = time.monotonic() + timeout
+        matches = []
+        result = None
+        while time.monotonic() < deadline:
+            raw = ws.recv()
+            payload = json.loads(raw)
+            if payload.get("id") == next_id:
+                if "error" in payload:
+                    raise RuntimeError(f"CDP {method} failed: {payload['error']}")
+                result = payload.get("result", {})
+                break
+            if event_method and payload.get("method") == event_method:
+                event_params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+                if event_predicate is None or event_predicate(event_params):
+                    matches.append(event_params)
+        if result is None:
+            raise RuntimeError(f"Timed out waiting for CDP {method}")
+        try:
+            ws.settimeout(0.03)
+            for _ in range(24):
+                try:
+                    payload = json.loads(ws.recv())
+                except (socket.timeout, TimeoutError):
+                    break
+                except Exception:
+                    break
+                if event_method and payload.get("method") == event_method:
+                    event_params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+                    if event_predicate is None or event_predicate(event_params):
+                        matches.append(event_params)
+        finally:
+            try:
+                ws.settimeout(timeout)
+            except Exception:
+                pass
+        return result, matches
+
+
+def _audit_source_name(value, *, document_url=""):
+    """Return a privacy-bounded source label for one CDP script URL.
+
+    Only origin hostname + final filename are retained. Query strings, fragments
+    and the rest of the path are intentionally discarded. When a call frame
+    points at the current document, label it as inline/document code instead of
+    leaking the document path into the socket audit.
+    """
+    raw = str(value or "")
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return {"host": "", "file": "", "kind": "unknown"}
+    scheme = str(parts.scheme or "").lower()
+    internal_id = _audit_internal_source_id(raw)
+    if internal_id:
+        return {
+            "host": "", "file": f"internal:{internal_id}"[:180],
+            "kind": "tekzite-internal", "internal_id": internal_id,
+        }
+    host = str(parts.hostname or "").strip().rstrip(".").lower()[:253]
+    try:
+        doc = urlsplit(str(document_url or ""))
+        same_document = bool(
+            document_url and scheme == str(doc.scheme or "").lower()
+            and host == str(doc.hostname or "").strip().rstrip(".").lower()
+            and (parts.path or "/") == (doc.path or "/")
+        )
+    except Exception:
+        same_document = False
+    if same_document:
+        return {"host": host, "file": "(inline/document)", "kind": "inline"}
+    path = str(parts.path or "")
+    try:
+        filename = unquote(path.rsplit("/", 1)[-1])
+    except Exception:
+        filename = path.rsplit("/", 1)[-1]
+    filename = filename.replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()[:180]
+    if scheme == "chrome-extension":
+        return {"host": host, "file": filename or "(extension script)", "kind": "extension"}
+    if scheme in {"http", "https"}:
+        return {"host": host, "file": filename or "(document)", "kind": "web"}
+    if scheme == "blob":
+        return {"host": host, "file": "(blob script)", "kind": "blob"}
+    if raw:
+        return {"host": host, "file": "(anonymous script)", "kind": scheme or "other"}
+    return {"host": "", "file": "(anonymous script)", "kind": "anonymous"}
+
+
+def _audit_stack_frames(initiator, *, document_url="", limit=8):
+    """Extract a sanitized JavaScript call chain from a CDP Initiator.
+
+    CDP line/column numbers are zero-based; user-facing values are converted to
+    one-based coordinates. No full source URL is retained.
+    """
+    initiator = initiator if isinstance(initiator, dict) else {}
+    out = []
+    seen = set()
+
+    def visit(stack, depth=0):
+        if len(out) >= int(limit) or depth > 6 or not isinstance(stack, dict):
+            return
+        description = str(stack.get("description") or "").replace("\r", " ").replace("\n", " ").strip()[:160]
+        if depth and description and len(out) < int(limit):
+            label = f"[async] {description}"
+            out.append({
+                "host": "", "file": "", "kind": "async", "function": description,
+                "line": 0, "column": 0, "label": label[:520], "script_id": "",
+            })
+        frames = stack.get("callFrames") if isinstance(stack.get("callFrames"), list) else []
+        for frame in frames:
+            if len(out) >= int(limit) or not isinstance(frame, dict):
+                break
+            source = _audit_source_name(frame.get("url"), document_url=document_url)
+            function_name = str(frame.get("functionName") or "(anonymous)").replace("\r", " ").replace("\n", " ").strip()[:160]
+            try:
+                line = max(0, int(frame.get("lineNumber"))) + 1 if frame.get("lineNumber") is not None else 0
+            except Exception:
+                line = 0
+            try:
+                column = max(0, int(frame.get("columnNumber"))) + 1 if frame.get("columnNumber") is not None else 0
+            except Exception:
+                column = 0
+            key = (source.get("host"), source.get("file"), function_name, line, column)
+            if key in seen:
+                continue
+            seen.add(key)
+            host = str(source.get("host") or "")
+            filename = str(source.get("file") or "")
+            internal_id = str(source.get("internal_id") or "")
+            if internal_id:
+                source_label = f"Tekzite Browser internal: {internal_id}"
+            else:
+                source_label = f"{host}/{filename}" if host and filename else (filename or host or "(anonymous script)")
+            location = source_label
+            if line:
+                location += f":{line}"
+                if column:
+                    location += f":{column}"
+            label = f"{function_name} @ {location}" if function_name else location
+            out.append({
+                "host": host[:253], "file": filename[:180], "kind": str(source.get("kind") or "")[:32],
+                "function": function_name, "line": line, "column": column, "label": label[:520],
+                # Keep only the opaque target-local CDP script id.  It lets the
+                # details panel request a source excerpt on demand without
+                # retaining the full script URL or source in the audit ledger.
+                "script_id": str(frame.get("scriptId") or "")[:128],
+                "internal_id": internal_id[:180],
+            })
+        parent = stack.get("parent")
+        if isinstance(parent, dict):
+            visit(parent, depth + 1)
+
+    stack = initiator.get("stack") if isinstance(initiator.get("stack"), dict) else None
+    if stack is None and isinstance(initiator.get("stackTrace"), dict):
+        stack = initiator.get("stackTrace")
+    visit(stack or {})
+
+    # Parser initiators do not have a JavaScript call frame. Preserve the
+    # source line honestly so the UI says parser/document rather than inventing
+    # a script caller.
+    if not out and str(initiator.get("type") or "").lower() == "parser":
+        source = _audit_source_name(initiator.get("url") or document_url, document_url=document_url)
+        try:
+            line = max(0, int(initiator.get("lineNumber"))) + 1 if initiator.get("lineNumber") is not None else 0
+        except Exception:
+            line = 0
+        try:
+            column = max(0, int(initiator.get("columnNumber"))) + 1 if initiator.get("columnNumber") is not None else 0
+        except Exception:
+            column = 0
+        host = str(source.get("host") or "")
+        location = f"{host}/(document)" if host else "(document)"
+        if line:
+            location += f":{line}"
+            if column:
+                location += f":{column}"
+        out.append({
+            "host": host[:253], "file": "(document)", "kind": "parser",
+            "function": "parser", "line": line, "column": column,
+            "label": f"parser @ {location}"[:520],
+        })
+    return out
+
+
+def _audit_initiator_host(initiator, fallback=""):
+    """Extract only the hostname from an initiator URL/stack."""
+    initiator = initiator if isinstance(initiator, dict) else {}
+    _scheme, host, _port = _audit_url_parts(initiator.get("url"))
+    if host and _scheme in {"http", "https", "ws", "wss", "chrome-extension"}:
+        return host
+    stack = initiator.get("stack") if isinstance(initiator.get("stack"), dict) else {}
+    frames = stack.get("callFrames") if isinstance(stack.get("callFrames"), list) else []
+    for frame in frames[:12]:
+        if not isinstance(frame, dict):
+            continue
+        _scheme, host, _port = _audit_url_parts(frame.get("url"))
+        if host and _scheme in {"http", "https", "ws", "wss", "chrome-extension"}:
+            return host
+    parent = stack.get("parent") if isinstance(stack.get("parent"), dict) else {}
+    frames = parent.get("callFrames") if isinstance(parent.get("callFrames"), list) else []
+    for frame in frames[:8]:
+        if not isinstance(frame, dict):
+            continue
+        _scheme, host, _port = _audit_url_parts(frame.get("url"))
+        if host and _scheme in {"http", "https", "ws", "wss", "chrome-extension"}:
+            return host
+    return str(fallback or "")[:253]
+
+
+
+def _audit_site_key(host):
+    """Return a conservative registrable-site heuristic for display only.
+
+    Tekzite intentionally does not ship or remotely fetch a public-suffix list
+    just for the live audit.  Common second-level country suffixes are handled
+    locally; ambiguous cases are labelled heuristic in the UI rather than being
+    treated as a security boundary.
+    """
+    host = str(host or "").strip().rstrip(".").lower()
+    if not host:
+        return ""
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    labels = [part for part in host.split(".") if part]
+    if len(labels) <= 2:
+        return host
+    common_sld = {
+        "ac", "co", "com", "edu", "gov", "net", "org",
+        "asn", "id", "ne", "or", "go", "lg",
+    }
+    if len(labels[-1]) == 2 and labels[-2] in common_sld and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _audit_domain_relation(host, target_host):
+    """Describe destination-vs-page hostname relation without overclaiming."""
+    host = str(host or "").strip().rstrip(".").lower()
+    target_host = str(target_host or "").strip().rstrip(".").lower()
+    if not host or not target_host:
+        return "Unknown"
+    if host == target_host:
+        return "Same host"
+    if host.endswith("." + target_host) or target_host.endswith("." + host):
+        return "Parent/subdomain"
+    a = _audit_site_key(host)
+    b = _audit_site_key(target_host)
+    if a and b and a == b:
+        return "Same site (heuristic)"
+    return "Cross-site"
+
+def _audit_purpose(scope, initiator_type, resource_type, internal_source_id=""):
+    internal_source_id = str(internal_source_id or "").strip("/")
+    if internal_source_id:
+        known = {
+            "page-state/favicon": "Tekzite favicon fetch",
+        }
+        return known.get(internal_source_id, f"Tekzite internal ({internal_source_id})")
+    scope = str(scope or "Other Chromium target")
+    initiator_type = str(initiator_type or "other").strip().lower()
+    resource_type = str(resource_type or "Other")
+    resource_key = resource_type.strip().lower()
+    if scope == "Page":
+        if resource_key == "document":
+            return "Page navigation"
+        if resource_key == "websocket":
+            return "Page WebSocket"
+        if resource_key == "eventsource":
+            return "Page EventSource"
+        if resource_key == "xhr":
+            return "Page XHR"
+        if resource_key == "fetch":
+            return "Page fetch"
+        if resource_key in {"ping", "beacon"}:
+            return "Page beacon/ping"
+        if initiator_type == "parser":
+            return "Page parser"
+        if initiator_type == "script":
+            return "Page script"
+        if initiator_type == "preload":
+            return "Page preload"
+        if initiator_type == "preflight":
+            return "CORS preflight"
+        return "Page request"
+    if scope == "Extension":
+        return "Extension request"
+    if scope == "Service worker":
+        return "Service-worker request"
+    if scope == "Page worker":
+        return "Worker request"
+    if scope == "Browser internal":
+        return "Browser-internal request"
+    return f"{scope} request"
+
+
+class _NetworkRequestAuditMonitor:
+    """RAM-only CDP Network observer for live socket attribution.
+
+    Each target gets a dedicated DevTools websocket so request events cannot
+    interfere with Tekzite's input/control lanes. Only host-level metadata is
+    retained: destination host/port, resource type, target scope, initiator
+    type/hostname and a sanitized JavaScript call chain (origin host, final
+    filename, function, line/column). Full URLs, query strings, headers,
+    cookies, script contents and request/response bodies are discarded
+    immediately.
+    """
+
+    TARGET_TYPES = {
+        "page", "service_worker", "worker", "shared_worker", "background_page", "webview"
+    }
+
+    def __init__(self, port):
+        self.port = int(port or 0)
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._manager = None
+        self._watchers = {}
+        self._records = []
+        self._by_request = {}
+        self._status = "starting"
+        self._reason = ""
+        self._started_at = time.time()
+        self._last_target_scan = 0.0
+
+    def start(self):
+        if self._manager and self._manager.is_alive():
+            return
+        self._manager = threading.Thread(
+            target=self._manager_loop, name="TekziteRequestAudit", daemon=True,
+        )
+        self._manager.start()
+
+    def stop(self):
+        self._stop.set()
+        with self._lock:
+            watchers = list(self._watchers.values())
+        for watcher in watchers:
+            watcher.get("stop") and watcher["stop"].set()
+            ws = watcher.get("ws")
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        thread = self._manager
+        if thread and thread.is_alive():
+            thread.join(timeout=0.35)
+        with self._lock:
+            self._watchers.clear()
+            self._status = "stopped"
+
+    def _manager_loop(self):
+        self._status = "running"
+        while not self._stop.is_set():
+            try:
+                targets = _devtools_json(self.port, "/json/list", timeout=0.35)
+                self._last_target_scan = time.time()
+                current = {}
+                for target in list(targets or []):
+                    target_id = str(target.get("id") or "")
+                    ws_url = str(target.get("webSocketDebuggerUrl") or "")
+                    target_type = str(target.get("type") or "").lower()
+                    if not target_id or not ws_url or target_type not in self.TARGET_TYPES:
+                        continue
+                    current[target_id] = target
+                    with self._lock:
+                        existing = self._watchers.get(target_id)
+                    if existing and existing.get("thread") and existing["thread"].is_alive() and existing.get("ws_url") == ws_url:
+                        continue
+                    if existing:
+                        existing.get("stop") and existing["stop"].set()
+                    stop_event = threading.Event()
+                    scope, sanitized_type, target_host = _audit_target_scope(target)
+                    watcher = {
+                        "target_id": target_id, "ws_url": ws_url, "stop": stop_event,
+                        # Retain only host-level target metadata. The /json/list
+                        # target URL is parsed during this scan and then discarded.
+                        "target": {
+                            "id": target_id, "type": sanitized_type, "scope": scope,
+                            "target_host": target_host,
+                        },
+                        "ws": None,
+                    }
+                    thread = threading.Thread(
+                        target=self._watch_target, args=(watcher,),
+                        name=f"TekziteRequestAudit-{target_id[:8]}", daemon=True,
+                    )
+                    watcher["thread"] = thread
+                    with self._lock:
+                        self._watchers[target_id] = watcher
+                    thread.start()
+                with self._lock:
+                    stale = [tid for tid in self._watchers if tid not in current]
+                    for tid in stale:
+                        watcher = self._watchers.pop(tid, None)
+                        if watcher:
+                            watcher.get("stop") and watcher["stop"].set()
+                            ws = watcher.get("ws")
+                            if ws is not None:
+                                try:
+                                    ws.close()
+                                except Exception:
+                                    pass
+                self._reason = ""
+            except Exception as exc:
+                self._reason = f"CDP request attribution temporarily unavailable: {type(exc).__name__}"
+            self._purge()
+            self._stop.wait(0.75)
+
+    def _watch_target(self, watcher):
+        target = watcher.get("target") or {}
+        stop_event = watcher["stop"]
+        ws = None
+        try:
+            ws = _open_devtools_websocket(watcher["ws_url"], timeout=1.0)
+            watcher["ws"] = ws
+            _cdp_call(ws, "Network.enable", {}, message_id=1, timeout=1.5)
+            ws.settimeout(0.75)
+            while not self._stop.is_set() and not stop_event.is_set():
+                try:
+                    raw = ws.recv()
+                except (socket.timeout, TimeoutError):
+                    continue
+                except Exception:
+                    break
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    continue
+                method = str(payload.get("method") or "")
+                params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+                if method == "Network.requestWillBeSent":
+                    self._record_request(target, params)
+                elif method == "Network.responseReceived":
+                    self._record_response(target, params)
+                elif method == "Network.loadingFinished":
+                    self._record_loading_finished(target, params)
+                elif method == "Network.loadingFailed":
+                    self._record_loading_failed(target, params)
+                elif method == "Network.requestServedFromCache":
+                    self._record_served_from_cache(target, params)
+                elif method == "Network.webSocketCreated":
+                    self._record_websocket_created(target, params)
+                elif method == "Network.webSocketClosed":
+                    self._record_websocket_closed(target, params)
+        except Exception:
+            pass
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            watcher["ws"] = None
+
+    def _record_request(self, target, params):
+        request = params.get("request") if isinstance(params.get("request"), dict) else {}
+        scheme, host, port = _audit_url_parts(request.get("url"))
+        if scheme not in {"http", "https", "ws", "wss"} or not host:
+            return
+        if target.get("scope"):
+            scope = str(target.get("scope") or "Other Chromium target")
+            target_type = str(target.get("type") or "other")
+            target_host = str(target.get("target_host") or "")[:253]
+        else:
+            scope, target_type, target_host = _audit_target_scope(target)
+        document_host = _audit_url_parts(params.get("documentURL"))[1]
+        if document_host:
+            target_host = document_host
+        initiator = params.get("initiator") if isinstance(params.get("initiator"), dict) else {}
+        initiator_type = str(initiator.get("type") or "other").strip().lower()[:32]
+        initiator_host = _audit_initiator_host(initiator, fallback=target_host)
+        script_frames = _audit_stack_frames(initiator, document_url=params.get("documentURL"), limit=8)
+        resource_type = str(params.get("type") or "Other")[:48]
+        now = time.time()
+        target_id = str(target.get("id") or "")
+        request_id = str(params.get("requestId") or "")
+
+        # CORS preflight often points at the request that caused it instead of
+        # carrying a fresh JS stack. Inherit the already-sanitized caller chain
+        # so the audit can still answer which script caused the network action.
+        parent_request_id = str(initiator.get("requestId") or "")
+        if not script_frames and parent_request_id:
+            with self._lock:
+                parent = self._by_request.get((target_id, parent_request_id))
+                if parent is not None:
+                    script_frames = [dict(frame) for frame in list(parent.get("script_stack") or [])[:8]]
+                    if not initiator_host:
+                        initiator_host = str(parent.get("initiator_host") or "")[:253]
+
+        top_script = dict(script_frames[0]) if script_frames else {}
+        internal_source_id = str(top_script.get("internal_id") or "")[:180]
+        initiator_label = ""
+        if internal_source_id:
+            initiator_type = "tekzite-internal"
+            initiator_host = ""
+            initiator_label = "Tekzite Browser injected script"
+        request_headers = request.get("headers") if isinstance(request.get("headers"), dict) else {}
+        request_header_names = {str(name or "").strip().lower() for name in request_headers}
+        redirect_response = params.get("redirectResponse") if isinstance(params.get("redirectResponse"), dict) else {}
+        redirect_from_host = _audit_url_parts(redirect_response.get("url"))[1] if redirect_response else ""
+        try:
+            redirect_status = int(redirect_response.get("status") or 0)
+        except Exception:
+            redirect_status = 0
+        try:
+            wall_time = float(params.get("wallTime") or now)
+        except Exception:
+            wall_time = now
+        try:
+            cdp_timestamp = float(params.get("timestamp") or 0.0)
+        except Exception:
+            cdp_timestamp = 0.0
+        record = {
+            "host": host,
+            "port": int(port or 0),
+            "scheme": scheme,
+            "method": str(request.get("method") or "GET")[:16],
+            "resource_type": resource_type,
+            "has_post_data": bool(request.get("hasPostData")),
+            "initial_priority": str(request.get("initialPriority") or "")[:32],
+            "observed_cookie_header": "cookie" in request_header_names,
+            "observed_authorization_header": "authorization" in request_header_names,
+            "observed_origin_header": "origin" in request_header_names,
+            "observed_referer_header": "referer" in request_header_names or "referrer" in request_header_names,
+            "scope": scope,
+            "target_type": target_type,
+            "target_host": str(target_host or "")[:253],
+            "initiator_type": initiator_type,
+            "initiator_host": str(initiator_host or "")[:253],
+            "initiator_label": initiator_label[:160],
+            "internal_source_id": internal_source_id,
+            "script_source": str(top_script.get("label") or "")[:520],
+            "script_host": str(top_script.get("host") or "")[:253],
+            "script_file": str(top_script.get("file") or "")[:180],
+            "script_function": str(top_script.get("function") or "")[:160],
+            "script_line": int(top_script.get("line") or 0),
+            "script_column": int(top_script.get("column") or 0),
+            "script_id": str(top_script.get("script_id") or "")[:128],
+            "script_stack": [dict(frame) for frame in script_frames[:8]],
+            "purpose": _audit_purpose(scope, initiator_type, resource_type, internal_source_id),
+            "domain_relation": _audit_domain_relation(host, target_host),
+            "target_id": target_id[:128],
+            "request_id": request_id[:128],
+            "frame_id": str(params.get("frameId") or "")[:128],
+            "loader_id": str(params.get("loaderId") or "")[:128],
+            "first_seen": now,
+            "last_seen": now,
+            "wall_time": wall_time,
+            "cdp_timestamp": cdp_timestamp,
+            "redirect_from_host": str(redirect_from_host or "")[:253],
+            "redirect_status": redirect_status,
+            "redirect_to_host": "",
+            "response_status": 0,
+            "response_mime_type": "",
+            "response_from_disk_cache": False,
+            "response_from_service_worker": False,
+            "response_from_prefetch_cache": False,
+            "observed_set_cookie_header": False,
+            "security_state": "",
+            "request_served_from_cache": False,
+            "encoded_data_length": 0,
+            "loading_failed": False,
+            "failure_text": "",
+            "blocked_reason": "",
+            "cors_error": "",
+            "canceled": False,
+            "tls_protocol": "",
+            "tls_cipher": "",
+            "tls_issuer": "",
+            "websocket_closed": False,
+            "remote_address": "",
+            "remote_port": 0,
+            "connection_id": "",
+            "connection_reused": None,
+            "response_protocol": "",
+        }
+        with self._lock:
+            if request_id and redirect_from_host:
+                previous = self._by_request.get((target_id, request_id))
+                if previous is not None:
+                    previous["redirect_to_host"] = host[:253]
+                    previous["last_seen"] = now
+            self._records.append(record)
+            if request_id:
+                self._by_request[(target_id, request_id)] = record
+            if len(self._records) > _REQUEST_AUDIT_MAX_RECORDS:
+                removed = self._records[:-_REQUEST_AUDIT_MAX_RECORDS]
+                self._records = self._records[-_REQUEST_AUDIT_MAX_RECORDS:]
+                removed_ids = {id(row) for row in removed}
+                for key, row in list(self._by_request.items()):
+                    if id(row) in removed_ids:
+                        self._by_request.pop(key, None)
+
+    def _record_websocket_created(self, target, params):
+        """Record a WebSocket opener using only sanitized CDP metadata.
+
+        Network.webSocketCreated carries the URL and initiator stack but does
+        not expose ordinary HTTP response connection-reuse metadata. Feed it
+        through the same request ledger so script callers are visible without
+        retaining the full WebSocket URL.
+        """
+        url = str(params.get("url") or "")
+        if not url:
+            return
+        synthetic = {
+            "requestId": params.get("requestId"),
+            "timestamp": params.get("timestamp"),
+            "type": "WebSocket",
+            "initiator": params.get("initiator") if isinstance(params.get("initiator"), dict) else {},
+            "request": {"url": url, "method": "GET"},
+        }
+        self._record_request(target, synthetic)
+
+    def _record_response(self, target, params):
+        target_id = str(target.get("id") or "")
+        request_id = str(params.get("requestId") or "")
+        if not request_id:
+            return
+        response = params.get("response") if isinstance(params.get("response"), dict) else {}
+        remote = _normalize_socket_address(response.get("remoteIPAddress"))
+        try:
+            remote_port = int(response.get("remotePort") or 0)
+        except Exception:
+            remote_port = 0
+        with self._lock:
+            row = self._by_request.get((target_id, request_id))
+            if row is not None:
+                row["last_seen"] = time.time()
+                if remote:
+                    row["remote_address"] = remote[:128]
+                if remote_port:
+                    row["remote_port"] = remote_port
+                if response.get("connectionId") is not None:
+                    row["connection_id"] = str(response.get("connectionId"))[:96]
+                if "connectionReused" in response:
+                    row["connection_reused"] = bool(response.get("connectionReused"))
+                row["response_protocol"] = str(response.get("protocol") or "")[:32]
+                try:
+                    row["response_status"] = int(response.get("status") or 0)
+                except Exception:
+                    row["response_status"] = 0
+                row["response_mime_type"] = str(response.get("mimeType") or "")[:160]
+                row["response_from_disk_cache"] = bool(response.get("fromDiskCache"))
+                row["response_from_service_worker"] = bool(response.get("fromServiceWorker"))
+                row["response_from_prefetch_cache"] = bool(response.get("fromPrefetchCache"))
+                response_headers = response.get("headers") if isinstance(response.get("headers"), dict) else {}
+                response_header_names = {str(name or "").strip().lower() for name in response_headers}
+                row["observed_set_cookie_header"] = "set-cookie" in response_header_names or "set-cookie2" in response_header_names
+                row["security_state"] = str(response.get("securityState") or "")[:32]
+                security = response.get("securityDetails") if isinstance(response.get("securityDetails"), dict) else {}
+                row["tls_protocol"] = str(security.get("protocol") or "")[:48]
+                row["tls_cipher"] = str(security.get("cipher") or "")[:96]
+                row["tls_issuer"] = str(security.get("issuer") or "")[:180]
+
+    def _request_row(self, target, params):
+        target_id = str(target.get("id") or "")
+        request_id = str(params.get("requestId") or "")
+        if not request_id:
+            return None
+        with self._lock:
+            return self._by_request.get((target_id, request_id))
+
+    def _record_loading_finished(self, target, params):
+        row = self._request_row(target, params)
+        if row is None:
+            return
+        try:
+            encoded = max(0, int(float(params.get("encodedDataLength") or 0)))
+        except Exception:
+            encoded = 0
+        with self._lock:
+            row["last_seen"] = time.time()
+            row["encoded_data_length"] = encoded
+
+    def _record_loading_failed(self, target, params):
+        row = self._request_row(target, params)
+        if row is None:
+            return
+        cors = params.get("corsErrorStatus") if isinstance(params.get("corsErrorStatus"), dict) else {}
+        with self._lock:
+            row["last_seen"] = time.time()
+            row["loading_failed"] = True
+            row["failure_text"] = str(params.get("errorText") or "")[:240]
+            row["blocked_reason"] = str(params.get("blockedReason") or "")[:96]
+            row["cors_error"] = str(cors.get("corsError") or "")[:128]
+            row["canceled"] = bool(params.get("canceled"))
+
+    def _record_served_from_cache(self, target, params):
+        row = self._request_row(target, params)
+        if row is None:
+            return
+        with self._lock:
+            row["last_seen"] = time.time()
+            row["request_served_from_cache"] = True
+
+    def _record_websocket_closed(self, target, params):
+        row = self._request_row(target, params)
+        if row is None:
+            return
+        with self._lock:
+            row["last_seen"] = time.time()
+            row["websocket_closed"] = True
+
+    def script_source_analysis(self, target_id, script_id, line=0, column=0, context_lines=7):
+        """Fetch and locally analyze one caller script on demand.
+
+        The complete generated source and any inline source map live only inside
+        this call. The returned object contains bounded excerpts/metadata only.
+        External source maps are advertised but never fetched automatically, so
+        the act of inspecting a connection cannot create a hidden extra request.
+        """
+        target_id = str(target_id or "")[:128]
+        script_id = str(script_id or "")[:128]
+        if not target_id or not script_id:
+            return {"ok": False, "reason": "No live CDP script identifier is available for this caller.", "text": ""}
+        with self._lock:
+            watcher = self._watchers.get(target_id)
+            ws_url = str((watcher or {}).get("ws_url") or "")
+        if not ws_url:
+            return {"ok": False, "reason": "The Chromium target that owned this script is no longer live.", "text": ""}
+        ws = None
+        try:
+            ws = _open_devtools_websocket(ws_url, timeout=2.0)
+            _result, events = _cdp_call_capture_matching_events(
+                ws, "Debugger.enable", {},
+                event_method="Debugger.scriptParsed",
+                event_predicate=lambda params: str(params.get("scriptId") or "") == script_id,
+                message_id=1, timeout=3.0,
+            )
+            metadata = dict(events[-1]) if events else {}
+            result = _cdp_call(
+                ws, "Debugger.getScriptSource", {"scriptId": script_id},
+                message_id=2, timeout=4.0,
+            )
+            source = str((result or {}).get("scriptSource") or "")
+            analysis = _script_analysis_report(
+                source, line=line, column=column, context_lines=context_lines,
+                script_url=str(metadata.get("url") or ""),
+                source_map_url=str(metadata.get("sourceMapURL") or ""),
+            )
+            analysis["target_id"] = target_id
+            analysis["script_id"] = script_id
+            analysis["script_metadata_seen"] = bool(metadata)
+            return analysis
+        except Exception as exc:
+            return {
+                "ok": False,
+                "reason": f"Could not analyze the live Chromium script source: {type(exc).__name__}",
+                "text": "", "target_id": target_id, "script_id": script_id,
+            }
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+    def script_source_excerpt(self, target_id, script_id, line=0, column=0, context_lines=3):
+        """Fetch one caller's source from Chromium on demand.
+
+        A fresh DevTools websocket is used so source retrieval cannot consume or
+        reorder Network events on the long-lived audit channel.  The complete
+        source exists only in this local call and is reduced immediately to the
+        bounded excerpt returned to the UI.
+        """
+        target_id = str(target_id or "")[:128]
+        script_id = str(script_id or "")[:128]
+        if not target_id or not script_id:
+            return {"ok": False, "reason": "No live CDP script identifier is available for this caller.", "text": ""}
+        with self._lock:
+            watcher = self._watchers.get(target_id)
+            ws_url = str((watcher or {}).get("ws_url") or "")
+        if not ws_url:
+            return {"ok": False, "reason": "The Chromium target that owned this script is no longer live.", "text": ""}
+        ws = None
+        try:
+            ws = _open_devtools_websocket(ws_url, timeout=2.0)
+            _cdp_call(ws, "Debugger.enable", {}, message_id=1, timeout=2.5)
+            result = _cdp_call(
+                ws, "Debugger.getScriptSource", {"scriptId": script_id},
+                message_id=2, timeout=3.5,
+            )
+            source = str((result or {}).get("scriptSource") or "")
+            excerpt = _script_source_excerpt(
+                source, line=line, column=column, context_lines=context_lines,
+            )
+            excerpt["target_id"] = target_id
+            excerpt["script_id"] = script_id
+            return excerpt
+        except Exception as exc:
+            return {
+                "ok": False,
+                "reason": f"Could not read the live Chromium script source: {type(exc).__name__}",
+                "text": "", "target_id": target_id, "script_id": script_id,
+            }
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+    def _purge(self):
+        cutoff = time.time() - _REQUEST_AUDIT_MAX_AGE
+        with self._lock:
+            if not self._records:
+                return
+            self._records = [row for row in self._records if float(row.get("last_seen", 0.0) or 0.0) >= cutoff]
+            live_ids = {id(row) for row in self._records}
+            for key, row in list(self._by_request.items()):
+                if id(row) not in live_ids:
+                    self._by_request.pop(key, None)
+
+    def snapshot(self):
+        self._purge()
+        with self._lock:
+            rows = [dict(row) for row in self._records]
+            target_count = sum(1 for watcher in self._watchers.values() if watcher.get("thread") and watcher["thread"].is_alive())
+            status = self._status
+            reason = self._reason
+        hosts = {}
+        endpoints = {}
+        for row in rows:
+            host = str(row.get("host") or "")
+            if not host:
+                continue
+            entry = hosts.setdefault(host, {
+                "host": host, "count": 0, "last_seen": 0.0,
+                "scopes": {}, "resource_types": {}, "initiators": {}, "target_hosts": {},
+                "scripts": {}, "latest": None,
+            })
+            entry["count"] += 1
+            seen = float(row.get("last_seen", 0.0) or 0.0)
+            entry["last_seen"] = max(float(entry.get("last_seen", 0.0) or 0.0), seen)
+            for field, bucket in (("scope", "scopes"), ("resource_type", "resource_types"), ("target_host", "target_hosts")):
+                value = str(row.get(field) or "")
+                if value:
+                    entry[bucket][value] = int(entry[bucket].get(value, 0) or 0) + 1
+            init_type = str(row.get("initiator_type") or "")
+            init_host = str(row.get("initiator_host") or "")
+            init_label = str(row.get("initiator_label") or "") or (init_type + (f" @ {init_host}" if init_host else ""))
+            if init_label:
+                entry["initiators"][init_label] = int(entry["initiators"].get(init_label, 0) or 0) + 1
+            script_label = str(row.get("script_source") or "")
+            if script_label:
+                entry["scripts"][script_label] = int(entry["scripts"].get(script_label, 0) or 0) + 1
+            if entry["latest"] is None or seen >= float(entry["latest"].get("last_seen", 0.0) or 0.0):
+                entry["latest"] = row
+            remote = _normalize_socket_address(row.get("remote_address"))
+            remote_port = int(row.get("remote_port") or 0)
+            if remote and remote_port:
+                key = (remote, remote_port)
+                previous = endpoints.get(key)
+                if previous is None or seen >= float(previous.get("last_seen", 0.0) or 0.0):
+                    endpoints[key] = row
+
+        host_rows = []
+        for entry in hosts.values():
+            latest = dict(entry.pop("latest") or {})
+            scopes = sorted(entry["scopes"], key=lambda value: (-entry["scopes"][value], value))
+            resources = sorted(entry["resource_types"], key=lambda value: (-entry["resource_types"][value], value))
+            initiators = sorted(entry["initiators"], key=lambda value: (-entry["initiators"][value], value))
+            target_hosts = sorted(entry["target_hosts"], key=lambda value: (-entry["target_hosts"][value], value))
+            scripts = sorted(entry["scripts"], key=lambda value: (-entry["scripts"][value], value))
+            host_rows.append({
+                "host": entry["host"], "count": entry["count"], "last_seen": entry["last_seen"],
+                "scopes": scopes[:4], "resource_types": resources[:6], "initiators": initiators[:4],
+                "target_hosts": target_hosts[:4], "scripts": scripts[:6],
+                "purpose": str(latest.get("purpose") or ""),
+                "latest_scope": str(latest.get("scope") or ""),
+                "latest_resource_type": str(latest.get("resource_type") or ""),
+                "latest_initiator_type": str(latest.get("initiator_type") or ""),
+                "latest_initiator_host": str(latest.get("initiator_host") or ""),
+                "latest_initiator_label": str(latest.get("initiator_label") or ""),
+                "latest_target_host": str(latest.get("target_host") or ""),
+                "latest_script_source": str(latest.get("script_source") or ""),
+                "latest_script_host": str(latest.get("script_host") or ""),
+                "latest_script_file": str(latest.get("script_file") or ""),
+                "latest_script_function": str(latest.get("script_function") or ""),
+                "latest_script_line": int(latest.get("script_line") or 0),
+                "latest_script_column": int(latest.get("script_column") or 0),
+                "latest_script_id": str(latest.get("script_id") or "")[:128],
+                "latest_target_id": str(latest.get("target_id") or "")[:128],
+                "latest_script_stack": [dict(frame) for frame in list(latest.get("script_stack") or [])[:8]],
+                "latest_domain_relation": str(latest.get("domain_relation") or ""),
+                "latest_method": str(latest.get("method") or ""),
+                "latest_response_status": int(latest.get("response_status") or 0),
+                "latest_response_mime_type": str(latest.get("response_mime_type") or ""),
+                "latest_encoded_data_length": int(latest.get("encoded_data_length") or 0),
+                "latest_loading_failed": bool(latest.get("loading_failed")),
+            })
+        host_rows.sort(key=lambda row: float(row.get("last_seen", 0.0) or 0.0), reverse=True)
+        endpoint_rows = []
+        for (address, port), row in endpoints.items():
+            endpoint_rows.append({
+                "remote_address": address, "remote_port": port,
+                "host": row.get("host") or "", "purpose": row.get("purpose") or "",
+                "scope": row.get("scope") or "", "resource_type": row.get("resource_type") or "",
+                "initiator_type": row.get("initiator_type") or "", "initiator_host": row.get("initiator_host") or "",
+                "initiator_label": row.get("initiator_label") or "", "internal_source_id": row.get("internal_source_id") or "",
+                "target_host": row.get("target_host") or "", "last_seen": row.get("last_seen") or 0.0,
+                "script_source": row.get("script_source") or "",
+                "script_host": row.get("script_host") or "", "script_file": row.get("script_file") or "",
+                "script_function": row.get("script_function") or "",
+                "script_line": int(row.get("script_line") or 0), "script_column": int(row.get("script_column") or 0),
+                "script_id": str(row.get("script_id") or "")[:128],
+                "target_id": str(row.get("target_id") or "")[:128],
+                "script_stack": [dict(frame) for frame in list(row.get("script_stack") or [])[:8]],
+                "method": row.get("method") or "GET",
+                "domain_relation": row.get("domain_relation") or "Unknown",
+                "response_status": int(row.get("response_status") or 0),
+                "response_mime_type": row.get("response_mime_type") or "",
+                "encoded_data_length": int(row.get("encoded_data_length") or 0),
+                "loading_failed": bool(row.get("loading_failed")),
+                "connection_id": row.get("connection_id") or "",
+                "connection_reused": row.get("connection_reused"),
+                "response_protocol": row.get("response_protocol") or "",
+            })
+        request_rows = []
+        for row in rows[-512:]:
+            request_rows.append({
+                "host": row.get("host") or "", "port": int(row.get("port") or 0),
+                "first_seen": float(row.get("first_seen") or 0.0), "last_seen": float(row.get("last_seen") or 0.0),
+                "wall_time": float(row.get("wall_time") or 0.0),
+                "purpose": row.get("purpose") or "", "scope": row.get("scope") or "",
+                "resource_type": row.get("resource_type") or "",
+                "method": row.get("method") or "GET", "has_post_data": bool(row.get("has_post_data")),
+                "initial_priority": row.get("initial_priority") or "",
+                "observed_cookie_header": bool(row.get("observed_cookie_header")),
+                "observed_authorization_header": bool(row.get("observed_authorization_header")),
+                "observed_origin_header": bool(row.get("observed_origin_header")),
+                "observed_referer_header": bool(row.get("observed_referer_header")),
+                "observed_set_cookie_header": bool(row.get("observed_set_cookie_header")),
+                "security_state": row.get("security_state") or "",
+                "domain_relation": row.get("domain_relation") or "Unknown",
+                "initiator_type": row.get("initiator_type") or "", "initiator_host": row.get("initiator_host") or "",
+                "initiator_label": row.get("initiator_label") or "", "internal_source_id": row.get("internal_source_id") or "",
+                "target_host": row.get("target_host") or "",
+                "frame_id": row.get("frame_id") or "", "loader_id": row.get("loader_id") or "",
+                "remote_address": row.get("remote_address") or "", "remote_port": int(row.get("remote_port") or 0),
+                "script_source": row.get("script_source") or "", "script_host": row.get("script_host") or "",
+                "script_file": row.get("script_file") or "", "script_function": row.get("script_function") or "",
+                "script_line": int(row.get("script_line") or 0), "script_column": int(row.get("script_column") or 0),
+                "script_id": str(row.get("script_id") or "")[:128],
+                "target_id": str(row.get("target_id") or "")[:128],
+                "script_stack": [dict(frame) for frame in list(row.get("script_stack") or [])[:8]],
+                "redirect_from_host": row.get("redirect_from_host") or "",
+                "redirect_status": int(row.get("redirect_status") or 0),
+                "redirect_to_host": row.get("redirect_to_host") or "",
+                "response_status": int(row.get("response_status") or 0),
+                "response_mime_type": row.get("response_mime_type") or "",
+                "response_from_disk_cache": bool(row.get("response_from_disk_cache")),
+                "response_from_service_worker": bool(row.get("response_from_service_worker")),
+                "response_from_prefetch_cache": bool(row.get("response_from_prefetch_cache")),
+                "request_served_from_cache": bool(row.get("request_served_from_cache")),
+                "encoded_data_length": int(row.get("encoded_data_length") or 0),
+                "loading_failed": bool(row.get("loading_failed")),
+                "failure_text": row.get("failure_text") or "",
+                "blocked_reason": row.get("blocked_reason") or "",
+                "cors_error": row.get("cors_error") or "",
+                "canceled": bool(row.get("canceled")),
+                "tls_protocol": row.get("tls_protocol") or "", "tls_cipher": row.get("tls_cipher") or "",
+                "tls_issuer": row.get("tls_issuer") or "",
+                "websocket_closed": bool(row.get("websocket_closed")),
+                "connection_id": row.get("connection_id") or "",
+                "connection_reused": row.get("connection_reused"),
+                "response_protocol": row.get("response_protocol") or "",
+            })
+        return {
+            "status": status, "reason": reason, "started_at": self._started_at,
+            "target_count": target_count, "request_count": len(rows),
+            "hosts": host_rows, "endpoints": endpoint_rows, "requests": request_rows,
+        }
+
+
+def ensure_network_request_audit_monitor(port):
+    """Start/reuse the Live Socket View CDP request-attribution monitor."""
+    global _REQUEST_AUDIT_MONITOR
+    try:
+        port = int(port or 0)
+    except Exception:
+        port = 0
+    if not port:
+        return {"status": "idle", "reason": "Chromium DevTools is not active.", "hosts": [], "endpoints": []}
+    with _REQUEST_AUDIT_LOCK:
+        monitor = _REQUEST_AUDIT_MONITOR
+        if monitor is None or int(getattr(monitor, "port", 0) or 0) != port or getattr(monitor, "_stop", None).is_set():
+            if monitor is not None:
+                try:
+                    monitor.stop()
+                except Exception:
+                    pass
+            monitor = _NetworkRequestAuditMonitor(port)
+            _REQUEST_AUDIT_MONITOR = monitor
+            monitor.start()
+        return monitor.snapshot()
+
+
+def get_network_request_script_analysis(target_id, script_id, line=0, column=0, context_lines=7):
+    """Return bounded pretty/source-map/network-call analysis for one caller."""
+    with _REQUEST_AUDIT_LOCK:
+        monitor = _REQUEST_AUDIT_MONITOR
+    if monitor is None or getattr(monitor, "_stop", None).is_set():
+        return {"ok": False, "reason": "The request-attribution monitor is not running.", "text": ""}
+    return monitor.script_source_analysis(
+        target_id, script_id, line=line, column=column, context_lines=context_lines,
+    )
+
+
+def get_network_request_script_excerpt(target_id, script_id, line=0, column=0, context_lines=3):
+    """Return a RAM-only source excerpt for one Live Socket View caller."""
+    with _REQUEST_AUDIT_LOCK:
+        monitor = _REQUEST_AUDIT_MONITOR
+    if monitor is None or getattr(monitor, "_stop", None).is_set():
+        return {"ok": False, "reason": "The request-attribution monitor is not running.", "text": ""}
+    return monitor.script_source_excerpt(
+        target_id, script_id, line=line, column=column, context_lines=context_lines,
+    )
+
+
+
+def network_request_audit_snapshot():
+    """Return the current RAM-only causal request timeline for the live view."""
+    with _REQUEST_AUDIT_LOCK:
+        monitor = _REQUEST_AUDIT_MONITOR
+    if monitor is None or getattr(monitor, "_stop", None).is_set():
+        return {"status": "idle", "reason": "The request-attribution monitor is not running.", "requests": []}
+    return monitor.snapshot()
+
+def stop_network_request_audit_monitor():
+    global _REQUEST_AUDIT_MONITOR
+    with _REQUEST_AUDIT_LOCK:
+        monitor = _REQUEST_AUDIT_MONITOR
+        _REQUEST_AUDIT_MONITOR = None
+    if monitor is not None:
+        try:
+            monitor.stop()
+        except Exception:
+            pass
 
 
 def _close_page_cdp_channel(channel):
@@ -2234,7 +4555,7 @@ def _get_persistent_page_cdp_channel(session, target_id=None, timeout=5.0, purpo
 
 
 def _persistent_page_cdp_call(session, method, params=None, *, target_id=None,
-                              timeout=5.0, purpose="default"):
+                              timeout=5.0, purpose="default", internal_source=None):
 
     """Call a page CDP method over Tekzite's persistent per-tab channel.
 
@@ -2251,8 +4572,13 @@ def _persistent_page_cdp_call(session, method, params=None, *, target_id=None,
             with lock:
                 message_id = int(channel.get("next_message_id", 1000))
                 channel["next_message_id"] = message_id + 1
+                call_params = params or {}
+                if str(method or "") == "Runtime.evaluate":
+                    call_params = _tag_runtime_evaluate_params(
+                        call_params, internal_source or f"{purpose}/evaluate",
+                    )
                 result = _cdp_call(
-                    channel["ws"], method, params or {},
+                    channel["ws"], method, call_params,
                     message_id=message_id, timeout=timeout,
                 )
                 channel["calls"] = int(channel.get("calls", 0)) + 1
@@ -8836,7 +11162,7 @@ def get_embedded_chromium_page_state(*, target_id: str = None, include_favicon: 
     result = _persistent_page_cdp_call(
         session, 'Runtime.evaluate',
         {'expression': expr, 'returnByValue': True},
-        target_id=target_id, timeout=timeout, purpose='page-state',
+        target_id=target_id, timeout=timeout, purpose='page-state', internal_source='page-state/metadata',
     )
     value = (((result or {}).get('result') or {}).get('value'))
     if not isinstance(value, dict):
@@ -8845,52 +11171,10 @@ def get_embedded_chromium_page_state(*, target_id: str = None, include_favicon: 
     value['url'] = str(value.get('url') or '')[:MAX_PAGE_URL_CHARS]
     value['favicon'] = str(value.get('favicon') or '')[:MAX_FAVICON_URL_CHARS]
     if include_favicon and value.get('favicon'):
-        fav_expr = r'''(async () => {
-          try {
-            const el = document.querySelector('link[rel~="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]');
-            if (!el || !el.href) return '';
-            const r = await fetch(el.href, {credentials:'include', cache:'force-cache'});
-            if (!r.ok) return '';
-            const declared = Number(r.headers.get('content-length') || 0);
-            if (Number.isFinite(declared) && declared > 524288) return '';
-            let bytes;
-            if (r.body && r.body.getReader) {
-              const reader = r.body.getReader();
-              const chunks = [];
-              let total = 0;
-              while (true) {
-                const part = await reader.read();
-                if (part.done) break;
-                const value = part.value || new Uint8Array();
-                total += value.byteLength;
-                if (total > 524288) {
-                  try { await reader.cancel(); } catch (_) {}
-                  return '';
-                }
-                chunks.push(value);
-              }
-              bytes = new Uint8Array(total);
-              let offset = 0;
-              for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-            } else {
-              const b = await r.blob();
-              if (b.size > 524288) return '';
-              bytes = new Uint8Array(await b.arrayBuffer());
-            }
-            let binary = '';
-            for (let i=0; i<bytes.length; i+=0x8000) binary += String.fromCharCode(...bytes.subarray(i, i+0x8000));
-            return btoa(binary);
-          } catch (_) { return ''; }
-        })()'''
         try:
-            fav = _persistent_page_cdp_call(
-                session, 'Runtime.evaluate',
-                {'expression': fav_expr, 'returnByValue': True, 'awaitPromise': True},
-                target_id=target_id, timeout=max(timeout, 5), purpose='page-state',
-            )
-            data = (((fav or {}).get('result') or {}).get('value'))
-            if isinstance(data, str):
-                value['favicon_b64'] = data
+            raw = fetch_favicon_bytes(value['favicon'])
+            if raw:
+                value['favicon_b64'] = base64.b64encode(raw).decode('ascii')
         except Exception:
             pass
     return value
@@ -9107,8 +11391,14 @@ def _close_embedded_chromium_unlocked(clear_profile=False):
         except Exception:
             pass
         try:
+            fetch_favicon_bytes.cache_clear()
             fetch_bytes.cache_clear()
             fetch_document.cache_clear()
+        except Exception:
+            pass
+        try:
+            with _INTERNAL_NETWORK_ACTIVITY_LOCK:
+                _INTERNAL_NETWORK_ACTIVITY.clear()
         except Exception:
             pass
 
@@ -9119,6 +11409,82 @@ def _extract_session_cookies(response, request):
         # Test doubles and unusual response wrappers may not expose the full
         # urllib response API; cookie persistence is best-effort there.
         pass
+
+
+FAVICON_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "image/png,image/x-icon,image/vnd.microsoft.icon,image/jpeg,image/gif,image/webp,*/*;q=0.1",
+    "DNT": "1",
+    "Sec-GPC": "1",
+}
+MAX_FAVICON_BYTES = 512 * 1024
+
+
+def _favicon_target_is_local(host: str) -> bool:
+    """Reject page-controlled favicon targets that explicitly name local space."""
+    host = str(host or "").strip().rstrip(".").lower()
+    if not host:
+        return True
+    if host in {"localhost", "localhost.localdomain"} or host.endswith((".local", ".lan", ".home.arpa")):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(not ip.is_global)
+
+
+@lru_cache(maxsize=256)
+def fetch_favicon_bytes(url: str) -> bytes:
+    """Fetch a favicon as Tekzite-owned traffic, never as page JavaScript.
+
+    No page/session cookies, Authorization, Origin or Referer are added. Public
+    HTTP(S) requests still travel through Tekzite Network. Explicit local/private
+    targets are rejected so a page-controlled icon URL cannot become a local
+    network probe. Public-name DNS rebinding remains blocked by Tekzite Network.
+    """
+    url = str(url or "").strip()[:MAX_FAVICON_URL_CHARS]
+    if not url:
+        return b""
+    if url.lower().startswith("data:"):
+        try:
+            header, separator, payload = url.partition(",")
+            if not separator:
+                return b""
+            raw = base64.b64decode(payload, validate=False) if ";base64" in header.lower() else unquote_to_bytes(payload)
+            return raw if 0 < len(raw) <= MAX_FAVICON_BYTES else b""
+        except Exception:
+            return b""
+
+    try:
+        parts = urlsplit(url)
+        scheme = str(parts.scheme or "").lower()
+        host = str(parts.hostname or "").strip().rstrip(".").lower()
+    except Exception:
+        return b""
+    if scheme not in {"http", "https"} or _favicon_target_is_local(host):
+        return b""
+
+    _record_internal_network_activity(url, purpose="Tekzite favicon fetch", resource="Favicon")
+    request = Request(url, headers=FAVICON_HEADERS, method="GET")
+    try:
+        with _network_urlopen(request, timeout=SUBRESOURCE_TIMEOUT) as response:
+            final_url = str(response.geturl() or url)
+            final = urlsplit(final_url)
+            if str(final.scheme or "").lower() not in {"http", "https"} or _favicon_target_is_local(final.hostname or ""):
+                return b""
+            try:
+                declared = int(response.headers.get("Content-Length") or 0)
+            except Exception:
+                declared = 0
+            if declared > MAX_FAVICON_BYTES:
+                return b""
+            raw = response.read(MAX_FAVICON_BYTES + 1)
+            if not raw or len(raw) > MAX_FAVICON_BYTES:
+                return b""
+            return raw
+    except Exception:
+        return b""
 
 
 @lru_cache(maxsize=256)

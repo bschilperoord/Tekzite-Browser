@@ -7,7 +7,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version_10568():
-    assert main.BROWSER_VERSION == "10.5.73"
+    assert main.BROWSER_VERSION == "10.5.80"
 
 
 def test_hot_navigation_clears_stale_cold_frame_diagnostics():

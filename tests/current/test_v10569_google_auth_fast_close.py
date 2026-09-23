@@ -6,7 +6,7 @@ import engine.net as net
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.73"  # sync_version updates this pin
+    assert main.BROWSER_VERSION == "10.5.80"  # sync_version updates this pin
 
 
 def test_live_youtube_hwnd_succeeds_on_first_observation(monkeypatch):

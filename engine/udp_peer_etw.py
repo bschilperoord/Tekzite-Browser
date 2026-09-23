@@ -1,8 +1,10 @@
-"""Live UDP remote-peer discovery for Tekzite's Windows socket view.
+"""Live Windows network-event enrichment for Tekzite's socket view.
 
-Windows' GetExtendedUdpTable exposes only the owning PID and local endpoint.
-This module augments that table with Microsoft-Windows-Kernel-Network ETW
-send/receive events so the UI can display the actual remote UDP peer.
+Windows' owner tables remain the authoritative snapshot for current sockets.
+This module augments them with Microsoft-Windows-Kernel-Network ETW metadata:
+UDP send/receive events reveal connectionless remote peers, while TCP
+connect/accept events retain very short-lived flows that could disappear
+between owner-table samples.
 
 The monitor is deliberately ephemeral: events live only in process memory and
 are retained for a short window while the Live Socket View is open. No packet
@@ -25,8 +27,11 @@ KERNEL_NETWORK_PROVIDER_GUID = "7dd42a49-5329-4832-8dfd-43d979153a88"
 KERNEL_NETWORK_KEYWORD_IPV4 = 0x10
 KERNEL_NETWORK_KEYWORD_IPV6 = 0x20
 UDP_EVENT_IDS = {42, 43, 58, 59}  # IPv4 send/recv, IPv6 send/recv.
+TCP_CONNECT_EVENT_IDS = {12, 15, 28, 31}  # IPv4/v6 connect + accept.
 UDP_PEER_MAX_AGE = 30.0
 UDP_PEER_MAX_ROWS = 1024
+TCP_FLOW_MAX_AGE = 30.0
+TCP_FLOW_MAX_ROWS = 1024
 
 
 def _clean_address(value: str) -> str:
@@ -94,6 +99,129 @@ def _parse_udp_kernel_network_event(event_id: int, payload: bytes):
         "direction": direction,
         "size": max(0, int(size)),
     }
+
+
+def _parse_tcp_kernel_network_event(event_id: int, payload: bytes):
+    """Decode Kernel-Network TCP connect/accept metadata.
+
+    Connect events are enough to retain sockets that can open and close between
+    Windows owner-table snapshots. Payload layout comes from the provider
+    manifest and starts with PID, size, destination/source addresses and ports.
+    """
+    try:
+        event_id = int(event_id)
+        payload = bytes(payload or b"")
+    except Exception:
+        return None
+    if event_id not in TCP_CONNECT_EVENT_IDS:
+        return None
+    ipv6 = event_id in (28, 31)
+    accepted = event_id in (15, 31)
+    if not ipv6:
+        if len(payload) < 20:
+            return None
+        pid, size = struct.unpack_from("<II", payload, 0)
+        daddr = socket.inet_ntop(socket.AF_INET, payload[8:12])
+        saddr = socket.inet_ntop(socket.AF_INET, payload[12:16])
+        dport = struct.unpack_from("!H", payload, 16)[0]
+        sport = struct.unpack_from("!H", payload, 18)[0]
+        family = "IPv4"
+    else:
+        if len(payload) < 44:
+            return None
+        pid, size = struct.unpack_from("<II", payload, 0)
+        daddr = socket.inet_ntop(socket.AF_INET6, payload[8:24])
+        saddr = socket.inet_ntop(socket.AF_INET6, payload[24:40])
+        dport = struct.unpack_from("!H", payload, 40)[0]
+        sport = struct.unpack_from("!H", payload, 42)[0]
+        family = "IPv6"
+    if accepted:
+        local_address, local_port = daddr, dport
+        remote_address, remote_port = saddr, sport
+        event = "accept"
+    else:
+        local_address, local_port = saddr, sport
+        remote_address, remote_port = daddr, dport
+        event = "connect"
+    return {
+        "pid": int(pid), "family": family,
+        "local_address": _clean_address(local_address), "local_port": int(local_port),
+        "remote_address": _clean_address(remote_address), "remote_port": int(remote_port),
+        "event": event, "size": max(0, int(size)),
+    }
+
+
+class _TcpFlowLedger:
+    """Short-lived RAM ledger for event-observed TCP flows."""
+    def __init__(self, *, max_age=TCP_FLOW_MAX_AGE, max_rows=TCP_FLOW_MAX_ROWS):
+        self.max_age = float(max_age)
+        self.max_rows = int(max_rows)
+        self._lock = threading.RLock()
+        self._rows = {}
+        self._pids = set()
+
+    def set_pids(self, pids):
+        clean = set()
+        for value in list(pids or []):
+            try:
+                pid = int(value or 0)
+            except Exception:
+                pid = 0
+            if pid > 0:
+                clean.add(pid)
+        with self._lock:
+            self._pids = clean
+            for key in list(self._rows):
+                if int(key[0]) not in clean:
+                    self._rows.pop(key, None)
+
+    def add(self, event, *, now=None):
+        if not event:
+            return False
+        now = float(time.time() if now is None else now)
+        pid = int(event.get("pid") or 0)
+        with self._lock:
+            if pid <= 0 or pid not in self._pids:
+                return False
+            local_address = _clean_address(event.get("local_address"))
+            remote_address = _clean_address(event.get("remote_address"))
+            local_port = int(event.get("local_port") or 0)
+            remote_port = int(event.get("remote_port") or 0)
+            family = str(event.get("family") or "")
+            if not local_port or not remote_address or not remote_port:
+                return False
+            key = (pid, family, local_address, local_port, remote_address, remote_port)
+            row = self._rows.get(key)
+            if row is None:
+                if len(self._rows) >= self.max_rows:
+                    oldest = min(self._rows, key=lambda k: float(self._rows[k].get("last_seen", 0.0)))
+                    self._rows.pop(oldest, None)
+                row = {
+                    "pid": pid, "family": family, "local_address": local_address,
+                    "local_port": local_port, "remote_address": remote_address,
+                    "remote_port": remote_port, "first_seen": now, "last_seen": now,
+                    "event": str(event.get("event") or "connect"), "count": 0,
+                }
+                self._rows[key] = row
+            row["count"] = int(row.get("count") or 0) + 1
+            row["last_seen"] = now
+            row["event"] = str(event.get("event") or row.get("event") or "connect")
+            self._prune_locked(now)
+            return True
+
+    def _prune_locked(self, now):
+        cutoff = float(now) - self.max_age
+        for key in list(self._rows):
+            if float(self._rows[key].get("last_seen", 0.0)) < cutoff:
+                self._rows.pop(key, None)
+
+    def snapshot(self, *, now=None):
+        now = float(time.time() if now is None else now)
+        with self._lock:
+            self._prune_locked(now)
+            rows = [dict(row) for row in self._rows.values()]
+        rows.sort(key=lambda row: float(row.get("last_seen", 0.0)), reverse=True)
+        return rows
 
 
 class _PeerLedger:
@@ -184,10 +312,11 @@ class _PeerLedger:
 
 
 class UdpPeerMonitor:
-    """Small real-time ETW consumer for Kernel-Network UDP events."""
+    """Small real-time ETW consumer for UDP peers and recent TCP flows."""
 
     def __init__(self):
         self.ledger = _PeerLedger()
+        self.tcp_ledger = _TcpFlowLedger()
         self._lock = threading.RLock()
         self._thread = None
         self._session_handle = 0
@@ -206,12 +335,13 @@ class UdpPeerMonitor:
 
     def set_pids(self, pids):
         self.ledger.set_pids(pids)
+        self.tcp_ledger.set_pids(pids)
 
     def start(self):
         if os.name != "nt":
             with self._lock:
                 self._status = "unsupported"
-                self._reason = "UDP ETW peer tracing is available on Windows only."
+                self._reason = "Kernel-Network ETW peer tracing is available on Windows only."
             return False
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -266,7 +396,10 @@ class UdpPeerMonitor:
 
     def snapshot(self):
         status, reason = self.status
-        return {"status": status, "reason": reason, "peers": self.ledger.snapshot()}
+        return {
+            "status": status, "reason": reason,
+            "peers": self.ledger.snapshot(), "tcp_flows": self.tcp_ledger.snapshot(),
+        }
 
     def _run(self):
         try:
@@ -274,7 +407,7 @@ class UdpPeerMonitor:
         except Exception as exc:
             with self._lock:
                 self._status = "error"
-                self._reason = f"ETW UDP peer monitor failed: {exc}"
+                self._reason = f"ETW network peer monitor failed: {exc}"
         finally:
             with self._lock:
                 self._session_handle = 0
@@ -286,7 +419,7 @@ class UdpPeerMonitor:
 
     def _run_windows(self):
         api = _EtwApi.instance()
-        session_name = f"TekziteUdpPeers-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        session_name = f"TekziteNetworkPeers-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         props_buf, props_ptr = _make_trace_properties(session_name)
         session = _TRACEHANDLE(0)
         status = int(api.StartTraceW(ct.byref(session), session_name, props_ptr))
@@ -317,14 +450,16 @@ class UdpPeerMonitor:
                 if not _guid_equal(record.EventHeader.ProviderId, provider):
                     return
                 event_id = int(record.EventHeader.EventDescriptor.Id)
-                if event_id not in UDP_EVENT_IDS:
+                if event_id not in UDP_EVENT_IDS and event_id not in TCP_CONNECT_EVENT_IDS:
                     return
                 length = int(record.UserDataLength or 0)
                 if length <= 0 or not record.UserData:
                     return
                 payload = ct.string_at(record.UserData, length)
-                event = _parse_udp_kernel_network_event(event_id, payload)
-                self.ledger.add(event)
+                if event_id in UDP_EVENT_IDS:
+                    self.ledger.add(_parse_udp_kernel_network_event(event_id, payload))
+                else:
+                    self.tcp_ledger.add(_parse_tcp_kernel_network_event(event_id, payload))
             except Exception:
                 # ETW callbacks must never unwind through advapi32.
                 return
@@ -573,7 +708,7 @@ def _make_trace_properties(session_name):
 def _etw_error_text(code):
     code = int(code or 0)
     if code == ERROR_ACCESS_DENIED:
-        return "Windows denied Kernel-Network ETW access; run Tekzite elevated to resolve UDP remote peers."
+        return "Windows denied Kernel-Network ETW access; run Tekzite elevated to resolve UDP peers and recent TCP flows."
     try:
         text = ct.FormatError(code).strip()
     except Exception:
@@ -640,5 +775,6 @@ def stop_udp_peer_monitor():
 
 __all__ = [
     "ensure_udp_peer_monitor", "udp_peer_snapshot", "stop_udp_peer_monitor",
-    "UdpPeerMonitor", "_PeerLedger", "_parse_udp_kernel_network_event",
+    "UdpPeerMonitor", "_PeerLedger", "_TcpFlowLedger",
+    "_parse_udp_kernel_network_event", "_parse_tcp_kernel_network_event",
 ]

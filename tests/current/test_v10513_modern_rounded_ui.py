@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.73"
+    assert main.BROWSER_VERSION == "10.5.80"
 
 
 def test_modern_corner_defaults_and_bounds_exist():

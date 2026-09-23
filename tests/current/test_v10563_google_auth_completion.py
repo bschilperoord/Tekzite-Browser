@@ -7,7 +7,7 @@ import engine.net as net
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.73"
+    assert main.BROWSER_VERSION == "10.5.80"
 
 
 def test_live_cookie_snapshot_sees_wal_commits(tmp_path):

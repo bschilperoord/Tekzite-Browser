@@ -5,7 +5,7 @@ from browser_features import omnibox_suggestions
 
 
 def test_release_is_v10548():
-    assert main.BROWSER_VERSION == "10.5.73"
+    assert main.BROWSER_VERSION == "10.5.80"
 
 
 def test_local_suggestions_rank_bookmark_prefix_and_dedupe_url():

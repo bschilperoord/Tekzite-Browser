@@ -81,13 +81,25 @@ def _socket_endpoint_parts(value):
         return "", 0
 
 
-def _register_active_upstream(sock: socket.socket, host: str, protocol: str):
-    """Associate one live helper socket with the requested host, RAM-only."""
+def _register_active_upstream(sock: socket.socket, host: str, protocol: str, client: socket.socket | None = None):
+    """Associate one live helper socket with the requested host, RAM-only.
+
+    When the Chromium-side client socket is available, retain only its endpoint
+    tuple too. That lets the Live Socket View tie the localhost CONNECT socket
+    to the exact upstream hostname without storing any request URL/content.
+    """
     try:
         local_address, local_port = _socket_endpoint_parts(sock.getsockname())
         remote_address, remote_port = _socket_endpoint_parts(sock.getpeername())
     except Exception:
         return None
+    client_address = client_port = proxy_address = proxy_port = ""
+    if client is not None:
+        try:
+            client_address, client_port = _socket_endpoint_parts(client.getpeername())
+            proxy_address, proxy_port = _socket_endpoint_parts(client.getsockname())
+        except Exception:
+            client_address, client_port, proxy_address, proxy_port = "", 0, "", 0
     if not local_port or not remote_port:
         return None
     key = (local_address, local_port, remote_address, remote_port)
@@ -100,6 +112,13 @@ def _register_active_upstream(sock: socket.socket, host: str, protocol: str):
         "remote_port": remote_port,
         "opened_at": time.time(),
     }
+    if client_address and int(client_port or 0):
+        row.update({
+            "client_address": str(client_address)[:128],
+            "client_port": int(client_port),
+            "proxy_address": str(proxy_address or "")[:128],
+            "proxy_port": int(proxy_port or 0),
+        })
     with _CONNECTION_OVERVIEW_LOCK:
         _ACTIVE_UPSTREAMS[key] = row
     return key
@@ -708,7 +727,7 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             _record_connection(host, port, "HTTPS", "failed")
             raise
         _record_connection(host, port, "HTTPS", "allowed", active_delta=1)
-        upstream_key = _register_active_upstream(upstream, host, "HTTPS")
+        upstream_key = _register_active_upstream(upstream, host, "HTTPS", client=client)
         _tune_latency_socket(upstream)
         try:
             client.sendall(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: Tekzite-Network/1\r\n\r\n")
@@ -769,7 +788,7 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             _record_connection(host, port, protocol, "failed")
             raise
         _record_connection(host, port, protocol, "allowed", active_delta=1)
-        upstream_key = _register_active_upstream(upstream, host, protocol)
+        upstream_key = _register_active_upstream(upstream, host, protocol, client=client)
         _tune_latency_socket(upstream)
         upstream.settimeout(IDLE_TIMEOUT)
         try:

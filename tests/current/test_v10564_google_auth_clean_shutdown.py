@@ -5,7 +5,7 @@ import engine.net as net
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.73"
+    assert main.BROWSER_VERSION == "10.5.80"
 
 
 def test_auth_handoff_cleanly_closes_embedded_chromium():
