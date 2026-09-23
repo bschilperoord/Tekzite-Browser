@@ -231,6 +231,33 @@ jobs:
           print('v10.5.61 successful Google auth auto-close checks passed')
           '@ | python -
 
+      - name: Package applied v10.5.61 source
+        shell: pwsh
+        run: |
+          $stage = Join-Path $PWD "source-package"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $exclude = @(".git", ".build", "build", "dist", "source-package", "__pycache__")
+          Get-ChildItem -Force | Where-Object { $exclude -notcontains $_.Name } | ForEach-Object {
+            Copy-Item $_.FullName -Destination $stage -Recurse -Force
+          }
+
+          Get-ChildItem $stage -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+          $sourceZip = Join-Path $PWD "Tekzite-Browser-v10.5.61-Source.zip"
+          if (Test-Path $sourceZip) { Remove-Item $sourceZip -Force }
+          Compress-Archive -Path "$stage\*" -DestinationPath $sourceZip -CompressionLevel Optimal
+
+      - name: Upload v10.5.61 source
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tekzite-Browser-v10.5.61-Source
+          path: Tekzite-Browser-v10.5.61-Source.zip
+          if-no-files-found: error
+          compression-level: 0
+
       - name: Build Windows x64 EXE
         shell: pwsh
         run: .\build_windows.ps1
