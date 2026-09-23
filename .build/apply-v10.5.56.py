@@ -75,7 +75,7 @@ def _asset_path(*parts):
 if "def _set_windows_app_user_model_id():" not in main:
     main = replace_once(main, "def _preferences_path():\n", helpers + "def _preferences_path():\n", "preferences helper anchor")
 
-main = re.sub(r'BROWSER_VERSION = "10\.5\.\d+"', 'BROWSER_VERSION = "10.5.56"', main, count=1)
+main = re.sub(r'BROWSER_VERSION = "10\.5\.\d+"', 'BROWSER_VERSION = "10.5.57"', main, count=1)
 
 methods = '''    def _native_root_hwnd(self):
         if sys.platform != "win32":
@@ -296,6 +296,88 @@ minimize_new = '''        try:
 '''
 main = replace_once(main, minimize_old, minimize_new, "taskbar-safe minimize transition")
 
+
+maximize_method_anchor = "    def _toggle_maximize(self):\n"
+if "    def _rearm_dwm_input_after_maximize(self):" not in main:
+    maximize_method = '''    def _rearm_dwm_input_after_maximize(self):
+        """Rebind DWM hit testing after maximize/restore changes the viewport."""
+        if not (self._embedded_mode and self._chromium_dwm_mode and self._dwm_surface_ready):
+            return False
+
+        # A pending poll can still be using the pre-maximize rectangle. Cancel
+        # it and restart from the new host geometry instead of letting one stale
+        # sample poison the first click after the viewport jump.
+        if self._dwm_pointer_after_id is not None:
+            try:
+                self.root.after_cancel(self._dwm_pointer_after_id)
+            except Exception:
+                pass
+            self._dwm_pointer_after_id = None
+        self._dwm_pointer_inside = False
+        self._dwm_pointer_last_screen_xy = None
+        self._dwm_pointer_last_page_xy = None
+        self._chromium_left_button_down = False
+        self._chromium_drag_selecting = False
+        self._chromium_press_point = None
+        self._chromium_pending_drag = None
+
+        try:
+            request_embedded_chromium_dwm_recrop()
+        except Exception:
+            pass
+        if self._dwm_host:
+            try:
+                self._repair_dwm_host_owner_and_style(self._dwm_host)
+            except Exception:
+                pass
+
+        # Commit destination + Chromium viewport first.
+        self._schedule_dwm_geometry_sync(resize=True, delay=1)
+
+        # Refresh the pixel-to-CSS transform off the Tk thread. A maximized
+        # viewport can have a different render-host/native-pixel contract even
+        # when page zoom itself did not change.
+        try:
+            tab = self._active_tab()
+            target_id = tab.get("chromium_target_id") if tab else self._chromium_frame_target_id
+            self._executor.submit(
+                refresh_embedded_chromium_dwm_input_metrics,
+                target_id,
+                0.8,
+            )
+        except Exception:
+            pass
+
+        self._arm_dwm_input_surface()
+        self._schedule_dwm_pointer_bridge(delay=1)
+        return True
+
+'''
+    main = replace_once(main, maximize_method_anchor, maximize_method + maximize_method_anchor, "maximize input rearm anchor")
+
+old_maximize = '''        if self._embedded_mode and self._chromium_dwm_mode:
+            # v10.5.38: maximizing/restoring changes the DWM viewport.  Reconcile
+            # immediately and once more after Tk has finished packing children.
+            self.root.after_idle(lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
+            self.root.after(70, lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
+'''
+new_maximize = '''        if self._embedded_mode and self._chromium_dwm_mode:
+            # A maximize/restore is both a visual resize and an input-coordinate
+            # transition. Re-arm the pointer bridge after each layout beat so
+            # the visible DWM page never becomes a click-dead mirror.
+            self.root.after_idle(self._rearm_dwm_input_after_maximize)
+            self.root.after(55, self._rearm_dwm_input_after_maximize)
+            self.root.after(150, self._rearm_dwm_input_after_maximize)
+'''
+main = replace_once(main, old_maximize, new_maximize, "maximize DWM input transition")
+
+main = replace_once(
+    main,
+    "    get_embedded_chromium_dwm_input_offset, get_embedded_chromium_input_scale, get_embedded_chromium_input_zoom_factor,\n",
+    "    get_embedded_chromium_dwm_input_offset, get_embedded_chromium_input_scale, get_embedded_chromium_input_zoom_factor,\n    refresh_embedded_chromium_dwm_input_metrics,\n",
+    "DWM input metric refresh import",
+)
+
 write("main.py", main)
 
 build = read("build_windows.ps1")
@@ -309,22 +391,44 @@ if 'assets_dir = project / "assets"' not in build:
 write("build_windows.ps1", build)
 
 manifest = json.loads(read("chromium_zoom_extension/manifest.json"))
-manifest["version"] = "10.5.56"
+manifest["version"] = "10.5.57"
 write("chromium_zoom_extension/manifest.json", json.dumps(manifest, indent=2) + "\n")
 
 installer = read("installer/TekziteBrowser.iss")
-installer = re.sub(r'#define MyAppVersion "10\.5\.\d+"', '#define MyAppVersion "10.5.56"', installer, count=1)
+installer = re.sub(r'#define MyAppVersion "10\.5\.\d+"', '#define MyAppVersion "10.5.57"', installer, count=1)
 write("installer/TekziteBrowser.iss", installer)
 
 app_manifest = read("tekzite_browser.manifest")
-app_manifest = re.sub(r'assemblyIdentity version="10\.5\.\d+\.0"', 'assemblyIdentity version="10.5.56.0"', app_manifest, count=1)
+app_manifest = re.sub(r'assemblyIdentity version="10\.5\.\d+\.0"', 'assemblyIdentity version="10.5.57.0"', app_manifest, count=1)
 write("tekzite_browser.manifest", app_manifest)
+
+engine = read("engine/net.py")
+if "def refresh_embedded_chromium_dwm_input_metrics(" not in engine:
+    anchor = "def get_embedded_chromium_input_scale():\n"
+    helper = '''def refresh_embedded_chromium_dwm_input_metrics(target_id=None, timeout: float = 0.8):
+    """Refresh the DWM native-pixel -> CSS hit-test contract after a viewport jump."""
+    session = _EDGE_SESSION or {}
+    if not session or session.get("presentation_mode") == "software":
+        return get_embedded_chromium_input_scale()
+    try:
+        return _refresh_dwm_input_metrics(
+            session,
+            target_id=target_id or session.get("target_id"),
+            timeout=max(0.25, float(timeout)),
+        )
+    except Exception:
+        return get_embedded_chromium_input_scale()
+
+
+'''
+    engine = replace_once(engine, anchor, helper + anchor, "DWM input-scale helper anchor")
+write("engine/net.py", engine)
 
 version_info = read("tekzite_version_info.txt")
 version_info = re.sub(r'filevers=\(10,\s*5,\s*\d+,\s*0\)', 'filevers=(10, 5, 56, 0)', version_info, count=1)
 version_info = re.sub(r'prodvers=\(10,\s*5,\s*\d+,\s*0\)', 'prodvers=(10, 5, 56, 0)', version_info, count=1)
-version_info = re.sub(r"StringStruct\(u'FileVersion', u'10\.5\.\d+'\)", "StringStruct(u'FileVersion', u'10.5.56')", version_info, count=1)
-version_info = re.sub(r"StringStruct\(u'ProductVersion', u'10\.5\.\d+'\)", "StringStruct(u'ProductVersion', u'10.5.56')", version_info, count=1)
+version_info = re.sub(r"StringStruct\(u'FileVersion', u'10\.5\.\d+'\)", "StringStruct(u'FileVersion', u'10.5.57')", version_info, count=1)
+version_info = re.sub(r"StringStruct\(u'ProductVersion', u'10\.5\.\d+'\)", "StringStruct(u'ProductVersion', u'10.5.57')", version_info, count=1)
 write("tekzite_version_info.txt", version_info)
 
 write(
@@ -335,4 +439,4 @@ write(
     "The Windows build and installer both use these files automatically when present.\n",
 )
 
-print("Applied Tekzite Browser v10.5.56 native application identity/icon changes")
+print("Applied Tekzite Browser v10.5.57 native application identity/icon changes")
