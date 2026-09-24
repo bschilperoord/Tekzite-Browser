@@ -140,3 +140,24 @@ def test_linux_frameless_hint_targets_wm_wrapper_and_client():
     assert "frame_id = win.frame()" in block
     assert 'win.tk.call("wm", "frame", win._w)' in block
     assert "for xid in xids:" in block
+
+
+def test_linux_root_is_withdrawn_before_first_managed_map():
+    start = MAIN.index("self.root = tk.Tk()")
+    end = MAIN.index("self._apply_app_icon()", start)
+    block = MAIN[start:end]
+    assert 'if sys.platform.startswith("linux"):' in block
+    assert "self.root.withdraw()" in block
+
+
+def test_linux_root_installs_motif_hint_before_deiconify():
+    shell_start = MAIN.index("title_version =")
+    shell_end = MAIN.index("self._window_restore_geometry", shell_start)
+    shell = MAIN[shell_start:shell_end]
+    assert "self._apply_linux_managed_frameless(self.root)" in shell
+    assert "self.root.deiconify()" not in shell
+
+    startup = MAIN[MAIN.index("# Map Linux only after the WM decoration hint is present."):
+                   MAIN.index("# Shell activation must win over session restore.")]
+    assert startup.index("self._apply_linux_managed_frameless(self.root)") < startup.index("self.root.deiconify()")
+    assert "self.root.after(40" in startup
