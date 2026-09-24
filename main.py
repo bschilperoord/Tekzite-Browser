@@ -2105,10 +2105,10 @@ class BrowserApp(BrowserFeatures):
         self.root.title(f"Tekzite Browser{' — Private' if self._private_mode else ''}{' — ' + self._profile_name if self._profile_name != 'Default' else ''}{title_version}")
         self.root.geometry(f"{self.customization['window_width']}x{self.customization['window_height']}")
         self.root.minsize(self.customization["window_min_width"], self.customization["window_min_height"])
-        # Windows uses Tekzite's custom frameless shell. Linux Preview keeps
-        # the window-manager frame so taskbar/minimize/maximize behavior works
-        # correctly on X11, XWayland and Wayland compositors.
-        self.root.overrideredirect(os.name == "nt")
+        # Tekzite owns its title surface on every desktop. The in-app app bar
+        # already provides drag/minimize/maximize/close controls, so keep the
+        # Linux preview frameless too instead of stacking a second WM title bar.
+        self.root.overrideredirect(True)
         self._window_restore_geometry = None
         self._window_maximized = False
         self._window_drag_offset = (0, 0)
@@ -6966,12 +6966,31 @@ class BrowserApp(BrowserFeatures):
             return False
 
     def _current_chromium_software_viewport(self):
-        """Return the stable software viewport, never a transient Tk size."""
+        """Return the stable software viewport, never a transient Tk size.
+
+        Also repair a missed Tk <Configure> notification. On Linux a late shell
+        repack can leave the latched Chromium bitmap shorter than the actual
+        Canvas, exposing the Canvas background as a black strip at the bottom.
+        Keep rendering the last committed size until the real widget size has
+        remained stable long enough to commit it.
+        """
         size = self._chromium_viewport_size
-        if size and self._chromium_viewport_is_sane(*size):
-            return (int(size[0]), int(size[1]))
         w = max(1, int(self.chromium_surface.winfo_width()))
         h = max(1, int(self.chromium_surface.winfo_height()))
+        actual = (w, h)
+        if size and self._chromium_viewport_is_sane(*size):
+            committed = (int(size[0]), int(size[1]))
+            if self._chromium_viewport_is_sane(*actual) and actual != committed:
+                self._chromium_pending_viewport_size = actual
+                if self._chromium_viewport_after_id is None:
+                    try:
+                        self._chromium_viewport_after_id = self.root.after(
+                            min(120, int(self._chromium_viewport_debounce_ms)),
+                            self._commit_chromium_software_viewport,
+                        )
+                    except Exception:
+                        self._chromium_viewport_after_id = None
+            return committed
         if self._chromium_viewport_is_sane(w, h):
             self._chromium_viewport_size = (w, h)
             return (w, h)
@@ -8468,7 +8487,27 @@ class BrowserApp(BrowserFeatures):
             self._apply_window_rounding()
         except Exception:
             pass
-        if not self._embedded_mode or self._chromium_software_mode:
+        if not self._embedded_mode:
+            return
+        if self._chromium_software_mode:
+            try:
+                width = max(1, int(self.chromium_surface.winfo_width()))
+                height = max(1, int(self.chromium_surface.winfo_height()))
+                candidate = (width, height)
+                if (self._chromium_viewport_is_sane(*candidate)
+                        and candidate != self._chromium_viewport_size):
+                    self._chromium_pending_viewport_size = candidate
+                    if self._chromium_viewport_after_id is not None:
+                        try:
+                            self.root.after_cancel(self._chromium_viewport_after_id)
+                        except Exception:
+                            pass
+                    self._chromium_viewport_after_id = self.root.after(
+                        min(120, int(self._chromium_viewport_debounce_ms)),
+                        self._commit_chromium_software_viewport,
+                    )
+            except Exception:
+                pass
             return
         try:
             if self._chromium_dwm_mode:
@@ -9892,10 +9931,27 @@ class BrowserApp(BrowserFeatures):
         self._suspend_dwm_host_for_minimize()
         if os.name != "nt":
             self._dwm_host_suspended_for_minimize = False
+            # Override-redirect windows are not consistently iconifiable on
+            # Linux/X11/XWayland. Hand the root back to the WM only for the
+            # minimize transition, then the existing restore watchdog makes it
+            # frameless again when it maps.
+            self._taskbar_restore_pending = True
+            self._taskbar_restore_attempts = 0
             try:
+                self._taskbar_restore_geometry = self.root.geometry()
+            except Exception:
+                self._taskbar_restore_geometry = None
+            try:
+                self.root.overrideredirect(False)
+                self.root.update_idletasks()
                 self.root.iconify()
             except Exception:
-                pass
+                try:
+                    self.root.deiconify()
+                    self.root.overrideredirect(True)
+                except Exception:
+                    pass
+            self._schedule_taskbar_restore_check(120)
             return
         # Tk cannot iconify an override-redirect window directly on Windows.
         # Retire the transient DWM destination first, then temporarily expose a
@@ -10571,7 +10627,7 @@ class BrowserApp(BrowserFeatures):
             pass
         try:
             self.window_controls.pack_forget()
-            if self._custom("show_window_controls", True) and os.name == "nt":
+            if self._custom("show_window_controls", True):
                 if self._custom("window_control_style", "traffic_lights") == "traffic_lights":
                     self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(14), self._ui_padding(6)), pady=self._ui_padding(7), before=self.app_brand)
                 else:
