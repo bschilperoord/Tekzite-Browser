@@ -6783,14 +6783,22 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
             session["target_zoom_bootstrap_skipped_default"] = True
     except Exception:
         pass
-    try:
-        set_embedded_chromium_color_scheme(
-            session.get("website_color_scheme", "system"),
-            target_id=target_id, timeout=2.0,
-        )
-        session["target_color_scheme_bootstrap_applied"] = True
-    except Exception:
+    inherited_color_scheme = _normalized_chromium_color_scheme(
+        session.get("website_color_scheme", "system")
+    )
+    if inherited_color_scheme != "system":
+        try:
+            set_embedded_chromium_color_scheme(
+                inherited_color_scheme, target_id=target_id, timeout=2.0,
+            )
+            session["target_color_scheme_bootstrap_applied"] = True
+        except Exception:
+            session["target_color_scheme_bootstrap_applied"] = False
+    else:
+        # Fresh Chromium targets already use the system/site default. Avoid a
+        # needless CDP round trip on the bootstrap fast path.
         session["target_color_scheme_bootstrap_applied"] = False
+        session["target_color_scheme_bootstrap_skipped_default"] = True
     return target_id
 
 
@@ -9914,13 +9922,18 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
     # Color-scheme emulation is a browser/media preference, not a DOM rewrite,
     # so apply it before navigation. The destination can evaluate
     # prefers-color-scheme correctly during its first stylesheet/layout pass.
-    try:
-        set_embedded_chromium_color_scheme(
-            preferred_color_scheme, target_id=target_id, timeout=2.0
-        )
-        session["website_color_scheme_pre_navigation_applied"] = True
-    except Exception:
+    if preferred_color_scheme != "system":
+        try:
+            set_embedded_chromium_color_scheme(
+                preferred_color_scheme, target_id=target_id, timeout=2.0
+            )
+            session["website_color_scheme_pre_navigation_applied"] = True
+        except Exception:
+            session["website_color_scheme_pre_navigation_applied"] = False
+    else:
+        # System is Chromium's natural state for a fresh/default target.
         session["website_color_scheme_pre_navigation_applied"] = False
+        session["website_color_scheme_pre_navigation_skipped_default"] = True
 
     # v6.5: never mutate document zoom before navigation.  Keep only the saved
     # preference in session state and let the destination document initialize
