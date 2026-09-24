@@ -3257,7 +3257,7 @@ class BrowserApp(BrowserFeatures):
                                    font=(self._ui_display_font_family, self._font_size(15), "bold"),
                                    anchor="w")
             title_label.pack(fill="x")
-            version_label = tk.Label(title_col, text=f"Tekzite Browser  •  v{BROWSER_VERSION}",
+            version_label = tk.Label(title_col, text=f"v{BROWSER_VERSION}",
                                      bg=self.ui["bg"], fg=self.ui["accent_hover"],
                                      font=(self._ui_font_family, self._font_size(9)),
                                      anchor="w")
@@ -10886,7 +10886,7 @@ class BrowserApp(BrowserFeatures):
 
         header = tk.Frame(win, bg=self.ui["bg"], padx=18, pady=(4, 10))
         header.pack(fill="x")
-        tk.Label(header, text="Colors, typography, chrome layout, toolbar order, tabs, window sizing and browser behavior are all profile-specific.",
+        tk.Label(header, text="Profile-specific appearance and behavior.",
                  bg=self.ui["bg"], fg=self.ui["muted"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w")
 
         notebook = ttk.Notebook(win, style="Tekzite.TNotebook")
@@ -11045,7 +11045,7 @@ class BrowserApp(BrowserFeatures):
         label(right, "Visible items", bold=True).pack(anchor="w", pady=(0, 5))
         for item in TOOLBAR_ITEM_IDS:
             check(right, TOOLBAR_ITEM_NAMES[item], visible_vars[item]).pack(anchor="w", pady=2)
-        label(right, "Tip: hiding the address bar is safe. Ctrl+L reveals it whenever you need it.", muted=True).pack(anchor="w", pady=(12, 0))
+        label(right, "Ctrl+L always opens the address bar.", muted=True).pack(anchor="w", pady=(12, 0))
 
         # Tabs & layout ------------------------------------------------------
         bool_vars = {}
@@ -11306,7 +11306,7 @@ class BrowserApp(BrowserFeatures):
         win.geometry("720x650")
         outer = tk.Frame(win, bg=self.ui["bg"], padx=22, pady=18)
         outer.pack(fill="both", expand=True)
-        tk.Label(outer, text="A live audit of Tekzite's privacy boundaries. No browsing destinations are stored here.",
+        tk.Label(outer, text="Live privacy status. Destinations are not stored here.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(0, 14))
 
         body = tk.Text(outer, bg=self.ui["field"], fg=self.ui["text"], insertbackground=self.ui["text"],
@@ -11532,7 +11532,7 @@ class BrowserApp(BrowserFeatures):
                        variable=omnibox_suggestions_enabled, bg=self.ui["bg"], fg=self.ui["text"],
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=(9, 2))
-        tk.Label(outer, text="Uses bookmarks, open tabs, session history and Tekzite history only. Typing is not sent to an autocomplete service.",
+        tk.Label(outer, text="Local suggestions only. Typing stays on this device.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)),
                  wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
 
@@ -11559,7 +11559,7 @@ class BrowserApp(BrowserFeatures):
 
         section("Rendering engine")
         combo(renderer, ["chromium"])
-        tk.Label(outer, text="Auto uses Tekzite first where practical and Chromium for compatibility-heavy sites.",
+        tk.Label(outer, text="Auto selects the best available renderer.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w")
         tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Automatically fall back to Chromium when native rendering fails",
                        variable=auto_fallback, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
@@ -11567,50 +11567,50 @@ class BrowserApp(BrowserFeatures):
         tk.Label(outer, text="Chromium presentation", fg=self.ui["muted"], bg=self.ui["bg"],
                  font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(7, 1))
         combo(chromium_presentation, ["native", "software"] if os.name == "nt" else ["software"])
-        tk.Label(outer, text="Native is GPU-backed and is kept for normal browsing. Software is manual diagnostics only.",
+        tk.Label(outer, text="Native for normal use. Software is for diagnostics.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w")
 
         section("Privacy")
-        tk.Label(outer, text="Privacy Core: vendor telemetry off • GPC + DNT • third-party cookies blocked • no built-in DoH",
+        tk.Label(outer, text="Privacy Core: telemetry off • GPC + DNT • third-party cookies blocked",
                  fg=self.ui["text"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Privacy Lockdown: never persist browsing history or open-tab session to disk",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Privacy Lockdown: do not save history or open tabs",
                        variable=privacy_lockdown, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Block dedicated tracker/analytics hosts before TLS connects",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Block tracker and analytics hosts",
                        variable=tracker_blocking, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Remove known click/marketing parameters (utm_*, fbclid, gclid, etc.)",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Remove tracking parameters from links",
                        variable=strip_tracking, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Strip Referer on web requests",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Remove Referer from requests",
                        variable=strip_referrer, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="HTTPS-first: upgrade ordinary HTTP navigation",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="HTTPS-first: upgrade HTTP when possible",
                        variable=https_first, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Restrict Python localhost connections to Tekzite's required ports",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Restrict local Python connections",
                        variable=strict_python_loopback, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Label(outer, text="Allows only Tekzite Network proxy + Chromium DevTools/CDP destinations. Restart applies the setting to the network helper too.",
+        tk.Label(outer, text="Allows only Tekzite proxy and Chromium control ports. Restart required.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
-        tk.Label(outer, text="Notifications, location, camera, microphone, sensors, password saving and autofill are disabled by default.",
+        tk.Label(outer, text="Camera, mic, location, notifications, sensors and autofill are off by default.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
-        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Block ads with Tekzite Adblock",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Block ads",
                        variable=adblock_enabled, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Label(outer, text="Blocks dedicated advertising hosts before Chromium connects to them. Restart Tekzite after changing this setting.",
+        tk.Label(outer, text="Blocks known ad hosts. Restart required after changing this.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
-        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Clear Chromium cookies, storage, cache and history on exit",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Clear cookies, storage, cache and history on exit",
                        variable=clear_on_exit, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Network diagnostics", fg=self.ui["muted"], bg=self.ui["bg"],
                  font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(6, 1))
         combo(network_diagnostics, ["off", "errors", "full"])
-        tk.Label(outer, text="Off is the privacy-first default. Full can include destination hosts and plain-HTTP paths.",
+        tk.Label(outer, text="Off is recommended. Full may log hosts and HTTP paths.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w")
 
         section("Default browser")
-        tk.Label(outer, text="Register Tekzite for web links and HTML files, then choose it in Windows Default Apps.",
+        tk.Label(outer, text="Register Tekzite for web links and HTML files.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)),
                  wraplength=560, justify="left").pack(anchor="w", pady=(0, 5))
         default_browser_status_var = tk.StringVar(value="Checking Windows default browser…" if os.name == "nt" else "Default-browser detection is available on Windows only.")
@@ -11657,7 +11657,7 @@ class BrowserApp(BrowserFeatures):
         default_browser_button.configure(
             command=lambda: self._make_tekzite_default_browser(parent=win, refresh_callback=refresh_default_browser_status)
         )
-        tk.Label(outer, text="Windows requires your confirmation. Tekzite asks the Windows Shell which app actually handles HTTP/HTTPS and updates this status when you return from Default Apps.",
+        tk.Label(outer, text="Windows confirmation is required.",
                  fg=self.ui["muted_dim"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)),
                  wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
 
@@ -11702,7 +11702,7 @@ class BrowserApp(BrowserFeatures):
             self.status_var.set(f"Page zoom preview: {value}%")
 
         zoom_box.bind("<<ComboboxSelected>>", preview_selected_zoom)
-        tk.Label(outer, text="Changes preview immediately on every open Chromium web page; Save makes the value permanent.",
+        tk.Label(outer, text="Preview is immediate. Save makes it permanent.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(0, 5))
 
         tk.Label(outer, text="Website color scheme", fg=self.ui["muted"], bg=self.ui["bg"],
@@ -11724,7 +11724,7 @@ class BrowserApp(BrowserFeatures):
         color_scheme_box.bind("<<ComboboxSelected>>", preview_website_color_scheme)
         tk.Label(
             outer,
-            text="Triggers websites that support prefers-color-scheme. System leaves Chromium/site defaults untouched.",
+            text="For sites that support light/dark themes.",
             fg=self.ui["muted"], bg=self.ui["bg"],
             font=(self._ui_font_family, self._font_size(8)),
             wraplength=560, justify="left",
@@ -12098,7 +12098,7 @@ class BrowserApp(BrowserFeatures):
             "Privacy Lockdown" if self.preferences.get("privacy_lockdown", True) else "Standard profile"
         )
         details = (
-            "Tekzite-native browser interface with Chromium web rendering and Windows DWM presentation.\n\n"
+            "Chromium-rendered Tekzite browser.\n\n"
             f"Mode: {mode}\n"
             f"Profile: {getattr(self, '_profile_name', 'Default')}\n"
             "Renderer: Chromium\n"
