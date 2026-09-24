@@ -1470,8 +1470,13 @@ class _AnimatedPopupMenu:
             return "break"
         if key == "Left" and self._parent_menu is not None:
             self.dismiss(include_parent=False)
-            try: self._parent_menu._window.focus_force()
-            except Exception: pass
+            try:
+                if sys.platform.startswith("linux"):
+                    self._parent_menu._canvas.focus_set()
+                else:
+                    self._parent_menu._window.focus_force()
+            except Exception:
+                pass
             return "break"
         return None
 
@@ -1516,8 +1521,9 @@ class _AnimatedPopupMenu:
         win.overrideredirect(True)
         try: win.transient(self.app.root)
         except Exception: pass
-        try: win.attributes("-topmost", True)
-        except Exception: pass
+        if os.name == "nt":
+            try: win.attributes("-topmost", True)
+            except Exception: pass
         try: win.attributes("-alpha", 0.06)
         except Exception: pass
         win.configure(bg=self._surface, bd=0, highlightthickness=0)
@@ -1535,7 +1541,13 @@ class _AnimatedPopupMenu:
         self._animate_open(x, y)
         try:
             win.lift()
-            win.focus_force()
+            if sys.platform.startswith("linux"):
+                # Linux window managers already received the menu-opening click.
+                # Keep keyboard navigation inside Tk without issuing a second
+                # compositor-level activation request.
+                canvas.focus_set()
+            else:
+                win.focus_force()
         except Exception:
             pass
         if root_binding:
@@ -3357,10 +3369,10 @@ class BrowserApp(BrowserFeatures):
             except Exception:
                 pass
 
-            # Only Windows needs the DWM z-order repair. On Linux/KDE a
-            # delayed focus_force() on an override-redirect dialog can steal
-            # keyboard ownership back after the user has clicked the browser.
-            # Keep Linux dialogs compositor-neutral instead of fighting KWin.
+            # Only Windows needs the DWM z-order repair. On Linux, delayed
+            # focus_force() calls on override-redirect dialogs can fight the
+            # desktop compositor/window manager after the user has moved on.
+            # Keep every Linux desktop compositor-neutral.
             if os.name == "nt":
                 try:
                     win.after(20, lambda w=win: self._raise_toplevel_above_dwm(w, hold_ms=360)
@@ -8407,6 +8419,11 @@ class BrowserApp(BrowserFeatures):
         """
         if not self._embedded_mode:
             return False
+        if sys.platform.startswith("linux"):
+            # Linux always presents Chromium through Tekzite's CDP software
+            # compositor. Native HWND wake/activation is a Windows workaround
+            # and must never run from a Linux background callback.
+            return False
         # v4.80: Chromium may only reclaim focus while Tekzite chrome is not
         # actively being edited. This also protects against delayed wake
         # callbacks queued by navigation/resize before the address was clicked.
@@ -8432,6 +8449,9 @@ class BrowserApp(BrowserFeatures):
             return False
 
     def _schedule_embedded_surface_wake(self):
+        if sys.platform.startswith("linux"):
+            # Never schedule background focus/activation retries on Linux.
+            return False
         if self._chromium_dwm_mode:
             return False
         """Retry native activation while Chromium finishes creating its view.
@@ -11844,29 +11864,30 @@ class BrowserApp(BrowserFeatures):
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
 
         def _force_browser_keyboard_target(target):
-            """Reclaim the real Linux/Tk keyboard owner for one browser widget."""
+            """Return keyboard focus after an explicit Settings close action."""
             try:
                 self.root.update_idletasks()
             except Exception:
                 pass
             try:
-                self.root.focus_force()
+                # Prefer the cooperative Tk focus request on every platform.
+                # Because this runs before the dialog is destroyed, Linux WMs
+                # can transfer focus normally without a delayed activation.
+                target.focus_set()
             except Exception:
                 pass
-            try:
-                target.focus_force()
-            except Exception:
-                try:
-                    target.focus_set()
-                except Exception:
-                    pass
             if sys.platform.startswith("linux"):
                 try:
-                    # Tk's low-level focus -force maps to XSetInputFocus on
-                    # X11/XWayland and repairs the case where a destroyed
-                    # override-redirect dialog remains the compositor's last
-                    # keyboard owner.
-                    self.root.tk.call("focus", "-force", target._w)
+                    # Only fall back to a forced request while handling this
+                    # direct user action, never from a timer/background callback.
+                    if self.root.focus_get() is not target:
+                        target.focus_force()
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.root.focus_force()
+                    target.focus_force()
                 except Exception:
                     pass
 
@@ -11893,8 +11914,11 @@ class BrowserApp(BrowserFeatures):
                 pass
 
         def schedule_browser_input_restore():
-            # Settings uses animated destruction. Restore once after the close
-            # animation and once more after the compositor/Tk focus queues settle.
+            # Linux focus must remain user-driven: the synchronous handoff above
+            # is the only one. Delayed retries can steal focus from any desktop,
+            # terminal or app the user clicks immediately after closing Settings.
+            if sys.platform.startswith("linux"):
+                return
             try:
                 self.root.after(150, restore_browser_input_after_settings)
                 self.root.after(320, restore_browser_input_after_settings)
@@ -12106,18 +12130,13 @@ class BrowserApp(BrowserFeatures):
                 if os.name == "nt":
                     win.after(390, lambda: win.winfo_exists() and win.attributes("-topmost", False))
                 else:
-                    # Give the frameless Linux Settings window one initial focus
-                    # handoff. Do not keep forcing focus afterward, otherwise a
-                    # click back into the browser can have its keyboard focus
-                    # stolen by a delayed Settings callback.
-                    def focus_linux_settings():
-                        try:
-                            if win.winfo_exists():
-                                win.focus_force()
-                                entry.focus_force()
-                        except Exception:
-                            pass
-                    win.after(60, focus_linux_settings)
+                    # The Settings command itself is the user gesture. Ask Tk
+                    # cooperatively for entry focus now; never queue a later
+                    # forced activation that can race another Linux application.
+                    try:
+                        entry.focus_set()
+                    except Exception:
+                        pass
             except Exception:
                 try:
                     win.deiconify()
@@ -12129,10 +12148,11 @@ class BrowserApp(BrowserFeatures):
             # frameless Linux root unable to receive keyboard input after the
             # dialog closes, and it also prevents typing in a webpage while
             # Settings is open.
-            try:
-                win.focus_force()
-            except Exception:
-                pass
+            if os.name == "nt":
+                try:
+                    win.focus_force()
+                except Exception:
+                    pass
 
         win.after_idle(fit_and_center_preferences)
         win.protocol("WM_DELETE_WINDOW", cancel_preferences)
@@ -12154,8 +12174,8 @@ class BrowserApp(BrowserFeatures):
             pass
         if os.name != "nt":
             # Linux has no Tekzite DWM presenter to outrank. Do not use
-            # focus_force() or temporary topmost here: on KWin/XWayland those
-            # delayed activation requests can look like a keyboard grab.
+            # focus_force() or temporary topmost here: across Linux window
+            # managers those activation requests can behave like a keyboard grab.
             return True
         try:
             win.focus_force()
