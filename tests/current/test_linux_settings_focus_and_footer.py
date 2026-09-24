@@ -37,8 +37,30 @@ def test_settings_custom_close_uses_cancel_path():
 def test_settings_is_modeless_and_restores_browser_keyboard_input():
     block = _settings_block()
     assert "win.grab_set()" not in block
+    assert "def _force_browser_keyboard_target(target):" in block
+    assert 'self.root.tk.call("focus", "-force", target._w)' in block
     assert "def restore_browser_input_after_settings():" in block
-    assert "self.address.focus_force()" in block
+    assert "_force_browser_keyboard_target(self.address)" in block
     assert "self._chromium_page_keyboard_active = True" in block
-    assert "target.focus_set()" in block
+    assert "_force_browser_keyboard_target(target)" in block
+    assert "restore_browser_input_after_settings()\n            win.destroy()" in block
     assert "schedule_browser_input_restore()" in block
+
+
+def test_linux_omnibox_click_reclaims_native_keyboard_focus():
+    start = MAIN.index("def _on_address_pointer_down")
+    end = MAIN.index("def _on_address_focus_in", start)
+    block = MAIN[start:end]
+    assert "self.root.focus_force()" in block
+    assert "self.address.focus_force()" in block
+    assert 'self.root.tk.call("focus", "-force", self.address._w)' in block
+
+
+def test_linux_page_click_reclaims_native_keyboard_focus():
+    start = MAIN.index("def _dispatch_chromium_press_xy")
+    end = MAIN.index("def _flush_pending_chromium_drag_before_release", start)
+    block = MAIN[start:end]
+    assert 'if sys.platform.startswith("linux"):' in block
+    assert "self.root.focus_force()" in block
+    assert "self.chromium_surface.focus_force()" in block
+    assert 'self.root.tk.call("focus", "-force", self.chromium_surface._w)' in block
