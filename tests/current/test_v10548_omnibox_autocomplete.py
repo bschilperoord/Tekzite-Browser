@@ -53,6 +53,8 @@ def test_omnibox_popup_keeps_keyboard_focus_on_real_entry():
     popup = source[source.index("class _OmniboxSuggestionPopup"):source.index("class BrowserApp", source.index("class _OmniboxSuggestionPopup"))]
     assert "focus_force()" not in popup
     assert 'win.attributes("-topmost", True)' in popup
+    assert 'self._inline_linux = sys.platform.startswith("linux")' in popup
+    assert 'self.window.place(x=x, y=y, width=width, height=height)' in popup
     assert 'self.address.bind("<Down>"' in source
     assert 'self.address.bind("<Up>"' in source
     assert 'self.address.bind("<Tab>"' in source
@@ -63,3 +65,12 @@ def test_autocomplete_preference_is_local_only_and_enabled_by_default():
     assert main.DEFAULT_PREFERENCES["omnibox_suggestions_enabled"] is True
     source = Path(main.__file__).read_text(encoding="utf-8")
     assert "Local suggestions only. Typing stays on this device." in source
+
+
+def test_linux_omnibox_popup_is_attached_to_browser_root():
+    source = Path(main.__file__).read_text(encoding="utf-8")
+    popup = source[source.index("class _OmniboxSuggestionPopup"):source.index("class BrowserApp", source.index("class _OmniboxSuggestionPopup"))]
+    assert "root_x = int(app.root.winfo_rootx())" in popup
+    assert "int(app.address_shell.winfo_rootx()) - root_x" in popup
+    assert "win = tk.Frame(" in popup
+    assert "self.window.place_configure(y=yy)" in popup

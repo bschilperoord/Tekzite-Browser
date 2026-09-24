@@ -1126,6 +1126,11 @@ class _AnimatedPopupMenu:
         self._outside_bind_id = None
         self._outside_bind_previous = None
         self._animation_jobs = []
+        # Linux software presentation lives inside the Tk root, so keep
+        # autocomplete physically attached to the browser instead of using a
+        # separately managed override-redirect window. That avoids compositor
+        # placement drift on X11/XWayland/Wayland.
+        self._inline_linux = sys.platform.startswith("linux")
         self._font = (app._ui_font_family, int(font_size or app._font_size(10)))
         self._surface = app.ui["chrome_2"]
         self._text = app.ui["text"]
@@ -1645,7 +1650,11 @@ class _OmniboxSuggestionPopup:
 
     def is_visible(self):
         try:
-            return self.window is not None and bool(self.window.winfo_exists()) and self.window.state() != "withdrawn"
+            if self.window is None or not bool(self.window.winfo_exists()):
+                return False
+            if self._inline_linux:
+                return bool(self.window.winfo_ismapped())
+            return self.window.state() != "withdrawn"
         except Exception:
             return False
 
@@ -1745,21 +1754,40 @@ class _OmniboxSuggestionPopup:
         app = self.app
         try:
             app.root.update_idletasks()
-            x = int(app.address_shell.winfo_rootx())
-            y = int(app.address_shell.winfo_rooty() + app.address_shell.winfo_height() + app._ui_padding(3))
             width = max(360, int(app.address_shell.winfo_width()))
+            if self._inline_linux:
+                root_x = int(app.root.winfo_rootx())
+                root_y = int(app.root.winfo_rooty())
+                x = int(app.address_shell.winfo_rootx()) - root_x
+                y = (
+                    int(app.address_shell.winfo_rooty()) - root_y
+                    + int(app.address_shell.winfo_height())
+                    + app._ui_padding(3)
+                )
+            else:
+                x = int(app.address_shell.winfo_rootx())
+                y = int(app.address_shell.winfo_rooty() + app.address_shell.winfo_height() + app._ui_padding(3))
         except Exception:
             return False
         row_h = max(46, app._ui_padding(48))
         outer = max(6, app._ui_padding(7))
         height = outer * 2 + row_h * len(self.items)
         try:
-            screen_w = int(app.root.winfo_screenwidth())
-            screen_h = int(app.root.winfo_screenheight())
-            width = min(width, max(360, screen_w - 8))
-            x = max(4, min(x, screen_w - width - 4))
-            if y + height > screen_h - 4:
-                y = max(4, int(app.address_shell.winfo_rooty()) - height - app._ui_padding(3))
+            if self._inline_linux:
+                host_w = max(1, int(app.root.winfo_width()))
+                host_h = max(1, int(app.root.winfo_height()))
+                width = min(width, max(360, host_w - 8))
+                x = max(4, min(x, host_w - width - 4))
+                if y + height > host_h - 4:
+                    address_top = int(app.address_shell.winfo_rooty()) - int(app.root.winfo_rooty())
+                    y = max(4, address_top - height - app._ui_padding(3))
+            else:
+                screen_w = int(app.root.winfo_screenwidth())
+                screen_h = int(app.root.winfo_screenheight())
+                width = min(width, max(360, screen_w - 8))
+                x = max(4, min(x, screen_w - width - 4))
+                if y + height > screen_h - 4:
+                    y = max(4, int(app.address_shell.winfo_rooty()) - height - app._ui_padding(3))
         except Exception:
             pass
         self.width, self.height = width, height
@@ -1769,16 +1797,25 @@ class _OmniboxSuggestionPopup:
         created = False
         try:
             if self.window is None or not self.window.winfo_exists():
-                win = tk.Toplevel(app.root)
+                if self._inline_linux:
+                    win = tk.Frame(
+                        app.root,
+                        bg=app.ui.get("chrome_2", app.ui["bg"]),
+                        bd=0,
+                        highlightthickness=0,
+                    )
+                else:
+                    win = tk.Toplevel(app.root)
                 self.window = win
                 created = True
-                win.overrideredirect(True)
-                try:
-                    win.transient(app.root)
-                    win.attributes("-topmost", True)
-                    win.attributes("-alpha", 0.12 if app._motion_enabled() else 1.0)
-                except Exception:
-                    pass
+                if not self._inline_linux:
+                    win.overrideredirect(True)
+                    try:
+                        win.transient(app.root)
+                        win.attributes("-topmost", True)
+                        win.attributes("-alpha", 0.12 if app._motion_enabled() else 1.0)
+                    except Exception:
+                        pass
                 win.configure(bg=app.ui.get("chrome_2", app.ui["bg"]), bd=0, highlightthickness=0)
                 self.canvas = tk.Canvas(
                     win, bg=app.ui.get("chrome_2", app.ui["bg"]),
@@ -1789,16 +1826,23 @@ class _OmniboxSuggestionPopup:
                 self.canvas.bind("<Leave>", self._on_leave)
                 self.canvas.bind("<ButtonPress-1>", self._on_press)
                 self.canvas.bind("<ButtonRelease-1>", self._on_release)
-            else:
+            elif not self._inline_linux:
                 self.window.deiconify()
-            self.window.geometry(f"{width}x{height}+{x}+{y}")
+
+            if self._inline_linux:
+                self.window.place(x=x, y=y, width=width, height=height)
+            else:
+                self.window.geometry(f"{width}x{height}+{x}+{y}")
             self.canvas.configure(width=width, height=height)
             self._draw()
             self.window.lift()
-            try:
-                self.window.attributes("-topmost", True)
-            except Exception:
-                pass
+
+            if not self._inline_linux:
+                try:
+                    self.window.attributes("-topmost", True)
+                except Exception:
+                    pass
+
             if created and app._motion_enabled():
                 for step in range(1, 7):
                     def frame(s=step, base_y=y):
@@ -1808,12 +1852,15 @@ class _OmniboxSuggestionPopup:
                             t = s / 6.0
                             eased = 1.0 - (1.0 - t) ** 3
                             yy = int(base_y - (1.0 - eased) * 7)
-                            self.window.geometry(f"{self.width}x{self.height}+{x}+{yy}")
-                            self.window.attributes("-alpha", max(0.12, min(1.0, eased)))
+                            if self._inline_linux:
+                                self.window.place_configure(y=yy)
+                            else:
+                                self.window.geometry(f"{self.width}x{self.height}+{x}+{yy}")
+                                self.window.attributes("-alpha", max(0.12, min(1.0, eased)))
                         except Exception:
                             pass
                     self._animation_jobs.append(app.root.after(step * 10, frame))
-            else:
+            elif not self._inline_linux:
                 try:
                     self.window.attributes("-alpha", 1.0)
                 except Exception:
@@ -1841,6 +1888,8 @@ class _OmniboxSuggestionPopup:
         self.selected = -1
         if win is not None:
             try:
+                if self._inline_linux:
+                    win.place_forget()
                 win.destroy()
             except Exception:
                 pass
