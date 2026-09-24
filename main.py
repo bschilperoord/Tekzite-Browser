@@ -1643,6 +1643,9 @@ class _OmniboxSuggestionPopup:
         self.width = 1
         self.height = 1
         self._animation_jobs = []
+        # Keep Linux autocomplete inside the Tekzite root so the compositor
+        # cannot place it as a detached override-redirect window.
+        self._inline_linux = sys.platform.startswith("linux")
 
     @staticmethod
     def _round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
