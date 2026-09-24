@@ -93,8 +93,11 @@ jobs:
           install -m 0644 packaging/linux/README.md "package-linux/${name}/README-LINUX.md"
           cp LICENSE "package-linux/${name}/LICENSE"
           tar -C package-linux -czf "${name}.tar.gz" "${name}"
-          sha256sum "${name}.tar.gz" > SHA256SUMS-Linux.txt
+          source_name="Tekzite-Browser-v${version}-Linux-source"
+          git archive --format=tar --prefix="${source_name}/" "$GITHUB_SHA" | gzip -9 > "${source_name}.tar.gz"
+          sha256sum "${name}.tar.gz" "${source_name}.tar.gz" > SHA256SUMS-Linux.txt
           echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "source_name=${source_name}" >> "$GITHUB_OUTPUT"
 
       - name: Upload Linux preview artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -102,6 +105,7 @@ jobs:
           name: ${{ steps.package.outputs.name }}
           path: |
             ${{ steps.package.outputs.name }}.tar.gz
+            ${{ steps.package.outputs.source_name }}.tar.gz
             SHA256SUMS-Linux.txt
           if-no-files-found: error
           compression-level: 0
@@ -139,8 +143,14 @@ jobs:
 
           This is a preview build and is separate from the stable Windows release.
           EOF
+          source_name="Tekzite-Browser-v${version}-Linux-source"
+          # Keep GitHub's automatic Source code archives pinned to the same
+          # tested commit as the downloadable preview assets.
+          git tag -f "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag" --force
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${name}.tar.gz" SHA256SUMS-Linux.txt --clobber
+            gh release upload "$tag" "${name}.tar.gz" "${source_name}.tar.gz#Linux source" SHA256SUMS-Linux.txt --clobber
           else
-            gh release create "$tag" "${name}.tar.gz#Linux x86_64 preview" SHA256SUMS-Linux.txt               --target "$GITHUB_SHA" --prerelease --title "$title" --notes-file "$notes_file"
+            gh release create "$tag" "${name}.tar.gz#Linux x86_64 preview" "${source_name}.tar.gz#Linux source" SHA256SUMS-Linux.txt \
+              --target "$GITHUB_SHA" --prerelease --title "$title" --notes-file "$notes_file"
           fi

@@ -11417,10 +11417,10 @@ class BrowserApp(BrowserFeatures):
             return box
 
         section("Homepage")
-        entry = tk.Entry(outer, textvariable=homepage, bg=self.ui["field"], fg=self.ui["text"],
+        entry = tk.Entry(outer, highlightthickness=0, bd=0, textvariable=homepage, bg=self.ui["field"], fg=self.ui["text"],
                          insertbackground=self.ui["text"], relief="flat", font=(self._ui_font_family, self._font_size(10)))
         entry.pack(fill="x", ipady=7)
-        tk.Checkbutton(outer, text="Show local address-bar suggestions and autocomplete",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Show local address-bar suggestions and autocomplete",
                        variable=omnibox_suggestions_enabled, bg=self.ui["bg"], fg=self.ui["text"],
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=(9, 2))
@@ -11431,17 +11431,17 @@ class BrowserApp(BrowserFeatures):
         quiet_mode = tk.BooleanVar(value=self.preferences.get("quiet_mode", False))
         restore_tabs = tk.BooleanVar(value=self.preferences.get("restore_tabs", True))
         section("Startup and tabs")
-        tk.Checkbutton(outer, text="Restore open tabs on restart (overrides startup choice)",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Restore open tabs on restart (overrides startup choice)",
                        variable=restore_tabs, bg=self.ui["bg"], fg=self.ui["text"],
                        selectcolor=self.ui["field"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, text="Quiet mode: hide debug/status controls and reduce animations",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Quiet mode: hide debug/status controls and reduce animations",
                        variable=quiet_mode, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"]).pack(anchor="w", pady=3)
         combo(startup, ["homepage", "blank"])
         combo(new_tab, ["blank", "homepage"])
-        tk.Checkbutton(outer, text="Switch to an already-open tab instead of loading the same URL again",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Switch to an already-open tab instead of loading the same URL again",
                        variable=reuse_tabs, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, text="Put inactive background tabs to sleep",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Put inactive background tabs to sleep",
                        variable=sleeping_tabs_enabled, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         sleep_row = tk.Frame(outer, bg=self.ui["bg"]); sleep_row.pack(fill="x", pady=(0, 4))
@@ -11453,7 +11453,7 @@ class BrowserApp(BrowserFeatures):
         combo(renderer, ["chromium"])
         tk.Label(outer, text="Auto uses Tekzite first where practical and Chromium for compatibility-heavy sites.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w")
-        tk.Checkbutton(outer, text="Automatically fall back to Chromium when native rendering fails",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Automatically fall back to Chromium when native rendering fails",
                        variable=auto_fallback, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Chromium presentation", fg=self.ui["muted"], bg=self.ui["bg"],
@@ -11465,34 +11465,34 @@ class BrowserApp(BrowserFeatures):
         section("Privacy")
         tk.Label(outer, text="Privacy Core: vendor telemetry off • GPC + DNT • third-party cookies blocked • no built-in DoH",
                  fg=self.ui["text"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, text="Privacy Lockdown: never persist browsing history or open-tab session to disk",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Privacy Lockdown: never persist browsing history or open-tab session to disk",
                        variable=privacy_lockdown, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, text="Block dedicated tracker/analytics hosts before TLS connects",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Block dedicated tracker/analytics hosts before TLS connects",
                        variable=tracker_blocking, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, text="Remove known click/marketing parameters (utm_*, fbclid, gclid, etc.)",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Remove known click/marketing parameters (utm_*, fbclid, gclid, etc.)",
                        variable=strip_tracking, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, text="Strip Referer on web requests",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Strip Referer on web requests",
                        variable=strip_referrer, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, text="HTTPS-first: upgrade ordinary HTTP navigation",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="HTTPS-first: upgrade ordinary HTTP navigation",
                        variable=https_first, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, text="Restrict Python localhost connections to Tekzite's required ports",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Restrict Python localhost connections to Tekzite's required ports",
                        variable=strict_python_loopback, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Allows only Tekzite Network proxy + Chromium DevTools/CDP destinations. Restart applies the setting to the network helper too.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
         tk.Label(outer, text="Notifications, location, camera, microphone, sensors, password saving and autofill are disabled by default.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
-        tk.Checkbutton(outer, text="Block ads with Tekzite Adblock",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Block ads with Tekzite Adblock",
                        variable=adblock_enabled, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Blocks dedicated advertising hosts before Chromium connects to them. Restart Tekzite after changing this setting.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
-        tk.Checkbutton(outer, text="Clear Chromium cookies, storage, cache and history on exit",
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Clear Chromium cookies, storage, cache and history on exit",
                        variable=clear_on_exit, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Network diagnostics", fg=self.ui["muted"], bg=self.ui["bg"],
@@ -11512,7 +11512,7 @@ class BrowserApp(BrowserFeatures):
         )
         default_browser_status_label.pack(anchor="w", pady=(0, 7))
         default_browser_button = tk.Button(
-            outer, text="Make Tekzite default browser…",
+            outer, text="Make Tekzite default browser…", highlightthickness=0,
             bg=self.ui["accent"], fg="#ffffff", activebackground=self.ui["accent_hover"],
             activeforeground="#ffffff", relief="flat", bd=0, padx=16, pady=7, cursor="hand2"
         )
@@ -11569,12 +11569,12 @@ class BrowserApp(BrowserFeatures):
         win.after(1200, poll_default_browser_status)
 
         section("Downloads & updates")
-        tk.Checkbutton(outer, text="Ask where to save each download (restart required)", variable=download_prompt,
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Ask where to save each download (restart required)", variable=download_prompt,
                        bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="GitHub repository for update checks (owner/repository)", fg=self.ui["muted"], bg=self.ui["bg"],
                  font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(4,1))
-        tk.Entry(outer, textvariable=update_repository, bg=self.ui["field"], fg=self.ui["text"],
+        tk.Entry(outer, highlightthickness=0, bd=0, textvariable=update_repository, bg=self.ui["field"], fg=self.ui["text"],
                  insertbackground=self.ui["text"], relief="flat").pack(fill="x", ipady=4, pady=(0,4))
 
         section("Interface")
@@ -11596,7 +11596,7 @@ class BrowserApp(BrowserFeatures):
         zoom_box.bind("<<ComboboxSelected>>", preview_selected_zoom)
         tk.Label(outer, text="Changes preview immediately on every open Chromium web page; Save makes the value permanent.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(0, 5))
-        tk.Checkbutton(outer, text="Show status bar", variable=status_bar, bg=self.ui["bg"], fg=self.ui["text"],
+        tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Show status bar", variable=status_bar, bg=self.ui["bg"], fg=self.ui["text"],
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
 
@@ -11709,9 +11709,9 @@ class BrowserApp(BrowserFeatures):
             win.destroy()
 
         tk.Button(buttons, text="Cancel", command=cancel_preferences, bg=self.ui["chrome_2"], fg=self.ui["text"],
-                  relief="flat", padx=16, pady=7).pack(side="right")
+                  relief="flat", bd=0, highlightthickness=0, padx=16, pady=7).pack(side="right")
         tk.Button(buttons, text="Save", command=save_and_close, bg=self.ui["accent"], fg="#ffffff",
-                  relief="flat", padx=20, pady=7).pack(side="right", padx=(0, 8))
+                  relief="flat", bd=0, highlightthickness=0, padx=20, pady=7).pack(side="right", padx=(0, 8))
         def fit_and_center_preferences():
             # v10.5.38: Settings has one authoritative geometry calculation.
             # Use Tk screen coordinates for both sizing and placement, then
