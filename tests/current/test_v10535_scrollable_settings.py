@@ -40,5 +40,8 @@ def test_settings_prefers_taller_dialog():
     block = _settings_block()
     assert "requested_h = min(1120, max(720, int(round(screen_h * 0.88))))" in block
     assert "dialog_h = min(requested_h, max(620, screen_h - 64))" in block
-    assert "win = self._new_animated_toplevel(self.root, auto_animate=False)" in block
+    assert "self._new_animated_toplevel(" in block
+    assert "auto_animate=False" in block
+    assert 'branded=(os.name == "nt")' in block
+    assert 'if os.name == "nt":' in block
     assert "self._apply_about_style_to_dialog(win)" in block
