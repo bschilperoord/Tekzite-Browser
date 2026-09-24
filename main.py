@@ -11456,6 +11456,25 @@ class BrowserApp(BrowserFeatures):
             return "break"
 
     def show_preferences(self):
+        # Remember who owned keyboard input before Settings opened. Frameless
+        # Linux dialogs are modeless, so opening/closing Settings must never
+        # strand focus away from both the omnibox and the Chromium page.
+        try:
+            _settings_previous_focus = self.root.focus_get()
+        except Exception:
+            _settings_previous_focus = None
+        _settings_restore_address = bool(
+            _settings_previous_focus is getattr(self, "address", None)
+            or getattr(self, "_address_focus_active", False)
+        )
+        _settings_restore_page = bool(
+            getattr(self, "_chromium_page_keyboard_active", False)
+            or (
+                getattr(self, "_embedded_mode", False)
+                and not _settings_restore_address
+            )
+        )
+
         # Settings owns its final geometry because it intentionally occupies most
         # of the browser height. Delay automatic motion until that geometry is
         # established, otherwise the generic dialog animation can capture the
@@ -11786,6 +11805,39 @@ class BrowserApp(BrowserFeatures):
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
 
+        def restore_browser_input_after_settings():
+            """Return keyboard ownership to Tekzite after Settings closes."""
+            try:
+                if _settings_restore_address:
+                    self._address_focus_active = True
+                    self._chromium_page_keyboard_active = False
+                    self.root.focus_force()
+                    self.address.focus_force()
+                    return
+                if _settings_restore_page and getattr(self, "_embedded_mode", False):
+                    self._address_focus_active = False
+                    self._chromium_page_keyboard_active = True
+                    self.root.focus_force()
+                    target = (
+                        self.edge_host
+                        if getattr(self, "_chromium_dwm_mode", False)
+                        else self.chromium_surface
+                    )
+                    target.focus_set()
+                    return
+                self.root.focus_force()
+            except Exception:
+                pass
+
+        def schedule_browser_input_restore():
+            # Settings uses animated destruction. Restore once after the close
+            # animation and once more after the compositor/Tk focus queues settle.
+            try:
+                self.root.after(150, restore_browser_input_after_settings)
+                self.root.after(320, restore_browser_input_after_settings)
+            except Exception:
+                restore_browser_input_after_settings()
+
         buttons = tk.Frame(shell, bg=self.ui["bg"])
         # Reserve the footer before the large scrollable body. Linux Tk honors
         # the canvas requested height more aggressively than Windows; packing
@@ -11862,6 +11914,7 @@ class BrowserApp(BrowserFeatures):
             except Exception:
                 pass
             win.destroy()
+            schedule_browser_input_restore()
 
             def apply_saved_preferences_runtime():
                 live_errors = []
@@ -11906,7 +11959,12 @@ class BrowserApp(BrowserFeatures):
                     self._executor.submit(self._apply_website_color_scheme_to_all_tabs)
                 except Exception:
                     pass
+            try:
+                win.grab_release()
+            except Exception:
+                pass
             win.destroy()
+            schedule_browser_input_restore()
 
         tk.Button(buttons, text="Cancel", command=cancel_preferences, bg=self.ui["chrome_2"], fg=self.ui["text"],
                   relief="flat", bd=0, highlightthickness=0, padx=16, pady=7).pack(side="right")
@@ -11979,10 +12037,10 @@ class BrowserApp(BrowserFeatures):
                 if os.name == "nt":
                     win.after(390, lambda: win.winfo_exists() and win.attributes("-topmost", False))
                 else:
-                    # X11/XWayland override-redirect dialogs do not receive a
-                    # normal WM focus handoff. Explicitly force both the dialog
-                    # and Homepage entry after mapping, then repeat once after
-                    # the opening animation has settled.
+                    # Give the frameless Linux Settings window one initial focus
+                    # handoff. Do not keep forcing focus afterward, otherwise a
+                    # click back into the browser can have its keyboard focus
+                    # stolen by a delayed Settings callback.
                     def focus_linux_settings():
                         try:
                             if win.winfo_exists():
@@ -11991,7 +12049,6 @@ class BrowserApp(BrowserFeatures):
                         except Exception:
                             pass
                     win.after(60, focus_linux_settings)
-                    win.after(220, focus_linux_settings)
             except Exception:
                 try:
                     win.deiconify()
@@ -11999,8 +12056,11 @@ class BrowserApp(BrowserFeatures):
                     win.lift()
                 except Exception:
                     pass
+            # Settings is intentionally modeless. A Tk grab here can leave the
+            # frameless Linux root unable to receive keyboard input after the
+            # dialog closes, and it also prevents typing in a webpage while
+            # Settings is open.
             try:
-                win.grab_set()
                 win.focus_force()
             except Exception:
                 pass
