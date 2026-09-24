@@ -1475,13 +1475,8 @@ class BrowserFeatures:
             lines.extend([
                 '',
                 'INTERPRETATION',
-                'Strong opener = exact requested hostname + socket-open timing + Chromium reported that the request did NOT reuse an existing connection.',
-                'Likely opener = exact requested hostname + timing match, but Chromium did not provide a reuse verdict.',
-                'Probable opener = exact remote endpoint + timing/new-connection evidence without an exact hostname correlation.',
-                'Reused connection = Chromium explicitly reported that this request used an already-open connection.',
-                'Endpoint activity = CDP observed traffic to the exact remote IP:port, but Tekzite cannot prove that request created this TCP connection.',
-                'Host activity = the destination hostname matches recent CDP traffic; HTTP/2 connection reuse can carry many later requests.',
-                'The live audit retains no full URL, query string, headers, cookies, bodies, or script source. Source excerpts are fetched from Chromium only when requested and discarded after display.',
+                'Match labels estimate how strongly this request maps to the socket.',
+                'No payloads or full script source are retained.',
             ])
             text.insert('1.0', '\n'.join(lines))
             text.configure(state='disabled')
@@ -1512,7 +1507,7 @@ class BrowserFeatures:
                 source_text.pack(fill='both', expand=True, padx=(12, 0), pady=(12, 0))
                 source_text.insert('1.0', 'Reading the live script from Chromium…')
                 source_text.configure(state='disabled')
-                source_status = tk.StringVar(value='Generated source is analyzed in memory only; external source maps are never fetched automatically.')
+                source_status = tk.StringVar(value='Source is analyzed in memory only.')
                 source_bar = tk.Frame(source_win, bg=self.ui['bg'])
                 source_bar.pack(side='bottom', fill='x', padx=12, pady=(4, 10))
                 tk.Label(
@@ -1537,7 +1532,7 @@ class BrowserFeatures:
                 if not target_id or not script_id:
                     source_text.configure(state='normal')
                     source_text.delete('1.0', 'end')
-                    source_text.insert('1.0', 'No live script identifier was captured for this request.\n\nParser-initiated requests and some Chromium-generated requests do not have a JavaScript caller.')
+                    source_text.insert('1.0', 'No JavaScript caller source is available for this request.')
                     source_text.configure(state='disabled')
                     source_status.set('No JavaScript source is available for this row.')
                     return
