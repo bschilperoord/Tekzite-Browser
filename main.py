@@ -4097,6 +4097,9 @@ class BrowserApp(BrowserFeatures):
         self._on_address_pointer_down(event)
         self._set_address_preview_visible(False)
         try:
+            # Keep the normal Tk focus path for existing behavior/tests, then
+            # add the stronger Linux native-focus reclamation underneath it.
+            self.address.focus_set()
             self.address.focus_force()
             if sys.platform.startswith("linux"):
                 try:
