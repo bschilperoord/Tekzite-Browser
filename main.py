@@ -1911,6 +1911,83 @@ class _OmniboxSuggestionPopup:
 
 
 class BrowserApp(BrowserFeatures):
+    def _apply_linux_managed_frameless(self, win):
+        """Remove Linux WM decorations without making the window unmanaged.
+
+        Tk's overrideredirect(True) bypasses the window manager on X11/XWayland,
+        which can leave the previously active application owning the keyboard.
+        Keep Tekzite as a normal managed window and request zero decorations via
+        the widely-supported Motif WM hints instead. If the hint is unavailable
+        or ignored, leave the native decoration in place rather than sacrificing
+        correct activation/input behavior.
+        """
+        if not sys.platform.startswith("linux"):
+            return False
+        try:
+            win.overrideredirect(False)
+            win.update_idletasks()
+        except Exception:
+            return False
+        try:
+            if str(win.tk.call("tk", "windowingsystem")).lower() != "x11":
+                # Future/native Wayland Tk should remain WM-managed. There is no
+                # portable Tk decoration-removal API there yet.
+                return False
+        except Exception:
+            return False
+        display = None
+        try:
+            import ctypes
+            import ctypes.util
+            lib_name = ctypes.util.find_library("X11")
+            if not lib_name:
+                return False
+            x11 = ctypes.CDLL(lib_name)
+            x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            x11.XOpenDisplay.restype = ctypes.c_void_p
+            x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            x11.XCloseDisplay.restype = ctypes.c_int
+            x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            x11.XInternAtom.restype = ctypes.c_ulong
+            x11.XChangeProperty.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
+                ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_ubyte),
+                ctypes.c_int,
+            ]
+            x11.XChangeProperty.restype = ctypes.c_int
+            x11.XFlush.argtypes = [ctypes.c_void_p]
+            x11.XFlush.restype = ctypes.c_int
+
+            display = x11.XOpenDisplay(None)
+            if not display:
+                return False
+            motif = x11.XInternAtom(display, b"_MOTIF_WM_HINTS", 0)
+            if not motif:
+                return False
+            # MWM_HINTS_DECORATIONS=1<<1, decorations=0.
+            hints = (ctypes.c_ulong * 5)(2, 0, 0, 0, 0)
+            data = ctypes.cast(hints, ctypes.POINTER(ctypes.c_ubyte))
+            x11.XChangeProperty(
+                display,
+                ctypes.c_ulong(int(win.winfo_id())),
+                ctypes.c_ulong(motif),
+                ctypes.c_ulong(motif),
+                32,
+                0,
+                data,
+                5,
+            )
+            x11.XFlush(display)
+            return True
+        except Exception:
+            return False
+        finally:
+            if display:
+                try:
+                    x11.XCloseDisplay(display)
+                except Exception:
+                    pass
+
     def _write_stability_log(self, heading, details):
         """Best-effort local diagnostics without turning an error into a crash."""
         try:
@@ -2169,10 +2246,18 @@ class BrowserApp(BrowserFeatures):
         self.root.title(f"Tekzite Browser{' — Private' if self._private_mode else ''}{' — ' + self._profile_name if self._profile_name != 'Default' else ''}{title_version}")
         self.root.geometry(f"{self.customization['window_width']}x{self.customization['window_height']}")
         self.root.minsize(self.customization["window_min_width"], self.customization["window_min_height"])
-        # Tekzite owns its title surface on every desktop. The in-app app bar
-        # already provides drag/minimize/maximize/close controls, so keep the
-        # Linux preview frameless too instead of stacking a second WM title bar.
-        self.root.overrideredirect(True)
+        # Windows uses Tk's override-redirect shell. Linux must remain a
+        # window-manager-managed application so the active window owns keyboard
+        # input correctly. Decorations are removed with Motif hints where the WM
+        # supports them, with a normal decorated window as the safe fallback.
+        if sys.platform.startswith("linux"):
+            self.root.overrideredirect(False)
+            try:
+                self.root.after_idle(lambda: self._apply_linux_managed_frameless(self.root))
+            except Exception:
+                pass
+        else:
+            self.root.overrideredirect(True)
         self._window_restore_geometry = None
         self._window_maximized = False
         self._window_drag_offset = (0, 0)
@@ -3396,11 +3481,16 @@ class BrowserApp(BrowserFeatures):
         all receive the same fade/slide exit animation without per-dialog code.
         """
         win = tk.Toplevel(parent or self.root)
-        # v10.5.27: every Tekzite-owned secondary window is frameless. The
-        # branded in-window header is the title surface; native Windows title
-        # bars would duplicate it and visually break the unified shell.
+        # Keep Linux secondary windows managed for reliable compositor focus.
+        # Motif hints remove decorations without bypassing the WM. Windows keeps
+        # the existing override-redirect shell.
         try:
-            win.overrideredirect(True)
+            if sys.platform.startswith("linux"):
+                win.overrideredirect(False)
+                win.after_idle(lambda w=win: self._apply_linux_managed_frameless(w)
+                               if w.winfo_exists() else None)
+            else:
+                win.overrideredirect(True)
         except Exception:
             pass
         original_destroy = win.destroy
@@ -10011,14 +10101,17 @@ class BrowserApp(BrowserFeatures):
                     pass
             return False
 
-        # The Tk root is genuinely back. Reassert the taskbar identity one more
-        # time after mapping, then the DWM restore may safely proceed.
+        # The Tk root is genuinely back. This wrapper-repair path is Windows
+        # only now; Linux never leaves the WM-managed state.
         try:
-            self.root.overrideredirect(True)
-            self.root.update_idletasks()
-            self._apply_frameless_app_style()
-            self._invalidate_native_window_drag_target()
-            self._prewarm_native_window_drag()
+            if sys.platform.startswith("linux"):
+                self._apply_linux_managed_frameless(self.root)
+            else:
+                self.root.overrideredirect(True)
+                self.root.update_idletasks()
+                self._apply_frameless_app_style()
+                self._invalidate_native_window_drag_target()
+                self._prewarm_native_window_drag()
         except Exception:
             if int(attempt) < 8:
                 try:
@@ -10043,27 +10136,15 @@ class BrowserApp(BrowserFeatures):
         if os.name != "nt":
             self._dwm_host_suspended_for_minimize = False
             self._invalidate_native_window_drag_target()
-            # Override-redirect windows are not consistently iconifiable on
-            # Linux/X11/XWayland. Hand the root back to the WM only for the
-            # minimize transition, then the existing restore watchdog makes it
-            # frameless again when it maps.
-            self._taskbar_restore_pending = True
+            # Linux is now a normal managed WM window, so minimize is native
+            # and needs no override-redirect wrapper swap or restore watchdog.
+            self._taskbar_restore_pending = False
             self._taskbar_restore_attempts = 0
+            self._taskbar_restore_geometry = None
             try:
-                self._taskbar_restore_geometry = self.root.geometry()
-            except Exception:
-                self._taskbar_restore_geometry = None
-            try:
-                self.root.overrideredirect(False)
-                self.root.update_idletasks()
                 self.root.iconify()
             except Exception:
-                try:
-                    self.root.deiconify()
-                    self.root.overrideredirect(True)
-                except Exception:
-                    pass
-            self._schedule_taskbar_restore_check(120)
+                pass
             return
         # Tk cannot iconify an override-redirect window directly on Windows.
         # Retire the transient DWM destination first, then temporarily expose a
@@ -10129,9 +10210,12 @@ class BrowserApp(BrowserFeatures):
             return
 
         try:
-            self.root.overrideredirect(True)
-            self.root.update_idletasks()
-            self._apply_frameless_app_style()
+            if sys.platform.startswith("linux"):
+                self._apply_linux_managed_frameless(self.root)
+            else:
+                self.root.overrideredirect(True)
+                self.root.update_idletasks()
+                self._apply_frameless_app_style()
         except Exception:
             self._schedule_taskbar_restore_check(80)
             return
