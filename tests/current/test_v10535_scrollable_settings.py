@@ -42,6 +42,6 @@ def test_settings_prefers_taller_dialog():
     assert "dialog_h = min(requested_h, max(620, screen_h - 64))" in block
     assert "self._new_animated_toplevel(" in block
     assert "auto_animate=False" in block
-    assert 'branded=(os.name == "nt")' in block
-    assert 'if os.name == "nt":' in block
+    assert "branded=True" in block
+    assert "win.overrideredirect(False)" not in block
     assert "self._apply_about_style_to_dialog(win)" in block
