@@ -4097,7 +4097,12 @@ class BrowserApp(BrowserFeatures):
         self._on_address_pointer_down(event)
         self._set_address_preview_visible(False)
         try:
-            self.address.focus_set()
+            self.address.focus_force()
+            if sys.platform.startswith("linux"):
+                try:
+                    self.root.tk.call("focus", "-force", self.address._w)
+                except Exception:
+                    pass
             self.address.icursor(f"@{max(0, int(getattr(event, 'x', 0)))}")
         except Exception:
             pass
@@ -7400,7 +7405,20 @@ class BrowserApp(BrowserFeatures):
                     self.edge_host.focus_set()
                 self._schedule_dwm_keyboard_poll(0)
             else:
-                self.chromium_surface.focus_set()
+                # Linux's frameless root and Settings are both override-redirect
+                # windows. focus_set() only changes Tk's internal focus chain and
+                # can leave X11/XWayland keyboard ownership on the Settings
+                # toplevel. Reclaim the real application focus on every page
+                # click before routing keys to Chromium.
+                if sys.platform.startswith("linux"):
+                    self.root.focus_force()
+                    self.chromium_surface.focus_force()
+                    try:
+                        self.root.tk.call("focus", "-force", self.chromium_surface._w)
+                    except Exception:
+                        pass
+                else:
+                    self.chromium_surface.focus_set()
         except Exception:
             pass
         self._cancel_embedded_surface_wakes()
@@ -8215,7 +8233,16 @@ class BrowserApp(BrowserFeatures):
         self._stop_dwm_keyboard_poll()
         self._cancel_embedded_surface_wakes()
         try:
+            # A click on the omnibox must reclaim the real native keyboard
+            # focus, not only Tk's per-toplevel focus. This matters on Linux
+            # after an override-redirect Settings window has owned focus.
             self.root.focus_force()
+            self.address.focus_force()
+            if sys.platform.startswith("linux"):
+                try:
+                    self.root.tk.call("focus", "-force", self.address._w)
+                except Exception:
+                    pass
         except Exception:
             pass
         return None
@@ -11805,27 +11832,52 @@ class BrowserApp(BrowserFeatures):
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
 
+        def _force_browser_keyboard_target(target):
+            """Reclaim the real Linux/Tk keyboard owner for one browser widget."""
+            try:
+                self.root.update_idletasks()
+            except Exception:
+                pass
+            try:
+                self.root.focus_force()
+            except Exception:
+                pass
+            try:
+                target.focus_force()
+            except Exception:
+                try:
+                    target.focus_set()
+                except Exception:
+                    pass
+            if sys.platform.startswith("linux"):
+                try:
+                    # Tk's low-level focus -force maps to XSetInputFocus on
+                    # X11/XWayland and repairs the case where a destroyed
+                    # override-redirect dialog remains the compositor's last
+                    # keyboard owner.
+                    self.root.tk.call("focus", "-force", target._w)
+                except Exception:
+                    pass
+
         def restore_browser_input_after_settings():
             """Return keyboard ownership to Tekzite after Settings closes."""
             try:
                 if _settings_restore_address:
                     self._address_focus_active = True
                     self._chromium_page_keyboard_active = False
-                    self.root.focus_force()
-                    self.address.focus_force()
+                    _force_browser_keyboard_target(self.address)
                     return
                 if _settings_restore_page and getattr(self, "_embedded_mode", False):
                     self._address_focus_active = False
                     self._chromium_page_keyboard_active = True
-                    self.root.focus_force()
                     target = (
                         self.edge_host
                         if getattr(self, "_chromium_dwm_mode", False)
                         else self.chromium_surface
                     )
-                    target.focus_set()
+                    _force_browser_keyboard_target(target)
                     return
-                self.root.focus_force()
+                _force_browser_keyboard_target(self.root)
             except Exception:
                 pass
 
@@ -11913,6 +11965,11 @@ class BrowserApp(BrowserFeatures):
                 win.grab_release()
             except Exception:
                 pass
+            # Hand focus back while the Settings X window still exists. If the
+            # focused override-redirect window is destroyed first, XWayland can
+            # leave keyboard focus on None and later Tk focus_set() calls become
+            # purely internal until another WM activation occurs.
+            restore_browser_input_after_settings()
             win.destroy()
             schedule_browser_input_restore()
 
@@ -11963,6 +12020,7 @@ class BrowserApp(BrowserFeatures):
                 win.grab_release()
             except Exception:
                 pass
+            restore_browser_input_after_settings()
             win.destroy()
             schedule_browser_input_restore()
 
