@@ -3357,13 +3357,21 @@ class BrowserApp(BrowserFeatures):
             except Exception:
                 pass
 
-            # All Tekzite dialogs must win the z-order race against the separate
-            # native DWM webpage presenter just like About does.
-            try:
-                win.after(20, lambda w=win: self._raise_toplevel_above_dwm(w, hold_ms=360)
-                          if w.winfo_exists() else None)
-            except Exception:
-                pass
+            # Only Windows needs the DWM z-order repair. On Linux/KDE a
+            # delayed focus_force() on an override-redirect dialog can steal
+            # keyboard ownership back after the user has clicked the browser.
+            # Keep Linux dialogs compositor-neutral instead of fighting KWin.
+            if os.name == "nt":
+                try:
+                    win.after(20, lambda w=win: self._raise_toplevel_above_dwm(w, hold_ms=360)
+                              if w.winfo_exists() else None)
+                except Exception:
+                    pass
+            else:
+                try:
+                    win.after(20, lambda w=win: w.winfo_exists() and w.lift())
+                except Exception:
+                    pass
             return True
         except Exception:
             return False
@@ -12142,16 +12150,17 @@ class BrowserApp(BrowserFeatures):
             win.update_idletasks()
             win.deiconify()
             win.lift()
-            win.focus_force()
         except Exception:
             pass
         if os.name != "nt":
-            try:
-                win.attributes("-topmost", True)
-                win.after(max(120, int(hold_ms)), lambda w=win: w.winfo_exists() and w.attributes("-topmost", False))
-            except Exception:
-                pass
+            # Linux has no Tekzite DWM presenter to outrank. Do not use
+            # focus_force() or temporary topmost here: on KWin/XWayland those
+            # delayed activation requests can look like a keyboard grab.
             return True
+        try:
+            win.focus_force()
+        except Exception:
+            pass
         try:
             import ctypes
             from ctypes import wintypes
