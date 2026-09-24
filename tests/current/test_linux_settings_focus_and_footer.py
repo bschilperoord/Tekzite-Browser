@@ -21,7 +21,7 @@ def test_linux_settings_forces_keyboard_focus_after_frameless_map():
     assert "win.focus_force()" in block
     assert "entry.focus_force()" in block
     assert "win.after(60, focus_linux_settings)" in block
-    assert "win.after(220, focus_linux_settings)" in block
+    assert "win.after(220, focus_linux_settings)" not in block
 
 
 def test_settings_footer_is_reserved_before_scroll_body():
@@ -32,3 +32,13 @@ def test_settings_footer_is_reserved_before_scroll_body():
 def test_settings_custom_close_uses_cancel_path():
     block = _settings_block()
     assert 'close_button.configure(command=cancel_preferences)' in block
+
+
+def test_settings_is_modeless_and_restores_browser_keyboard_input():
+    block = _settings_block()
+    assert "win.grab_set()" not in block
+    assert "def restore_browser_input_after_settings():" in block
+    assert "self.address.focus_force()" in block
+    assert "self._chromium_page_keyboard_active = True" in block
+    assert "target.focus_set()" in block
+    assert "schedule_browser_input_restore()" in block
