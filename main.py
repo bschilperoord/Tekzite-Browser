@@ -2185,6 +2185,14 @@ class BrowserApp(BrowserFeatures):
         self._dpi_awareness_enabled = _enable_per_monitor_dpi_awareness()
         self._windows_app_user_model_id_set = _set_windows_app_user_model_id()
         self.root = tk.Tk()
+        # On Linux, keep the root unmapped until the managed-frameless WM hint
+        # has been installed. Reparenting WMs such as KWin decide decorations
+        # during the first map; setting _MOTIF_WM_HINTS afterward can be ignored.
+        if sys.platform.startswith("linux"):
+            try:
+                self.root.withdraw()
+            except Exception:
+                pass
         self._apply_app_icon()
         self._taskbar_presence_guard_after_id = None
         try:
@@ -2280,10 +2288,9 @@ class BrowserApp(BrowserFeatures):
         # supports them, with a normal decorated window as the safe fallback.
         if sys.platform.startswith("linux"):
             self.root.overrideredirect(False)
-            try:
-                self.root.after_idle(lambda: self._apply_linux_managed_frameless(self.root))
-            except Exception:
-                pass
+            # Install the decoration hint synchronously while the root is still
+            # withdrawn. This is the critical pre-map path for KWin/Mutter/Xfwm.
+            self._apply_linux_managed_frameless(self.root)
         else:
             self.root.overrideredirect(True)
         self._window_restore_geometry = None
@@ -3019,6 +3026,23 @@ class BrowserApp(BrowserFeatures):
             ((lambda: self.navigate_to(self._homepage_url(), add_history=True))
              if startup_mode == "homepage" else self._focus_address)
         )
+        # Map Linux only after the WM decoration hint is present. The window
+        # remains a normal managed application, so the compositor owns activation
+        # and keyboard focus exactly like Dolphin/Firefox/etc.
+        if sys.platform.startswith("linux"):
+            try:
+                self._apply_linux_managed_frameless(self.root)
+                self.root.deiconify()
+                # Re-apply once after mapping so reparenting WMs also see the
+                # hint on their final wrapper. This never requests focus.
+                self.root.after(40, lambda: self._apply_linux_managed_frameless(self.root)
+                                if self.root.winfo_exists() else None)
+            except Exception:
+                try:
+                    self.root.deiconify()
+                except Exception:
+                    pass
+
         # Shell activation must win over session restore. A Windows http/https
         # click should open exactly the requested URL, never an old session.
         if external_target:
