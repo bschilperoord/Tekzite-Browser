@@ -11306,7 +11306,17 @@ class BrowserApp(BrowserFeatures):
         # of the browser height. Delay automatic motion until that geometry is
         # established, otherwise the generic dialog animation can capture the
         # small requested widget size before the tall layout is applied.
-        win = self._new_animated_toplevel(self.root, auto_animate=False)
+        # Linux/Wayland/XWayland needs a normal WM-managed Toplevel here.
+        # override-redirect dialogs can be visible but refuse keyboard focus,
+        # which makes text fields such as Homepage look read-only.
+        win = self._new_animated_toplevel(
+            self.root, auto_animate=False, branded=(os.name == "nt")
+        )
+        if os.name != "nt":
+            try:
+                win.overrideredirect(False)
+            except Exception:
+                pass
         win.title(f"Tekzite Browser Settings — v{BROWSER_VERSION}")
         dialog_width = 620
         win.configure(bg=self.ui["bg"])
@@ -11601,7 +11611,10 @@ class BrowserApp(BrowserFeatures):
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
 
         buttons = tk.Frame(shell, bg=self.ui["bg"])
-        buttons.pack(fill="x", pady=(14, 0))
+        # Reserve the footer before the large scrollable body. Linux Tk honors
+        # the canvas requested height more aggressively than Windows; packing
+        # the footer last could push Save/Cancel below the visible window.
+        buttons.pack(fill="x", side="bottom", pady=(14, 0), before=scroll_host)
         def save_and_close():
             # Keep persistence separate from live runtime application. On Linux
             # the Chromium software compositor can be busy when Settings closes;
@@ -11719,7 +11732,11 @@ class BrowserApp(BrowserFeatures):
             # This avoids size drift from DPI conversion, header insertion and
             # Windows' first-map negotiation racing each other.
             try:
-                self._apply_about_style_to_dialog(win)
+                # Windows keeps the custom frameless Tekzite header. Linux
+                # uses its native title bar so the window manager can grant
+                # reliable keyboard focus to Entry/Combobox controls.
+                if os.name == "nt":
+                    self._apply_about_style_to_dialog(win)
                 win.update_idletasks()
 
                 screen_w = max(1, int(win.winfo_screenwidth()))
@@ -11763,11 +11780,17 @@ class BrowserApp(BrowserFeatures):
                 # the animation has settled so every opening lands identically.
                 enforce_final_geometry()
                 win.lift()
-                win.attributes("-topmost", True)
+                if os.name == "nt":
+                    win.attributes("-topmost", True)
                 self._animate_toplevel_in(win, 155, slide=14)
                 win.after(190, enforce_final_geometry)
                 win.after(360, enforce_final_geometry)
-                win.after(390, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+                if os.name == "nt":
+                    win.after(390, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+                else:
+                    # Put typing focus directly into Homepage once the native
+                    # Linux window has actually mapped.
+                    win.after(80, lambda: win.winfo_exists() and entry.focus_set())
             except Exception:
                 try:
                     win.deiconify()
