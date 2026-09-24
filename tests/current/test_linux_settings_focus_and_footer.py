@@ -86,5 +86,9 @@ def test_linux_dialog_z_order_path_is_compositor_neutral():
     end = MAIN.index("def _show_about", start)
     block = MAIN[start:end]
     linux = block[block.index('if os.name != "nt":'):block.index("try:", block.index('if os.name != "nt":') + 1)]
-    assert "focus_force()" not in linux
-    assert '"-topmost"' not in linux
+    linux_code = "\n".join(
+        line for line in linux.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert "focus_force()" not in linux_code
+    assert '"-topmost"' not in linux_code
