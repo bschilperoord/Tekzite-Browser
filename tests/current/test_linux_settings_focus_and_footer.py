@@ -16,12 +16,12 @@ def test_linux_settings_is_frameless_and_uses_tekzite_header():
     assert "self._apply_about_style_to_dialog(win)" in block
 
 
-def test_linux_settings_forces_keyboard_focus_after_frameless_map():
+def test_linux_settings_uses_cooperative_focus_without_delayed_force():
     block = _settings_block()
-    assert "win.focus_force()" in block
-    assert "entry.focus_force()" in block
-    assert "win.after(60, focus_linux_settings)" in block
-    assert "win.after(220, focus_linux_settings)" not in block
+    assert "entry.focus_set()" in block
+    assert "entry.focus_force()" not in block
+    assert "win.after(60, focus_linux_settings)" not in block
+    assert 'if os.name == "nt":\n                try:\n                    win.focus_force()' in block
 
 
 def test_settings_footer_is_reserved_before_scroll_body():
@@ -38,13 +38,17 @@ def test_settings_is_modeless_and_restores_browser_keyboard_input():
     block = _settings_block()
     assert "win.grab_set()" not in block
     assert "def _force_browser_keyboard_target(target):" in block
-    assert 'self.root.tk.call("focus", "-force", target._w)' in block
+    assert "target.focus_set()" in block
+    assert "if self.root.focus_get() is not target:" in block
+    assert "target.focus_force()" in block
     assert "def restore_browser_input_after_settings():" in block
     assert "_force_browser_keyboard_target(self.address)" in block
     assert "self._chromium_page_keyboard_active = True" in block
     assert "_force_browser_keyboard_target(target)" in block
     assert "restore_browser_input_after_settings()\n            win.destroy()" in block
     assert "schedule_browser_input_restore()" in block
+    assert 'if sys.platform.startswith("linux"):\n                return' in block
+    assert "self.root.after(150, restore_browser_input_after_settings)" in block
 
 
 def test_linux_omnibox_click_reclaims_native_keyboard_focus():
@@ -64,3 +68,23 @@ def test_linux_page_click_reclaims_native_keyboard_focus():
     assert "self.root.focus_force()" in block
     assert "self.chromium_surface.focus_force()" in block
     assert 'self.root.tk.call("focus", "-force", self.chromium_surface._w)' in block
+
+
+def test_linux_background_native_wake_never_forces_focus():
+    start = MAIN.index("def _focus_embedded_surface")
+    end = MAIN.index("def _show_embedded_host", start)
+    block = MAIN[start:end]
+    assert 'if sys.platform.startswith("linux"):' in block
+    assert "Native HWND wake/activation is a Windows workaround" in block
+    schedule = MAIN[MAIN.index("def _schedule_embedded_surface_wake", start):end]
+    assert 'if sys.platform.startswith("linux"):' in schedule
+    assert "Never schedule background focus/activation retries on Linux" in schedule
+
+
+def test_linux_dialog_z_order_path_is_compositor_neutral():
+    start = MAIN.index("def _raise_toplevel_above_dwm")
+    end = MAIN.index("def _show_about", start)
+    block = MAIN[start:end]
+    linux = block[block.index('if os.name != "nt":'):block.index("try:", block.index('if os.name != "nt":') + 1)]
+    assert "focus_force()" not in linux
+    assert '"-topmost"' not in linux
