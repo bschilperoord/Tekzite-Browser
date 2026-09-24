@@ -10807,11 +10807,19 @@ def set_embedded_chromium_zoom(percent: int = 100, target_id: str = None, timeou
     session["page_zoom_new_document_script"] = False
     session["page_zoom_deferred_while_loading"] = False
     applied = _apply_native_chromium_zoom_extension(session, percent, timeout=max(3, timeout))
-    if applied and session.get("presentation_mode") == "native":
-        try:
-            _refresh_dwm_input_metrics(session, target_id=target_id, timeout=min(1.0, max(0.3, float(timeout))))
-        except Exception:
-            pass
+    if applied:
+        # Browser zoom deliberately changes the CSS viewport/devicePixelRatio
+        # relationship. Do not reuse a pre-zoom software viewport contract for
+        # up to 1.5 seconds, otherwise the compositor can reject every frame.
+        for channel in (session.get("page_cdp_channels") or {}).values():
+            if str(channel.get("purpose") or "") == "capture":
+                channel.pop("viewport_contract", None)
+                channel["viewport_contract_checked_at"] = 0.0
+        if session.get("presentation_mode") == "native":
+            try:
+                _refresh_dwm_input_metrics(session, target_id=target_id, timeout=min(1.0, max(0.3, float(timeout))))
+            except Exception:
+                pass
     return applied
 
 def _software_viewport_state(session, target_id, timeout, purpose="capture"):
@@ -10873,9 +10881,9 @@ def _apply_strict_software_viewport(session, channel, width, height, timeout, fo
             target_id=channel["target_id"], timeout=timeout, purpose="capture",
         )
         channel["device_metrics"] = metrics
-    # A previous Chromium/browser zoom state can survive while the bitmap itself
-    # still has the expected dimensions. Lock visual page scale as well so a
-    # 1280x676 image cannot secretly contain a zoomed 1024px CSS viewport.
+    # Keep pinch/page-scale emulation neutral. Chromium's real browser zoom
+    # (chrome.tabs.setZoom) is intentionally left intact and is reflected in
+    # devicePixelRatio plus the CSS viewport dimensions validated below.
     _persistent_page_cdp_call(
         session, "Emulation.setPageScaleFactor", {"pageScaleFactor": 1},
         target_id=channel["target_id"], timeout=timeout, purpose="capture",
@@ -10885,11 +10893,34 @@ def _apply_strict_software_viewport(session, channel, width, height, timeout, fo
     ih = int(round(float(state.get("ih", -1) or -1)))
     dpr = float(state.get("dpr", -1) or -1)
     scale = float(state.get("scale", -1) or -1)
-    known = (iw >= 0 and ih >= 0 and dpr >= 0 and scale >= 0)
-    ok = (not known) or (abs(iw - metrics[0]) <= 1 and abs(ih - metrics[1]) <= 1
-          and abs(dpr - 1.0) <= 0.01 and abs(scale - 1.0) <= 0.01)
+    known = (iw > 0 and ih > 0 and dpr > 0 and scale > 0)
+
+    # captureScreenshot returns device pixels, while innerWidth/innerHeight and
+    # CDP pointer input live in CSS pixels. Browser zoom is represented by DPR:
+    # e.g. a 1440px frame at 150% zoom legitimately reports innerWidth=960 and
+    # devicePixelRatio=1.5. The old contract incorrectly required DPR == 1 and
+    # therefore made every non-100% zoom look like compositor corruption.
+    expected_css_pixels_w = float(iw) * float(dpr) if known else -1.0
+    expected_css_pixels_h = float(ih) * float(dpr) if known else -1.0
+    tolerance = max(2.0, float(dpr) * 1.5) if known else 2.0
+    pixel_contract_ok = (
+        abs(expected_css_pixels_w - float(metrics[0])) <= tolerance
+        and abs(expected_css_pixels_h - float(metrics[1])) <= tolerance
+    ) if known else True
+    ok = (not known) or (pixel_contract_ok and abs(scale - 1.0) <= 0.01)
+
+    # Cache the exact displayed-bitmap -> CSS transform for software input.
+    # Use measured dimensions rather than only DPR so odd pixel heights such as
+    # 659 / 439 are mapped without accumulating a rounding error.
+    input_scale_x = (float(metrics[0]) / float(iw)) if known else 1.0
+    input_scale_y = (float(metrics[1]) / float(ih)) if known else 1.0
+    session["software_input_css_scale_x"] = input_scale_x
+    session["software_input_css_scale_y"] = input_scale_y
+    session["software_input_css_target"] = str(channel.get("target_id") or "")
     channel["viewport_contract"] = {
         "expected": metrics[:2], "inner": (iw, ih), "dpr": dpr, "scale": scale,
+        "input_scale": (input_scale_x, input_scale_y),
+        "device_pixel_check": (expected_css_pixels_w, expected_css_pixels_h),
         "known": known, "ok": ok
     }
     channel["viewport_contract_checked_at"] = time.monotonic()
@@ -11197,6 +11228,24 @@ def get_embedded_chromium_input_zoom_factor():
     """
     sx, sy = get_embedded_chromium_input_scale()
     return (float(sx) + float(sy)) / 2.0
+
+
+def get_embedded_chromium_software_input_scale():
+    """Return software-frame pixel -> Chromium CSS coordinate scale.
+
+    Software screenshots are device-pixel bitmaps while CDP input coordinates
+    are CSS pixels. Chromium browser zoom changes devicePixelRatio, so the two
+    spaces intentionally diverge whenever page zoom is not 100%.
+    """
+    session = _EDGE_SESSION or {}
+    try:
+        sx = float(session.get("software_input_css_scale_x") or 1.0)
+        sy = float(session.get("software_input_css_scale_y") or 1.0)
+        if 0.25 <= sx <= 8.0 and 0.25 <= sy <= 8.0:
+            return sx, sy
+    except Exception:
+        pass
+    return 1.0, 1.0
 
 
 def dispatch_embedded_chromium_mouse(event_type: str, x: float, y: float, *,

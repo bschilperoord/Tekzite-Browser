@@ -32,6 +32,7 @@ from engine.net import (
     capture_embedded_chromium_frame, dispatch_embedded_chromium_mouse,
     dispatch_embedded_chromium_key, get_embedded_chromium_context, get_embedded_chromium_cursor, focus_embedded_chromium_point,
     get_embedded_chromium_dwm_input_offset, get_embedded_chromium_input_scale, get_embedded_chromium_input_zoom_factor,
+    get_embedded_chromium_software_input_scale,
     refresh_embedded_chromium_dwm_input_metrics,
     get_embedded_chromium_page_state, find_embedded_chromium_text,
     set_embedded_chromium_presentation, set_embedded_chromium_zoom, check_embedded_chromium_zoom,
@@ -7261,11 +7262,21 @@ class BrowserApp(BrowserFeatures):
         if src and dst and dst[0] > 0 and dst[1] > 0:
             x *= float(src[0]) / float(dst[0])
             y *= float(src[1]) / float(dst[1])
-            # Keep the point inside Chromium's viewport. elementFromPoint() and
-            # Input.dispatchMouseEvent both behave better at width-1/height-1
+            # A software screenshot is in device pixels but CDP input is in
+            # CSS pixels. Browser zoom changes that ratio, so divide by the
+            # live contract scale before dispatching clicks/hover/wheel.
+            scale_x, scale_y = get_embedded_chromium_software_input_scale()
+            scale_x = max(0.01, float(scale_x or 1.0))
+            scale_y = max(0.01, float(scale_y or 1.0))
+            x /= scale_x
+            y /= scale_y
+            css_w = float(src[0]) / scale_x
+            css_h = float(src[1]) / scale_y
+            # Keep the point inside Chromium's CSS viewport. elementFromPoint()
+            # and Input.dispatchMouseEvent behave better at width-1/height-1
             # than exactly on the exclusive lower/right edge.
-            x = min(x, max(0.0, float(src[0]) - 1.0))
-            y = min(y, max(0.0, float(src[1]) - 1.0))
+            x = min(x, max(0.0, css_w - 1.0))
+            y = min(y, max(0.0, css_h - 1.0))
         return x, y
 
     def _note_dwm_tk_pointer_delivery(self, x=None, y=None):
