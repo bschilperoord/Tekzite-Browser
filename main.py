@@ -11603,44 +11603,58 @@ class BrowserApp(BrowserFeatures):
         buttons = tk.Frame(shell, bg=self.ui["bg"])
         buttons.pack(fill="x", pady=(14, 0))
         def save_and_close():
-            selected_zoom = _normalized_zoom_percent(page_zoom.get(), original_zoom)
-            self.preferences.update({
-                "homepage": homepage.get().strip() or START_URL,
-                "startup": startup.get(),
-                "restore_tabs": bool(restore_tabs.get()),
-                "quiet_mode": bool(quiet_mode.get()),
-                "new_tab": new_tab.get(),
-                "renderer": "chromium",
-                "chromium_presentation": chromium_presentation.get(),
-                "auto_chromium_fallback": bool(auto_fallback.get()),
-                "reuse_open_tabs": bool(reuse_tabs.get()),
-                "omnibox_suggestions_enabled": bool(omnibox_suggestions_enabled.get()),
-                "show_status_bar": bool(status_bar.get()),
-                "network_diagnostics": network_diagnostics.get(),
-                "strict_python_loopback": bool(strict_python_loopback.get()),
-                "privacy_lockdown": bool(privacy_lockdown.get()),
-                "tracker_blocking_enabled": bool(tracker_blocking.get()),
-                "strip_tracking_parameters": bool(strip_tracking.get()),
-                "strip_referrer": bool(strip_referrer.get()),
-                "https_first": bool(https_first.get()),
-                "clear_browsing_data_on_exit": bool(clear_on_exit.get()),
-                "adblock_enabled": bool(adblock_enabled.get()),
-                "page_zoom_percent": selected_zoom,
-                "sleeping_tabs_enabled": bool(sleeping_tabs_enabled.get()),
-                "sleeping_tabs_minutes": max(5, min(240, int(sleeping_tabs_minutes.get() or 30))),
-                "download_prompt": bool(download_prompt.get()),
-                "update_repository": update_repository.get().strip(),
-            })
+            # Keep persistence separate from live runtime application. On Linux
+            # the Chromium software compositor can be busy when Settings closes;
+            # a live-apply failure must never make a successful disk save look
+            # like the Save button did nothing.
             try:
+                selected_zoom = _normalized_zoom_percent(page_zoom.get(), original_zoom)
+                try:
+                    sleeping_minutes = max(5, min(240, int(sleeping_tabs_minutes.get() or 30)))
+                except Exception:
+                    sleeping_minutes = 30
+                presentation_value = str(chromium_presentation.get() or "").strip()
+                if os.name != "nt":
+                    # Linux preview always uses the CDP software compositor.
+                    presentation_value = "software"
+                elif presentation_value not in {"native", "software"}:
+                    presentation_value = "native"
+
+                self.preferences.update({
+                    "homepage": homepage.get().strip() or START_URL,
+                    "startup": startup.get(),
+                    "restore_tabs": bool(restore_tabs.get()),
+                    "quiet_mode": bool(quiet_mode.get()),
+                    "new_tab": new_tab.get(),
+                    "renderer": "chromium",
+                    "chromium_presentation": presentation_value,
+                    "auto_chromium_fallback": bool(auto_fallback.get()),
+                    "reuse_open_tabs": bool(reuse_tabs.get()),
+                    "omnibox_suggestions_enabled": bool(omnibox_suggestions_enabled.get()),
+                    "show_status_bar": bool(status_bar.get()),
+                    "network_diagnostics": network_diagnostics.get(),
+                    "strict_python_loopback": bool(strict_python_loopback.get()),
+                    "privacy_lockdown": bool(privacy_lockdown.get()),
+                    "tracker_blocking_enabled": bool(tracker_blocking.get()),
+                    "strip_tracking_parameters": bool(strip_tracking.get()),
+                    "strip_referrer": bool(strip_referrer.get()),
+                    "https_first": bool(https_first.get()),
+                    "clear_browsing_data_on_exit": bool(clear_on_exit.get()),
+                    "adblock_enabled": bool(adblock_enabled.get()),
+                    "page_zoom_percent": selected_zoom,
+                    "sleeping_tabs_enabled": bool(sleeping_tabs_enabled.get()),
+                    "sleeping_tabs_minutes": sleeping_minutes,
+                    "download_prompt": bool(download_prompt.get()),
+                    "update_repository": update_repository.get().strip(),
+                })
                 save_preferences(self.preferences)
             except Exception as exc:
                 self._show_message("error", "Tekzite Settings", f"Could not save preferences:\n{exc}", parent=win)
                 return
-            self._apply_preferences_runtime()
-            # Apply synchronously once before closing the modal, then keep a
-            # few settle passes for renderer/redirect races.
-            self._apply_chromium_zoom_to_all_tabs()
-            self._schedule_chromium_zoom_apply(all_tabs=True)
+
+            # Launch-time settings are exported immediately so subsequent helper
+            # starts use the saved values even if a best-effort live refresh
+            # encounters a renderer-specific problem.
             os.environ["TEKZITE_NETWORK_LOG_LEVEL"] = str(self.preferences.get("network_diagnostics", "off"))
             os.environ["TEKZITE_ADBLOCK_ENABLED"] = "1" if self.preferences.get("adblock_enabled", True) else "0"
             os.environ["TEKZITE_PRIVACY_LOCKDOWN"] = "1" if self.preferences.get("privacy_lockdown", True) else "0"
@@ -11648,9 +11662,43 @@ class BrowserApp(BrowserFeatures):
             os.environ["TEKZITE_STRIP_REFERRER"] = "1" if self.preferences.get("strip_referrer", True) else "0"
             os.environ["TEKZITE_HTTPS_FIRST"] = "1" if self.preferences.get("https_first", True) else "0"
             os.environ["TEKZITE_DOWNLOAD_PROMPT"] = "1" if self.preferences.get("download_prompt", False) else "0"
-            self._schedule_sleeping_tabs(1000)
-            self.status_var.set("Preferences saved — restart Tekzite to apply network/privacy/download launch changes")
+
+            # Once the atomic save verifies, close Settings right away. Runtime
+            # application happens on the Tk idle queue so a Linux CDP hiccup
+            # cannot strand the modal dialog after a successful save.
+            self.status_var.set("Preferences saved - restart Tekzite to apply network/privacy/download launch changes")
+            try:
+                win.grab_release()
+            except Exception:
+                pass
             win.destroy()
+
+            def apply_saved_preferences_runtime():
+                live_errors = []
+                try:
+                    self._apply_preferences_runtime()
+                except Exception as exc:
+                    live_errors.append(f"preferences: {exc}")
+                try:
+                    self._apply_chromium_zoom_to_all_tabs()
+                    self._schedule_chromium_zoom_apply(all_tabs=True)
+                except Exception as exc:
+                    live_errors.append(f"zoom: {exc}")
+                try:
+                    self._schedule_sleeping_tabs(1000)
+                except Exception as exc:
+                    live_errors.append(f"sleeping tabs: {exc}")
+                if live_errors:
+                    self.status_var.set(
+                        "Preferences saved - some live changes will apply after restart"
+                    )
+
+            try:
+                self.root.after_idle(apply_saved_preferences_runtime)
+            except Exception:
+                # Preferences are already durably saved. A restart applies every
+                # launch-time setting even if the UI is shutting down right now.
+                pass
         def cancel_preferences():
             # Live zoom selection is only a preview until Save. Restore the
             # authoritative value when the dialog is cancelled.

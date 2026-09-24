@@ -53,11 +53,16 @@ def _shutdown_onefile_children() -> None:
 
 
 def _linux_package_smoke() -> int:
-    """Exercise the exact Pillow/Tk bridge used by the packaged Linux compositor."""
+    """Exercise Pillow/Tk plus persistent Settings storage in the packaged build."""
     if os.name == "nt":
         return 0
     root = None
+    state_dir = None
+    previous_xdg_state = os.environ.get("XDG_STATE_HOME")
+    previous_localappdata = os.environ.pop("LOCALAPPDATA", None)
     try:
+        import shutil
+        import tempfile
         import tkinter as tk
         import PIL._tkinter_finder  # PyInstaller/Pillow Tk bridge.
         from PIL import Image, ImageTk
@@ -69,6 +74,24 @@ def _linux_package_smoke() -> int:
         root.update_idletasks()
         if int(photo.width()) != 2 or int(photo.height()) != 2:
             return 2
+
+        # Verify the exact persistence path used by the Settings Save button in
+        # the final one-file executable, not merely in the source checkout.
+        state_dir = tempfile.mkdtemp(prefix="tekzite-linux-package-state-")
+        os.environ["XDG_STATE_HOME"] = state_dir
+        from main import DEFAULT_PREFERENCES, load_preferences, save_preferences
+
+        prefs = dict(DEFAULT_PREFERENCES)
+        prefs["homepage"] = "https://example.com/tekzite-linux-settings-smoke"
+        prefs["sleeping_tabs_minutes"] = 60
+        saved_path = save_preferences(prefs)
+        if not saved_path.is_file():
+            return 3
+        loaded = load_preferences()
+        if loaded.get("homepage") != prefs["homepage"]:
+            return 4
+        if int(loaded.get("sleeping_tabs_minutes") or 0) != 60:
+            return 5
         return 0
     except Exception:
         return 1
@@ -78,6 +101,17 @@ def _linux_package_smoke() -> int:
                 root.destroy()
             except Exception:
                 pass
+        if state_dir:
+            try:
+                shutil.rmtree(state_dir, ignore_errors=True)
+            except Exception:
+                pass
+        if previous_xdg_state is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = previous_xdg_state
+        if previous_localappdata is not None:
+            os.environ["LOCALAPPDATA"] = previous_localappdata
 
 
 def main() -> int:
