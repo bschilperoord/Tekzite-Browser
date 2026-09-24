@@ -9,11 +9,19 @@ def _settings_block():
     return MAIN[MAIN.index("def show_preferences"):MAIN.index("def _raise_toplevel_above_dwm")]
 
 
-def test_linux_settings_uses_wm_managed_window_for_keyboard_focus():
+def test_linux_settings_is_frameless_and_uses_tekzite_header():
     block = _settings_block()
-    assert 'branded=(os.name == "nt")' in block
-    assert "win.overrideredirect(False)" in block
-    assert "win.after(80, lambda: win.winfo_exists() and entry.focus_set())" in block
+    assert 'branded=True' in block
+    assert "win.overrideredirect(False)" not in block
+    assert "self._apply_about_style_to_dialog(win)" in block
+
+
+def test_linux_settings_forces_keyboard_focus_after_frameless_map():
+    block = _settings_block()
+    assert "win.focus_force()" in block
+    assert "entry.focus_force()" in block
+    assert "win.after(60, focus_linux_settings)" in block
+    assert "win.after(220, focus_linux_settings)" in block
 
 
 def test_settings_footer_is_reserved_before_scroll_body():
@@ -21,7 +29,6 @@ def test_settings_footer_is_reserved_before_scroll_body():
     assert 'buttons.pack(fill="x", side="bottom", pady=(14, 0), before=scroll_host)' in block
 
 
-def test_linux_settings_does_not_apply_windows_frameless_header():
+def test_settings_custom_close_uses_cancel_path():
     block = _settings_block()
-    marker = 'if os.name == "nt":\n                    self._apply_about_style_to_dialog(win)'
-    assert marker in block
+    assert 'close_button.configure(command=cancel_preferences)' in block

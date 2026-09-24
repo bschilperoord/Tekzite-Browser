@@ -3271,6 +3271,7 @@ class BrowserApp(BrowserFeatures):
                 padx=9, pady=3,
             )
             close_button.pack(side="right", padx=(12, 0))
+            win._tekzite_dialog_close_button = close_button
             self._bind_frameless_dialog_drag(
                 win, shell, header, logo, title_col, title_label, version_label
             )
@@ -11407,17 +11408,12 @@ class BrowserApp(BrowserFeatures):
         # of the browser height. Delay automatic motion until that geometry is
         # established, otherwise the generic dialog animation can capture the
         # small requested widget size before the tall layout is applied.
-        # Linux/Wayland/XWayland needs a normal WM-managed Toplevel here.
-        # override-redirect dialogs can be visible but refuse keyboard focus,
-        # which makes text fields such as Homepage look read-only.
+        # Settings uses the same Tekzite-owned frameless dialog shell as every
+        # other app dialog. Linux focus is repaired explicitly after mapping
+        # instead of falling back to a second native window-manager title bar.
         win = self._new_animated_toplevel(
-            self.root, auto_animate=False, branded=(os.name == "nt")
+            self.root, auto_animate=False, branded=True
         )
-        if os.name != "nt":
-            try:
-                win.overrideredirect(False)
-            except Exception:
-                pass
         win.title(f"Tekzite Browser Settings — v{BROWSER_VERSION}")
         dialog_width = 620
         win.configure(bg=self.ui["bg"])
@@ -11871,11 +11867,15 @@ class BrowserApp(BrowserFeatures):
             # This avoids size drift from DPI conversion, header insertion and
             # Windows' first-map negotiation racing each other.
             try:
-                # Windows keeps the custom frameless Tekzite header. Linux
-                # uses its native title bar so the window manager can grant
-                # reliable keyboard focus to Entry/Combobox controls.
-                if os.name == "nt":
-                    self._apply_about_style_to_dialog(win)
+                # Settings is frameless on every platform and therefore always
+                # receives Tekzite's in-window title/header controls.
+                self._apply_about_style_to_dialog(win)
+                try:
+                    close_button = getattr(win, "_tekzite_dialog_close_button", None)
+                    if close_button is not None:
+                        close_button.configure(command=cancel_preferences)
+                except Exception:
+                    pass
                 win.update_idletasks()
 
                 screen_w = max(1, int(win.winfo_screenwidth()))
@@ -11927,9 +11927,19 @@ class BrowserApp(BrowserFeatures):
                 if os.name == "nt":
                     win.after(390, lambda: win.winfo_exists() and win.attributes("-topmost", False))
                 else:
-                    # Put typing focus directly into Homepage once the native
-                    # Linux window has actually mapped.
-                    win.after(80, lambda: win.winfo_exists() and entry.focus_set())
+                    # X11/XWayland override-redirect dialogs do not receive a
+                    # normal WM focus handoff. Explicitly force both the dialog
+                    # and Homepage entry after mapping, then repeat once after
+                    # the opening animation has settled.
+                    def focus_linux_settings():
+                        try:
+                            if win.winfo_exists():
+                                win.focus_force()
+                                entry.focus_force()
+                        except Exception:
+                            pass
+                    win.after(60, focus_linux_settings)
+                    win.after(220, focus_linux_settings)
             except Exception:
                 try:
                     win.deiconify()
