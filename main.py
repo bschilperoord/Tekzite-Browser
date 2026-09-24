@@ -9931,6 +9931,7 @@ class BrowserApp(BrowserFeatures):
         self._suspend_dwm_host_for_minimize()
         if os.name != "nt":
             self._dwm_host_suspended_for_minimize = False
+            self._invalidate_native_window_drag_target()
             # Override-redirect windows are not consistently iconifiable on
             # Linux/X11/XWayland. Hand the root back to the WM only for the
             # minimize transition, then the existing restore watchdog makes it

@@ -75,9 +75,10 @@ def test_linux_launch_uses_headless_software_backend_source_contract():
     assert 'blank_document_allowed = target_url in {"about:blank", "chrome://newtab/"}' in source
 
 
-def test_linux_browser_shell_forces_software_and_keeps_native_wm_frame():
+def test_linux_browser_shell_forces_software_and_uses_tekzite_frameless_chrome():
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert 'self.root.overrideredirect(os.name == "nt")' in source
+    assert 'self.root.overrideredirect(True)' in source
+    assert 'self.root.overrideredirect(os.name == "nt")' not in source
     assert 'if os.name != "nt":\n            return True' in source
     assert 'self.edge_host.bind("<Button-4>", self._on_chromium_surface_linux_wheel)' in source
     assert 'self._executor.submit(self._apply_chromium_zoom_to_all_tabs)' in source
