@@ -1967,18 +1967,46 @@ class BrowserApp(BrowserFeatures):
             # MWM_HINTS_DECORATIONS=1<<1, decorations=0.
             hints = (ctypes.c_ulong * 5)(2, 0, 0, 0, 0)
             data = ctypes.cast(hints, ctypes.POINTER(ctypes.c_ubyte))
-            x11.XChangeProperty(
-                display,
-                ctypes.c_ulong(int(win.winfo_id())),
-                ctypes.c_ulong(motif),
-                ctypes.c_ulong(motif),
-                32,
-                0,
-                data,
-                5,
-            )
+
+            # Tk/X11 can put a toplevel inside a separate WM wrapper. KWin and
+            # other reparenting window managers may decorate that outer window,
+            # so writing the property only to winfo_id() is not sufficient.
+            # Apply the same Motif hint to every relevant managed XID.
+            xids = set()
+            try:
+                xids.add(int(win.winfo_id()))
+            except Exception:
+                pass
+            try:
+                frame_id = win.frame()
+                if isinstance(frame_id, str):
+                    frame_xid = int(frame_id, 0)
+                else:
+                    frame_xid = int(frame_id)
+                if frame_xid:
+                    xids.add(frame_xid)
+            except Exception:
+                try:
+                    frame_id = win.tk.call("wm", "frame", win._w)
+                    frame_xid = int(str(frame_id), 0)
+                    if frame_xid:
+                        xids.add(frame_xid)
+                except Exception:
+                    pass
+
+            for xid in xids:
+                x11.XChangeProperty(
+                    display,
+                    ctypes.c_ulong(xid),
+                    ctypes.c_ulong(motif),
+                    ctypes.c_ulong(motif),
+                    32,
+                    0,
+                    data,
+                    5,
+                )
             x11.XFlush(display)
-            return True
+            return bool(xids)
         except Exception:
             return False
         finally:
