@@ -129,3 +129,14 @@ def test_linux_minimize_does_not_swap_override_redirect_state():
     assert "self.root.iconify()" in linux_block
     assert "self.root.overrideredirect(" not in linux_block
     assert "self._schedule_taskbar_restore_check" not in linux_block
+
+
+def test_linux_frameless_hint_targets_wm_wrapper_and_client():
+    start = MAIN.index("def _apply_linux_managed_frameless")
+    end = MAIN.index("def _write_stability_log", start)
+    block = MAIN[start:end]
+    assert "xids = set()" in block
+    assert "xids.add(int(win.winfo_id()))" in block
+    assert "frame_id = win.frame()" in block
+    assert 'win.tk.call("wm", "frame", win._w)' in block
+    assert "for xid in xids:" in block
