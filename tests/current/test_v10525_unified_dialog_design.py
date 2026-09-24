@@ -20,7 +20,7 @@ def test_all_animated_toplevels_are_branded_by_default():
 def test_shared_dialog_shell_matches_about_visual_language():
     block = MAIN[MAIN.index("def _apply_about_style_to_dialog"):MAIN.index("def _new_animated_toplevel")]
     assert 'logo.create_text(23, 23, text="T"' in block
-    assert 'Tekzite Browser  •  v{BROWSER_VERSION}' in block
+    assert 'text=f"v{BROWSER_VERSION}"' in block
     assert 'self.ui["border_soft"]' in block
     assert '_raise_toplevel_above_dwm' in block
 

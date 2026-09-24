@@ -119,4 +119,4 @@ def test_live_socket_ui_has_hostnames_paths_and_fast_updates():
     assert "Resolve hostnames (PTR)" in FEATURES
     assert "Direct external" in FEATURES
     assert "250 ms snapshots" in FEATURES
-    assert "UDP remote peers are correlated from live Kernel-Network ETW events" in FEATURES
+    assert "Live Tekzite/Chromium sockets." in FEATURES

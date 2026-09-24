@@ -62,4 +62,4 @@ def test_omnibox_popup_keeps_keyboard_focus_on_real_entry():
 def test_autocomplete_preference_is_local_only_and_enabled_by_default():
     assert main.DEFAULT_PREFERENCES["omnibox_suggestions_enabled"] is True
     source = Path(main.__file__).read_text(encoding="utf-8")
-    assert "Typing is not sent to an autocomplete service." in source
+    assert "Local suggestions only. Typing stays on this device." in source

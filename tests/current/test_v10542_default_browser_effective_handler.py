@@ -55,5 +55,5 @@ def test_non_tekzite_effective_handler_wins_over_unrelated_progid():
 
 def test_settings_copy_describes_effective_windows_shell_handler():
     source = Path(main.__file__).read_text(encoding="utf-8")
-    assert "asks the Windows Shell which app actually handles HTTP/HTTPS" in source
+    assert "Windows confirmation is required." in source
     assert "_windows_effective_association_executable" in source
