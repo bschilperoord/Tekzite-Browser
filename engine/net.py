@@ -6783,6 +6783,14 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
             session["target_zoom_bootstrap_skipped_default"] = True
     except Exception:
         pass
+    try:
+        set_embedded_chromium_color_scheme(
+            session.get("website_color_scheme", "system"),
+            target_id=target_id, timeout=2.0,
+        )
+        session["target_color_scheme_bootstrap_applied"] = True
+    except Exception:
+        session["target_color_scheme_bootstrap_applied"] = False
     return target_id
 
 
@@ -9828,7 +9836,7 @@ def _initial_chromium_launch_geometry(parent_hwnd: int, width: int, height: int)
     except Exception:
         return None
 
-def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, target_id: str = None, create_new_target: bool = False, attach_native: bool = True, preferred_zoom_percent: int = 100):
+def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, target_id: str = None, create_new_target: bool = False, attach_native: bool = True, preferred_zoom_percent: int = 100, preferred_color_scheme: str = "system"):
     """Load Chromium, using a strict cold-start gate and a fast hot-navigation path.
 
     v4.40 optionally binds the navigation to a dedicated Chromium target so
@@ -9880,6 +9888,9 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
     session["dwm_zoom_percent"] = preferred_zoom_percent
     session["preferences_zoom_percent"] = preferred_zoom_percent
     session["preferences_zoom_seeded_before_target"] = True
+    preferred_color_scheme = _normalized_chromium_color_scheme(preferred_color_scheme)
+    session["website_color_scheme"] = preferred_color_scheme
+    session["website_color_scheme_seeded_before_target"] = True
     session["native_direct_app_launch"] = False
     session["native_blank_bootstrap_launch"] = bool(
         first_native_bootstrap and str(session.get("launch_url") or "").lower() == "about:blank"
@@ -9899,6 +9910,17 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
             "about:blank" if first_native_bootstrap else str(url or "about:blank"),
             require_bootstrap=True,
         )
+
+    # Color-scheme emulation is a browser/media preference, not a DOM rewrite,
+    # so apply it before navigation. The destination can evaluate
+    # prefers-color-scheme correctly during its first stylesheet/layout pass.
+    try:
+        set_embedded_chromium_color_scheme(
+            preferred_color_scheme, target_id=target_id, timeout=2.0
+        )
+        session["website_color_scheme_pre_navigation_applied"] = True
+    except Exception:
+        session["website_color_scheme_pre_navigation_applied"] = False
 
     # v6.5: never mutate document zoom before navigation.  Keep only the saved
     # preference in session state and let the destination document initialize
@@ -10758,6 +10780,61 @@ def _apply_native_chromium_zoom_extension(session, percent: int, timeout: float 
                 )
             except Exception:
                 pass
+
+
+def _normalized_chromium_color_scheme(value):
+    value = str(value or "system").strip().lower()
+    return value if value in {"system", "dark", "light"} else "system"
+
+
+def set_embedded_chromium_color_scheme(mode: str = "system", target_id: str = None, timeout: float = 3.0):
+    """Expose a user-selected prefers-color-scheme value to websites.
+
+    This does not rewrite website CSS. Sites that support prefers-color-scheme
+    can choose their own dark/light theme. "system" clears Tekzite's override.
+    """
+    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(float(timeout), 8.0))
+    if not session or not session.get("port"):
+        return False
+    mode = _normalized_chromium_color_scheme(mode)
+    session["website_color_scheme"] = mode
+
+    if target_id:
+        targets = [str(target_id)]
+    else:
+        targets = []
+        try:
+            pages = _devtools_json(session["port"], "/json/list", timeout=min(1.0, float(timeout)))
+            targets = [
+                str(page.get("id") or "")
+                for page in pages
+                if page.get("type") == "page" and page.get("id")
+            ]
+        except Exception:
+            current = str(session.get("target_id") or "")
+            if current:
+                targets = [current]
+
+    params = {"media": "", "features": []}
+    if mode in {"dark", "light"}:
+        params["features"] = [{"name": "prefers-color-scheme", "value": mode}]
+
+    applied = 0
+    seen = set()
+    for tid in targets:
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        try:
+            _persistent_page_cdp_call(
+                session, "Emulation.setEmulatedMedia", params,
+                target_id=tid, timeout=max(0.5, float(timeout)), purpose="control",
+            )
+            applied += 1
+        except Exception:
+            pass
+    session["website_color_scheme_applied_targets"] = applied
+    return bool(applied or not targets)
 
 
 def check_embedded_chromium_zoom(percent: int = 100, target_id: str = None, timeout: int = 2):

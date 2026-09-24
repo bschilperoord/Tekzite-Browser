@@ -36,6 +36,7 @@ from engine.net import (
     refresh_embedded_chromium_dwm_input_metrics,
     get_embedded_chromium_page_state, find_embedded_chromium_text,
     set_embedded_chromium_presentation, set_embedded_chromium_zoom, check_embedded_chromium_zoom,
+    set_embedded_chromium_color_scheme,
     validate_and_recover_embedded_chromium_frame, record_embedded_surface_probe, record_embedded_native_recovery, sync_embedded_chromium_native_geometry,
     warm_embedded_chromium_io_channels, stop_embedded_chromium_loading,
     request_embedded_chromium_dwm_recrop, request_embedded_chromium_dwm_reregister, detach_embedded_chromium_dwm_thumbnail, network_engine_debug, privacy_stats,
@@ -290,6 +291,8 @@ DEFAULT_PREFERENCES = {
     "https_first": True,
     "clear_browsing_data_on_exit": True,
     "page_zoom_percent": 100,
+    # Hint websites through Chromium's prefers-color-scheme media feature.
+    "website_color_scheme": "system",
     "adblock_enabled": True,
     # User-managed unpacked Chromium extensions. Tekzite's built-in local
     # services extension is always loaded separately and cannot be removed.
@@ -716,6 +719,11 @@ def _normalized_zoom_percent(value, default=100):
     return max(50, min(300, value))
 
 
+def _normalized_website_color_scheme(value, default="system"):
+    value = str(value or default).strip().lower()
+    return value if value in {"system", "dark", "light"} else str(default)
+
+
 def _next_pointer_click_count(last_release_at, last_point, last_count, now, point, *, max_delay=0.50, max_distance=6.0):
     """Return Chromium clickCount for a press at *point*.
 
@@ -781,6 +789,9 @@ def load_preferences():
     prefs["page_zoom_percent"] = _normalized_zoom_percent(
         prefs.get("page_zoom_percent", 100)
     )
+    prefs["website_color_scheme"] = _normalized_website_color_scheme(
+        prefs.get("website_color_scheme", "system")
+    )
     prefs["extensions"] = _normalized_extension_entries(prefs.get("extensions", []))
     try:
         prefs["sleeping_tabs_minutes"] = max(5, min(240, int(prefs.get("sleeping_tabs_minutes", 30))))
@@ -812,6 +823,9 @@ def save_preferences(prefs):
     payload = dict(prefs)
     payload["page_zoom_percent"] = _normalized_zoom_percent(
         payload.get("page_zoom_percent", 100)
+    )
+    payload["website_color_scheme"] = _normalized_website_color_scheme(
+        payload.get("website_color_scheme", "system")
     )
     payload["extensions"] = _normalized_extension_entries(payload.get("extensions", []))
     payload["homepage"] = str(payload.get("homepage") or START_URL).strip()[:32768] or START_URL
@@ -8807,6 +8821,7 @@ class BrowserApp(BrowserFeatures):
             create_new_target,
             not software_presentation,
             self._page_zoom_percent(),
+            self._website_color_scheme(),
         )
         self._poll_embedded_navigation(
             generation, self._embedded_future, url, add_history
@@ -10203,6 +10218,24 @@ class BrowserApp(BrowserFeatures):
             getattr(self, "preferences", DEFAULT_PREFERENCES).get("page_zoom_percent", 100)
         )
 
+    def _website_color_scheme(self):
+        return _normalized_website_color_scheme(
+            getattr(self, "preferences", DEFAULT_PREFERENCES).get("website_color_scheme", "system")
+        )
+
+    def _apply_website_color_scheme_to_all_tabs(self):
+        """Update prefers-color-scheme for every live Chromium-backed tab."""
+        scheme = self._website_color_scheme()
+        applied = False
+        for target_id in self._live_chromium_target_ids():
+            try:
+                applied = bool(
+                    set_embedded_chromium_color_scheme(scheme, target_id=target_id)
+                ) or applied
+            except Exception:
+                pass
+        return applied
+
     def _apply_chromium_zoom(self, target_id=None):
         """Apply Chromium page zoom and keep DWM on a 1:1 presentation contract."""
         if os.name != "nt" and self._page_zoom_percent() == 100:
@@ -11424,6 +11457,7 @@ class BrowserApp(BrowserFeatures):
         clear_on_exit = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("clear_browsing_data_on_exit", True)))
         adblock_enabled = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("adblock_enabled", True)))
         page_zoom = tk.StringVar(value=f"{self._page_zoom_percent()}%")
+        website_color_scheme = tk.StringVar(value=self._website_color_scheme())
         sleeping_tabs_enabled = tk.BooleanVar(value=bool(self.preferences.get("sleeping_tabs_enabled", True)))
         sleeping_tabs_minutes = tk.StringVar(value=str(self.preferences.get("sleeping_tabs_minutes", 30)))
         download_prompt = tk.BooleanVar(value=bool(self.preferences.get("download_prompt", False)))
@@ -11617,6 +11651,32 @@ class BrowserApp(BrowserFeatures):
         zoom_box.bind("<<ComboboxSelected>>", preview_selected_zoom)
         tk.Label(outer, text="Changes preview immediately on every open Chromium web page; Save makes the value permanent.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(0, 5))
+
+        tk.Label(outer, text="Website color scheme", fg=self.ui["muted"], bg=self.ui["bg"],
+                 font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(6, 1))
+        color_scheme_box = combo(website_color_scheme, ["system", "dark", "light"])
+        original_color_scheme = self._website_color_scheme()
+
+        def preview_website_color_scheme(_event=None):
+            value = _normalized_website_color_scheme(
+                website_color_scheme.get(), original_color_scheme
+            )
+            self.preferences["website_color_scheme"] = value
+            try:
+                self._executor.submit(self._apply_website_color_scheme_to_all_tabs)
+            except Exception:
+                pass
+            self.status_var.set(f"Website color scheme preview: {value}")
+
+        color_scheme_box.bind("<<ComboboxSelected>>", preview_website_color_scheme)
+        tk.Label(
+            outer,
+            text="Triggers websites that support prefers-color-scheme. System leaves Chromium/site defaults untouched.",
+            fg=self.ui["muted"], bg=self.ui["bg"],
+            font=(self._ui_font_family, self._font_size(8)),
+            wraplength=560, justify="left",
+        ).pack(anchor="w", pady=(0, 5))
+
         tk.Checkbutton(outer, highlightthickness=0, bd=0, relief="flat", text="Show status bar", variable=status_bar, bg=self.ui["bg"], fg=self.ui["text"],
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
@@ -11666,6 +11726,7 @@ class BrowserApp(BrowserFeatures):
                     "clear_browsing_data_on_exit": bool(clear_on_exit.get()),
                     "adblock_enabled": bool(adblock_enabled.get()),
                     "page_zoom_percent": selected_zoom,
+                    "website_color_scheme": _normalized_website_color_scheme(website_color_scheme.get()),
                     "sleeping_tabs_enabled": bool(sleeping_tabs_enabled.get()),
                     "sleeping_tabs_minutes": sleeping_minutes,
                     "download_prompt": bool(download_prompt.get()),
@@ -11709,6 +11770,10 @@ class BrowserApp(BrowserFeatures):
                 except Exception as exc:
                     live_errors.append(f"zoom: {exc}")
                 try:
+                    self._apply_website_color_scheme_to_all_tabs()
+                except Exception as exc:
+                    live_errors.append(f"website color scheme: {exc}")
+                try:
                     self._schedule_sleeping_tabs(1000)
                 except Exception as exc:
                     live_errors.append(f"sleeping tabs: {exc}")
@@ -11730,6 +11795,12 @@ class BrowserApp(BrowserFeatures):
                 self.preferences["page_zoom_percent"] = original_zoom
                 self._apply_chromium_zoom_to_all_tabs()
                 self._schedule_chromium_zoom_apply(all_tabs=True)
+            if self._website_color_scheme() != original_color_scheme:
+                self.preferences["website_color_scheme"] = original_color_scheme
+                try:
+                    self._executor.submit(self._apply_website_color_scheme_to_all_tabs)
+                except Exception:
+                    pass
             win.destroy()
 
         tk.Button(buttons, text="Cancel", command=cancel_preferences, bg=self.ui["chrome_2"], fg=self.ui["text"],
