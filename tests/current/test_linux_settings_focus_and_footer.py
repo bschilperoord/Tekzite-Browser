@@ -92,3 +92,40 @@ def test_linux_dialog_z_order_path_is_compositor_neutral():
     )
     assert "focus_force()" not in linux_code
     assert '"-topmost"' not in linux_code
+
+
+def test_linux_main_window_remains_wm_managed():
+    start = MAIN.index("title_version =")
+    end = MAIN.index("self._window_restore_geometry", start)
+    block = MAIN[start:end]
+    assert 'if sys.platform.startswith("linux"):' in block
+    assert "self.root.overrideredirect(False)" in block
+    assert "self._apply_linux_managed_frameless(self.root)" in block
+
+
+def test_linux_frameless_uses_motif_hint_not_override_redirect():
+    start = MAIN.index("def _apply_linux_managed_frameless")
+    end = MAIN.index("def _write_stability_log", start)
+    block = MAIN[start:end]
+    assert "win.overrideredirect(False)" in block
+    assert 'b"_MOTIF_WM_HINTS"' in block
+    assert "(ctypes.c_ulong * 5)(2, 0, 0, 0, 0)" in block
+    assert 'windowingsystem")).lower() != "x11"' in block
+
+
+def test_linux_secondary_windows_remain_wm_managed():
+    start = MAIN.index("def _new_animated_toplevel")
+    end = MAIN.index("def _animate_toplevel_in", start)
+    block = MAIN[start:end]
+    assert 'if sys.platform.startswith("linux"):' in block
+    assert "win.overrideredirect(False)" in block
+    assert "self._apply_linux_managed_frameless(w)" in block
+
+
+def test_linux_minimize_does_not_swap_override_redirect_state():
+    start = MAIN.index("def _minimize_window")
+    end = MAIN.index("# Tk cannot iconify an override-redirect window directly on Windows.", start)
+    linux_block = MAIN[start:end]
+    assert "self.root.iconify()" in linux_block
+    assert "self.root.overrideredirect(" not in linux_block
+    assert "self._schedule_taskbar_restore_check" not in linux_block
