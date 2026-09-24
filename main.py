@@ -3487,8 +3487,8 @@ class BrowserApp(BrowserFeatures):
         try:
             if sys.platform.startswith("linux"):
                 win.overrideredirect(False)
-                win.after_idle(lambda w=win: self._apply_linux_managed_frameless(w)
-                               if w.winfo_exists() else None)
+                win.after(1, lambda w=win: self._apply_linux_managed_frameless(w)
+                          if w.winfo_exists() else None)
             else:
                 win.overrideredirect(True)
         except Exception:
