@@ -37,3 +37,13 @@ def test_theme_refresh_keeps_menu_palette_modern():
     assert 'activebackground=self.ui["field_focus"]' in MAIN
     assert 'button.set_palette(' in MAIN
 
+
+
+def test_chromium_page_click_dismisses_active_tk_menu_before_forwarding():
+    helper = MAIN[MAIN.index("def _dismiss_active_popup_menu"):MAIN.index("def _make_modern_menu")]
+    assert 'getattr(self, "_active_popup_menu", None)' in helper
+    assert "menu.dismiss(include_parent=True)" in helper
+
+    press = MAIN[MAIN.index("def _dispatch_chromium_press_xy"):MAIN.index("def _flush_pending_chromium_drag_before_release")]
+    assert "self._dismiss_active_popup_menu()" in press
+    assert press.index("self._dismiss_active_popup_menu()") < press.index('dispatch_embedded_chromium_mouse, "mousePressed"')
