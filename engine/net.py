@@ -1892,15 +1892,71 @@ def _terminate_stale_profile_owner(profile_dir):
 
 
 
-def _profile_chromium_pids(profile_dir):
-    """Return Windows Chromium PIDs using Tekzite's exact bridge profile.
+def _linux_proc_cmdline(pid, proc_root="/proc"):
+    """Return one Linux process argv from procfs."""
+    try:
+        raw = (Path(proc_root) / str(int(pid)) / "cmdline").read_bytes()
+    except Exception:
+        return []
+    return [
+        part.decode("utf-8", errors="replace")
+        for part in raw.split(b"\0")
+        if part
+    ]
 
-    A Chromium launcher can exit with code 0 after forwarding its command line to
-    an already-running browser process. If that older process owns Tekzite's
-    private user-data-dir but Tekzite's PID marker points elsewhere, the new
-    remote-debugging port never appears. Query the Windows process command lines
-    so we can identify only processes tied to this dedicated bridge profile.
+
+def _linux_profile_chromium_pids(profile_dir, proc_root="/proc"):
+    """Return Linux Chromium PIDs tied to Tekzite's exact user-data-dir."""
+    try:
+        profile = os.path.realpath(os.path.abspath(os.path.expanduser(str(profile_dir))))
+    except Exception:
+        return []
+    try:
+        entries = list(Path(proc_root).iterdir())
+    except Exception:
+        return []
+    pids = []
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid <= 0 or pid == os.getpid():
+            continue
+        argv = _linux_proc_cmdline(pid, proc_root=proc_root)
+        if not argv:
+            continue
+        exe_name = os.path.basename(str(argv[0] or "")).lower()
+        if "chrom" not in exe_name:
+            continue
+        user_data_dir = None
+        for index, arg in enumerate(argv[1:], start=1):
+            text = str(arg or "")
+            if text.startswith("--user-data-dir="):
+                user_data_dir = text.split("=", 1)[1]
+                break
+            if text == "--user-data-dir" and index + 1 < len(argv):
+                user_data_dir = str(argv[index + 1] or "")
+                break
+        if not user_data_dir:
+            continue
+        try:
+            candidate = os.path.realpath(os.path.abspath(os.path.expanduser(user_data_dir)))
+        except Exception:
+            continue
+        if candidate == profile:
+            pids.append(pid)
+    return sorted(set(pids))
+
+
+def _profile_chromium_pids(profile_dir):
+    """Return Chromium PIDs using Tekzite's exact bridge profile.
+
+    Windows queries process command lines with CIM. Linux reads procfs. Both
+    paths match the exact --user-data-dir so unrelated Chromium sessions are
+    never treated as owners of Tekzite's profile.
     """
+    if sys.platform.startswith("linux"):
+        return _linux_profile_chromium_pids(profile_dir)
     if os.name != "nt":
         return []
     profile = os.path.normcase(os.path.abspath(str(profile_dir)))
