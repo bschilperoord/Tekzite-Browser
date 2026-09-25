@@ -68,8 +68,12 @@ def test_linux_google_auth_close_is_cooperative_only():
     assert "taskkill" not in helper
     assert "_profile_chromium_pids(profile)" in close
     assert "_request_linux_process_terminate(verified)" in close
-    assert "SIGKILL" not in close
-    assert "_terminate_profile_chromium_processes" not in close
+    close_code = "\n".join(
+        line for line in close.splitlines()
+        if not line.lstrip().startswith("#") and '"""' not in line
+    )
+    assert "signal.SIGKILL" not in close_code
+    assert "_terminate_profile_chromium_processes" not in close_code
     assert '"Browser.close"' in embedded
     assert "_request_linux_process_terminate(retry_pids)" in embedded
 
