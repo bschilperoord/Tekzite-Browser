@@ -6796,6 +6796,13 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             # process, so keep the explicit new-window request used by the
             # established handoff path.
             command.append("--new-window")
+        elif sys.platform.startswith("linux") and os.environ.get("DISPLAY"):
+            # Tekzite itself can run under KDE/Wayland, but a native Wayland
+            # Chromium window deliberately hides its title/PID metadata from
+            # other clients. Run only the temporary Google auth window through
+            # X11/XWayland when available so Tekzite can observe _NET_WM_NAME
+            # and close the window as soon as it returns to YouTube.
+            command.append("--ozone-platform=x11")
         # On Linux, do not force --new-window. A fresh profile owner can create
         # a normal startup window and then a second auth window when that switch
         # is present. Appending only the target URL makes it the initial window.
@@ -6867,6 +6874,11 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             "launched_monotonic": time.monotonic(),
             "auth_hwnds": [],
             "auth_window_titles": [],
+            "auth_window_backend": (
+                "x11"
+                if sys.platform.startswith("linux") and os.environ.get("DISPLAY")
+                else "native"
+            ),
         }
         # Capture the actual top-level HWND immediately. Subsequent auth
         # completion and close requests can then target the exact window the
