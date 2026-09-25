@@ -5906,16 +5906,151 @@ def _auth_navigation_has_returned(handle):
 
 
 
-def _standalone_auth_window_snapshot(handle):
-    """Return visible top-level Chromium windows owned by this auth launch.
+def _linux_x11_auth_window_snapshot(handle):
+    """Return managed X11/XWayland Chromium windows owned by this auth launch."""
+    if not sys.platform.startswith("linux") or not isinstance(handle, dict):
+        return []
+    if not os.environ.get("DISPLAY"):
+        return []
+    display = None
+    try:
+        import ctypes
+        import ctypes.util
 
-    The on-disk History/Cookies databases can lag behind the actual UI.  For
-    Google auth we therefore keep a live Win32 view of the exact Chromium
-    window Tekzite launched.  This is deliberately read-only: no CDP or
-    automation switch is added to the auth browser, preserving Google's normal
-    browser compatibility path.
+        pids = {
+            int(pid) for pid in (handle.get("browser_pids") or [])
+            if int(pid or 0) > 0
+        }
+        launch_pid = int(handle.get("launch_pid") or 0)
+        if launch_pid > 0:
+            pids.add(launch_pid)
+        profile = str(handle.get("profile") or "")
+        if profile:
+            try:
+                pids.update(int(pid) for pid in _profile_chromium_pids(profile))
+            except Exception:
+                pass
+        pids = {pid for pid in pids if pid > 0}
+        if not pids:
+            return []
+
+        lib_name = ctypes.util.find_library("X11")
+        if not lib_name:
+            return []
+        x11 = ctypes.CDLL(lib_name)
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        x11.XCloseDisplay.restype = ctypes.c_int
+        x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        x11.XDefaultRootWindow.restype = ctypes.c_ulong
+        x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x11.XInternAtom.restype = ctypes.c_ulong
+        x11.XGetWindowProperty.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+        x11.XGetWindowProperty.restype = ctypes.c_int
+        x11.XFree.argtypes = [ctypes.c_void_p]
+        x11.XFree.restype = ctypes.c_int
+
+        display = x11.XOpenDisplay(None)
+        if not display:
+            return []
+        root = x11.XDefaultRootWindow(display)
+        atom_clients = x11.XInternAtom(display, b"_NET_CLIENT_LIST", 0)
+        atom_pid = x11.XInternAtom(display, b"_NET_WM_PID", 0)
+        atom_name = x11.XInternAtom(display, b"_NET_WM_NAME", 0)
+        atom_utf8 = x11.XInternAtom(display, b"UTF8_STRING", 0)
+        atom_wm_name = x11.XInternAtom(display, b"WM_NAME", 0)
+
+        def read_property(window, atom, requested_type=0, max_longs=4096):
+            actual_type = ctypes.c_ulong()
+            actual_format = ctypes.c_int()
+            nitems = ctypes.c_ulong()
+            bytes_after = ctypes.c_ulong()
+            data = ctypes.POINTER(ctypes.c_ubyte)()
+            status = x11.XGetWindowProperty(
+                display, ctypes.c_ulong(int(window)), ctypes.c_ulong(int(atom)),
+                0, int(max_longs), 0, ctypes.c_ulong(int(requested_type or 0)),
+                ctypes.byref(actual_type), ctypes.byref(actual_format),
+                ctypes.byref(nitems), ctypes.byref(bytes_after),
+                ctypes.byref(data),
+            )
+            if status != 0 or not data:
+                return None, 0, 0
+            try:
+                count = int(nitems.value or 0)
+                fmt = int(actual_format.value or 0)
+                if fmt == 8:
+                    raw = ctypes.string_at(data, count)
+                elif fmt == 32:
+                    arr = ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))
+                    raw = [int(arr[i]) for i in range(count)]
+                else:
+                    raw = None
+                return raw, fmt, int(actual_type.value or 0)
+            finally:
+                x11.XFree(ctypes.cast(data, ctypes.c_void_p))
+
+        clients, fmt, _ = read_property(root, atom_clients)
+        if fmt != 32 or not isinstance(clients, list):
+            return []
+
+        windows = []
+        for xid in clients:
+            pid_data, pid_fmt, _ = read_property(xid, atom_pid, max_longs=4)
+            if pid_fmt != 32 or not isinstance(pid_data, list) or not pid_data:
+                continue
+            pid = int(pid_data[0] or 0)
+            if pid not in pids:
+                continue
+
+            title = ""
+            title_raw, title_fmt, _ = read_property(xid, atom_name, atom_utf8, 1024)
+            if title_fmt == 8 and isinstance(title_raw, (bytes, bytearray)):
+                title = bytes(title_raw).decode("utf-8", errors="replace").rstrip("\x00")
+            if not title:
+                title_raw, title_fmt, _ = read_property(xid, atom_wm_name, 0, 1024)
+                if title_fmt == 8 and isinstance(title_raw, (bytes, bytearray)):
+                    title = bytes(title_raw).decode("utf-8", errors="replace").rstrip("\x00")
+
+            windows.append({
+                "xid": int(xid),
+                "pid": pid,
+                "class": "X11",
+                "title": title,
+            })
+
+        if windows:
+            handle["auth_xids"] = [row["xid"] for row in windows]
+            handle["auth_window_titles"] = [row["title"] for row in windows]
+        return windows
+    except Exception:
+        return []
+    finally:
+        if display:
+            try:
+                x11.XCloseDisplay(display)
+            except Exception:
+                pass
+
+
+def _standalone_auth_window_snapshot(handle):
+    """Return visible Chromium windows owned by this authentication launch.
+
+    Windows reads the real HWND title. Linux/XWayland reads EWMH window
+    metadata. Both paths are read-only and add no CDP/automation switches to
+    the visible Google authentication browser.
     """
-    if os.name != "nt" or not isinstance(handle, dict):
+    if not isinstance(handle, dict):
+        return []
+    if sys.platform.startswith("linux"):
+        return _linux_x11_auth_window_snapshot(handle)
+    if os.name != "nt":
         return []
     try:
         import ctypes
@@ -6028,7 +6163,12 @@ def _auth_window_title_has_returned(handle):
     for row in windows:
         title = str(row.get("title") or "").strip().casefold()
         if "youtube" in title:
-            handle["google_auth_return_hwnd"] = int(row.get("hwnd") or 0)
+            window_id = int(row.get("hwnd") or row.get("xid") or 0)
+            handle["google_auth_return_window_id"] = window_id
+            if row.get("hwnd"):
+                handle["google_auth_return_hwnd"] = int(row.get("hwnd") or 0)
+            if row.get("xid"):
+                handle["google_auth_return_xid"] = int(row.get("xid") or 0)
             handle["google_auth_return_title"] = str(row.get("title") or "")
             return True
     return False
@@ -6167,7 +6307,12 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     if _auth_window_title_has_returned(handle):
         window_signal = (
             "window",
-            int(handle.get("google_auth_return_hwnd") or 0),
+            int(
+                handle.get("google_auth_return_window_id")
+                or handle.get("google_auth_return_hwnd")
+                or handle.get("google_auth_return_xid")
+                or 0
+            ),
             str(handle.get("google_auth_return_title") or ""),
         )
 
