@@ -3,7 +3,8 @@ from pathlib import Path
 from engine import net
 
 
-def test_linux_gpu_inventory_detects_common_vendors_and_nodes(tmp_path):
+def test_linux_gpu_inventory_detects_common_vendors_and_nodes(tmp_path, monkeypatch):
+    monkeypatch.setattr(net.sys, "platform", "linux")
     sysfs = tmp_path / "sys-class-drm"
     dev = tmp_path / "dev"
     for card, vendor in (("card0", "0x1002"), ("card1", "0x8086")):
