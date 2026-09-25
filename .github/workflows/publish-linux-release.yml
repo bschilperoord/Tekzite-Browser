@@ -1,0 +1,137 @@
+name: Publish Linux Release
+
+on:
+  push:
+    branches: [linux-port]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-linux-release:
+    if: startsWith(github.event.head_commit.message, 'Linux release:') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout linux-port
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+
+      - name: Install Linux runtime dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth python3-tk
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run regression suite
+        run: python -m pytest -q
+
+      - name: Test Chromium extension scripts
+        run: node tests/current/test_extension_features.cjs
+
+      - name: Run Linux environment doctor
+        run: python tools/doctor.py
+
+      - name: Run real Chromium/CDP Linux smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Linux Chromium smoke attempt $attempt/3"
+            if xvfb-run -a python tools/linux_smoke.py; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Chromium/CDP smoke failed after 3 fresh attempts." >&2
+          exit 1
+
+      - name: Build Linux x86_64 executable
+        shell: bash
+        run: ./build_linux.sh
+
+      - name: Smoke packaged Linux compositor
+        shell: bash
+        run: xvfb-run -a ./dist-linux/TekziteBrowser --linux-package-smoke
+
+      - name: Package Linux release
+        id: package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version="$(python - <<'PY'
+          import re
+          from pathlib import Path
+          source = Path("main.py").read_text(encoding="utf-8")
+          m = re.search(r'BROWSER_VERSION\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', source)
+          if not m:
+              raise SystemExit("Could not determine BROWSER_VERSION")
+          print(m.group(1))
+          PY
+          )"
+          name="Tekzite-Browser-v${version}-Linux-x86_64"
+          source_name="Tekzite-Browser-v${version}-Linux-source"
+          rm -rf package-linux-release
+          mkdir -p "package-linux-release/${name}"
+          install -m 0755 dist-linux/TekziteBrowser "package-linux-release/${name}/TekziteBrowser"
+          install -m 0644 packaging/linux/tekzite-browser.desktop "package-linux-release/${name}/tekzite-browser.desktop"
+          install -m 0644 packaging/linux/README.md "package-linux-release/${name}/README-LINUX.md"
+          cp LICENSE "package-linux-release/${name}/LICENSE"
+          tar -C package-linux-release -czf "${name}.tar.gz" "${name}"
+          git archive --format=tar --prefix="${source_name}/" "$GITHUB_SHA" | gzip -9 > "${source_name}.tar.gz"
+          sha256sum "${name}.tar.gz" "${source_name}.tar.gz" > SHA256SUMS-Linux.txt
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "source_name=${source_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Linux release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version="${{ steps.package.outputs.version }}"
+          name="${{ steps.package.outputs.name }}"
+          source_name="${{ steps.package.outputs.source_name }}"
+          tag="v${version}-linux"
+          title="Tekzite Browser v${version} Linux"
+          notes_file="$(mktemp)"
+          cat > "$notes_file" <<'EOF'
+          Native Linux release of Tekzite Browser.
+
+          Highlights:
+          - Chromium headless + CDP software compositor
+          - WM-managed frameless Linux window with working keyboard ownership
+          - X11/XWayland-compatible title-bar removal without override-redirect focus breakage
+          - Linux process/socket ownership integration for Connection Forensics
+          - Standalone x86_64 executable package plus source archive and SHA-256 checksums
+
+          Tested through the full regression suite, Linux environment doctor,
+          real Chromium/CDP smoke test, executable build, and packaged compositor smoke test.
+          EOF
+          git tag -f "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag" --force
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${name}.tar.gz#Linux x86_64" "${source_name}.tar.gz#Linux source" SHA256SUMS-Linux.txt --clobber
+            gh release edit "$tag" --title "$title" --notes-file "$notes_file"
+          else
+            gh release create "$tag" "${name}.tar.gz#Linux x86_64" "${source_name}.tar.gz#Linux source" SHA256SUMS-Linux.txt \
+              --target "$GITHUB_SHA" --title "$title" --notes-file "$notes_file"
+          fi
