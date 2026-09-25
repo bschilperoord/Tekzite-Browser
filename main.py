@@ -2247,7 +2247,9 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_handle = None
         self._google_auth_return_url = None
         self._google_auth_source_url = None
+        self._google_auth_return_tab_id = None
         self._google_auth_refresh_pending_url = None
+        self._google_auth_refresh_pending_tab_id = None
         self.preferences = load_preferences()
         if not self._private_mode and self.preferences.get("privacy_lockdown", True):
             # Privacy Lockdown never points Chromium at a persistent profile.
@@ -4840,6 +4842,10 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_handoff_active = True
         self._google_auth_return_url = return_url
         self._google_auth_source_url = str(url or "")
+        # Remember the exact Tekzite tab that initiated Google sign-in. The
+        # external Chromium window can outlive focus changes in Tekzite, so the
+        # authenticated return must not accidentally reload a different tab.
+        self._google_auth_return_tab_id = tab.get("id")
         self._suspend_chromium_for_external_auth()
 
         for item in self.tabs:
@@ -5017,11 +5023,33 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_success_future = None
         self._google_auth_close_future = None
         return_url = str(getattr(self, "_google_auth_return_url", "") or "")
+        return_tab_id = getattr(self, "_google_auth_return_tab_id", None)
         self._google_auth_return_url = None
         self._google_auth_source_url = None
-        tab = self._active_tab()
+        self._google_auth_return_tab_id = None
+
+        tab = next(
+            (item for item in self.tabs if item.get("id") == return_tab_id),
+            None,
+        )
         if tab is None:
+            tab = self._active_tab()
+        if tab is None:
+            self._google_auth_refresh_pending_url = None
+            self._google_auth_refresh_pending_tab_id = None
             return
+
+        # Restore the exact tab that initiated the Google/YouTube handoff before
+        # reopening Chromium. All embedded targets were retired for auth, so this
+        # is a logical UI selection only and cannot race a stale target switch.
+        if tab.get("id") != self.active_tab_id:
+            self._capture_active_tab_state()
+            self.active_tab_id = tab.get("id")
+            self.history = list(tab.get("history") or [])
+            tab["history"] = self.history
+            self.history_index = int(tab.get("history_index", -1))
+            self.update_history_buttons()
+
         if return_url:
             tab["url"] = return_url
             tab["title"] = self._tab_title_for_url(return_url)
@@ -5030,24 +5058,34 @@ class BrowserApp(BrowserFeatures):
             tab["sleeping"] = False
             tab["restore_pending"] = False
             self._google_auth_refresh_pending_url = return_url
+            self._google_auth_refresh_pending_tab_id = tab.get("id")
             self.url_var.set(return_url)
             self._refresh_tab_strip()
-            self.status_var.set("Returning from Google sign-in…")
+            self.status_var.set("Google sign-in complete; refreshing YouTube in Tekzite…")
+            # This first navigation reopens embedded Chromium only after the
+            # external auth window has closed and released the shared profile.
             self.navigate_to(return_url, add_history=False, reuse_existing=False)
         else:
             self._google_auth_refresh_pending_url = None
+            self._google_auth_refresh_pending_tab_id = None
             self.status_var.set("Google sign-in window closed")
 
-    def _refresh_after_google_auth(self, generation, target_id, expected_url):
-        """Reload the returned page once after Chromium has reopened the profile."""
+    def _refresh_after_google_auth(self, generation, target_id, expected_url, tab_id=None):
+        """Force one authenticated reload after Chromium has reopened the profile."""
         if generation != self._navigation_generation:
             return
-        tab = self._active_tab()
-        if tab is None or tab.get("chromium_target_id") != target_id:
+        expected_tab_id = tab_id if tab_id is not None else self.active_tab_id
+        tab = next(
+            (item for item in self.tabs if item.get("id") == expected_tab_id),
+            None,
+        )
+        if tab is None or tab.get("id") != self.active_tab_id:
+            return
+        if tab.get("chromium_target_id") != target_id:
             return
         if self._canonical_tab_url(tab.get("url")) != self._canonical_tab_url(expected_url):
             return
-        self.status_var.set("Applying Google sign-in session…")
+        self.status_var.set("Applying Google sign-in session; refreshing page…")
         self.navigate_to(expected_url, add_history=False, reuse_existing=False)
 
     def _poll_one_tab_state(self, tab_id, target_id, include_favicon=False):
@@ -9027,12 +9065,24 @@ class BrowserApp(BrowserFeatures):
                 self._refresh_tab_strip()
             self._schedule_chromium_zoom_apply(all_tabs=True)
             pending_auth_refresh = str(getattr(self, "_google_auth_refresh_pending_url", "") or "")
+            pending_auth_tab_id = getattr(self, "_google_auth_refresh_pending_tab_id", None)
             if (pending_auth_refresh and
+                    pending_auth_tab_id == self.active_tab_id and
                     self._canonical_tab_url(pending_auth_refresh) == self._canonical_tab_url(url)):
                 self._google_auth_refresh_pending_url = None
+                self._google_auth_refresh_pending_tab_id = None
                 try:
-                    self.root.after(650, self._refresh_after_google_auth,
-                                    generation, session.get("target_id"), url)
+                    # Reopen with the authenticated profile, then issue one
+                    # explicit reload after the page target has settled. This
+                    # guarantees YouTube visibly reflects the completed login.
+                    self.root.after(
+                        650,
+                        self._refresh_after_google_auth,
+                        generation,
+                        session.get("target_id"),
+                        url,
+                        pending_auth_tab_id,
+                    )
                 except Exception:
                     pass
             if self._use_chromium_software_surface_for_url(url):
