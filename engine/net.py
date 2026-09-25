@@ -6157,6 +6157,39 @@ def _standalone_auth_window_snapshot(handle):
         return []
 
 
+def _auth_window_is_on_return_site(handle):
+    """Return True when the live auth window is visibly back on YouTube.
+
+    Unlike _auth_window_title_has_returned(), this helper does not require a
+    prior non-YouTube title. It is used only when the shared profile was already
+    authenticated before the handoff, where an instant Google redirect can make
+    the intermediate account page too fast to observe.
+    """
+    if not isinstance(handle, dict):
+        return False
+    return_url = str(handle.get("return_url") or "")
+    try:
+        host = (urlsplit(return_url).hostname or "").lower().removeprefix("www.")
+    except Exception:
+        return False
+    if host not in {"youtube.com", "music.youtube.com"}:
+        return False
+
+    for row in _standalone_auth_window_snapshot(handle):
+        raw_title = str(row.get("title") or "").strip()
+        if "youtube" not in raw_title.casefold():
+            continue
+        window_id = int(row.get("hwnd") or row.get("xid") or 0)
+        handle["google_auth_return_window_id"] = window_id
+        if row.get("hwnd"):
+            handle["google_auth_return_hwnd"] = int(row.get("hwnd") or 0)
+        if row.get("xid"):
+            handle["google_auth_return_xid"] = int(row.get("xid") or 0)
+        handle["google_auth_return_title"] = raw_title
+        return True
+    return False
+
+
 def _auth_window_title_has_returned(handle):
     """Treat YouTube as complete only after the auth window first leaves it.
 
@@ -6375,9 +6408,18 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         handle["google_auth_cookie_change_at"] = None
         return False
 
-    # If this profile was already authenticated before the handoff, a genuine
-    # leave-and-return cycle is sufficient. No cookie delta is expected.
-    if baseline_authenticated and returned:
+    # Already-authenticated profiles can skip the visible Google page entirely:
+    # Chromium may redirect so quickly that the window's first observable title
+    # is already YouTube. In that case the authenticated baseline + current
+    # authenticated profile + live YouTube window are sufficient proof. This
+    # fast path is deliberately unavailable to previously anonymous profiles.
+    direct_authenticated_return = False
+    if baseline_authenticated and not returned:
+        direct_authenticated_return = _auth_window_is_on_return_site(handle)
+        if direct_authenticated_return:
+            handle["google_auth_return_observed"] = True
+
+    if baseline_authenticated and (returned or direct_authenticated_return):
         signal = (
             "already-authenticated-return",
             str(handle.get("google_auth_return_title") or ""),
