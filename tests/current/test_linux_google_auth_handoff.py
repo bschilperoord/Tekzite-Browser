@@ -138,6 +138,38 @@ def test_linux_youtube_return_without_auth_cookie_does_not_complete(monkeypatch)
     assert handle["google_auth_success_signal"] is None
 
 
+def test_linux_already_authenticated_youtube_completes_without_intermediate_title(monkeypatch):
+    authenticated = {(".google.com", "SID"): "existing-auth"}
+    handle = {
+        "profile": "/tmp/tekzite-profile",
+        "return_url": "https://www.youtube.com/",
+        "url": "https://accounts.google.com/signin/v2/identifier",
+        "google_auth_cookie_baseline": dict(authenticated),
+        "google_auth_window_left_return_site": False,
+    }
+    monkeypatch.setattr(
+        net,
+        "_standalone_auth_window_snapshot",
+        lambda _handle: [{
+            "xid": 0x1234,
+            "pid": 4321,
+            "class": "X11",
+            "title": "YouTube",
+        }],
+    )
+    monkeypatch.setattr(
+        net,
+        "_snapshot_google_auth_cookie_state",
+        lambda _profile: dict(authenticated),
+    )
+    monkeypatch.setattr(net, "_auth_navigation_has_returned", lambda _handle: False)
+
+    assert net.standalone_google_auth_succeeded(handle) is True
+    assert handle["google_auth_success_signal"][0] == "already-authenticated-return"
+    assert handle["google_auth_return_xid"] == 0x1234
+    assert handle["google_auth_return_title"] == "YouTube"
+
+
 def test_linux_authenticated_cookie_then_youtube_return_completes(monkeypatch):
     current = {(".google.com", "SID"): "new-auth"}
     handle = {
