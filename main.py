@@ -1955,6 +1955,15 @@ class BrowserApp(BrowserFeatures):
                 ctypes.c_int,
             ]
             x11.XChangeProperty.restype = ctypes.c_int
+            x11.XQueryTree.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.POINTER(ctypes.c_ulong)),
+                ctypes.POINTER(ctypes.c_uint),
+            ]
+            x11.XQueryTree.restype = ctypes.c_int
+            x11.XFree.argtypes = [ctypes.c_void_p]
+            x11.XFree.restype = ctypes.c_int
             x11.XFlush.argtypes = [ctypes.c_void_p]
             x11.XFlush.restype = ctypes.c_int
 
@@ -1973,10 +1982,41 @@ class BrowserApp(BrowserFeatures):
             # so writing the property only to winfo_id() is not sufficient.
             # Apply the same Motif hint to every relevant managed XID.
             xids = set()
+            client_xid = 0
             try:
-                xids.add(int(win.winfo_id()))
+                client_xid = int(win.winfo_id())
+                if client_xid:
+                    xids.add(client_xid)
             except Exception:
                 pass
+
+            # Tk/X11 normally creates an extra wrapper window around the widget
+            # XID. The window manager decorates that wrapper, not necessarily the
+            # inner winfo_id(). Ask X11 directly for the real parent before the
+            # first map and hint that window too.
+            if client_xid:
+                try:
+                    root_ret = ctypes.c_ulong()
+                    parent_ret = ctypes.c_ulong()
+                    children_ret = ctypes.POINTER(ctypes.c_ulong)()
+                    child_count = ctypes.c_uint()
+                    if x11.XQueryTree(
+                        display,
+                        ctypes.c_ulong(client_xid),
+                        ctypes.byref(root_ret),
+                        ctypes.byref(parent_ret),
+                        ctypes.byref(children_ret),
+                        ctypes.byref(child_count),
+                    ):
+                        parent_xid = int(parent_ret.value or 0)
+                        if parent_xid and parent_xid != int(root_ret.value or 0):
+                            xids.add(parent_xid)
+                    if children_ret:
+                        x11.XFree(ctypes.cast(children_ret, ctypes.c_void_p))
+                except Exception:
+                    pass
+
+            # Keep wm frame as a mapped-window fallback for reparenting WMs.
             try:
                 frame_id = win.frame()
                 if isinstance(frame_id, str):
