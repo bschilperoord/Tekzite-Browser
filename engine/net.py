@@ -6319,16 +6319,32 @@ def _request_windows_window_close(pids, *, synchronous: bool = False, system_clo
         return []
 
 
+def _request_linux_process_terminate(pids):
+    """Ask only selected Linux Chromium processes to terminate cooperatively."""
+    requested = []
+    for pid in sorted({int(pid) for pid in (pids or []) if int(pid or 0) > 0}):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            requested.append(pid)
+        except ProcessLookupError:
+            continue
+        except Exception:
+            continue
+    return requested
+
+
 def close_standalone_auth_chromium(handle, force: bool = False):
     """Close the standalone auth browser without dirtying Chromium's profile.
 
-    ``force`` now means a stronger *cooperative* close (SC_CLOSE/WM_CLOSE with a
-    timeout), not ``taskkill /F``.  A forced process termination was the reason
-    Chromium later displayed "wasn't shut down correctly" and offered to
-    restore pages after a successful Google login.
+    Windows uses cooperative window-close messages. Linux uses SIGTERM against
+    only Chromium processes verified to own Tekzite's exact shared profile.
+    ``force`` means retry/wait more aggressively, never SIGKILL/taskkill.
     """
-    if not isinstance(handle, dict) or os.name != "nt":
+    if not isinstance(handle, dict):
         return False
+    if os.name != "nt" and not sys.platform.startswith("linux"):
+        return False
+
     pids = {
         int(pid) for pid in (handle.get("browser_pids") or [])
         if int(pid or 0) > 0
@@ -6342,29 +6358,35 @@ def close_standalone_auth_chromium(handle, force: bool = False):
     launch_pid = int(handle.get("launch_pid") or 0)
     if launch_pid:
         pids.add(launch_pid)
-
     handle["browser_pids"] = sorted(pids)
 
-    # Prefer the exact visible HWND captured for this auth launch. This avoids
-    # depending on Chromium's process model after account redirects and makes
-    # the close target identical to the window the user sees on screen.
-    windows = _standalone_auth_window_snapshot(handle)
-    hwnds = [
-        int(row.get("hwnd") or 0) for row in windows
-        if int(row.get("hwnd") or 0) > 0
-    ]
-    if not hwnds:
+    closed = []
+    if os.name == "nt":
+        windows = _standalone_auth_window_snapshot(handle)
         hwnds = [
-            int(hwnd) for hwnd in (handle.get("auth_hwnds") or [])
-            if int(hwnd or 0) > 0
+            int(row.get("hwnd") or 0) for row in windows
+            if int(row.get("hwnd") or 0) > 0
         ]
-    closed = _request_windows_hwnd_close(
-        hwnds, synchronous=bool(force), system_close=bool(force)
-    ) if hwnds else []
-    if not closed and pids:
-        closed = _request_windows_window_close(
-            pids, synchronous=bool(force), system_close=bool(force)
-        )
+        if not hwnds:
+            hwnds = [
+                int(hwnd) for hwnd in (handle.get("auth_hwnds") or [])
+                if int(hwnd or 0) > 0
+            ]
+        closed = _request_windows_hwnd_close(
+            hwnds, synchronous=bool(force), system_close=bool(force)
+        ) if hwnds else []
+        if not closed and pids:
+            closed = _request_windows_window_close(
+                pids, synchronous=bool(force), system_close=bool(force)
+            )
+    else:
+        # Never signal unrelated browser sessions. Re-derive the exact current
+        # Tekzite profile owners from /proc immediately before closing.
+        verified = set(_profile_chromium_pids(profile)) if profile else set()
+        if launch_pid and _pid_is_alive(launch_pid):
+            verified.add(launch_pid)
+        closed = _request_linux_process_terminate(verified)
+
     if not closed:
         return False
 
@@ -6372,8 +6394,6 @@ def close_standalone_auth_chromium(handle, force: bool = False):
     handle.setdefault("auto_close_requested_at", time.monotonic())
     if force:
         handle["auto_close_cooperative_escalated"] = True
-        # Give Chromium a short bounded interval to flush cookies/preferences
-        # and release the profile after the synchronous close request.
         deadline = time.monotonic() + 2.4
         while time.monotonic() < deadline:
             try:
@@ -6449,16 +6469,19 @@ def _close_embedded_chromium_cleanly_for_auth_unlocked(timeout: float = 6.0):
             _close_embedded_chromium_unlocked(clear_profile=False)
             return True
 
-        if os.name == "nt" and time.monotonic() >= native_retry_at:
+        if time.monotonic() >= native_retry_at:
             retry_pids = list(live_profile_pids)
             try:
                 if process_alive and getattr(process, "pid", None):
                     retry_pids.append(int(process.pid))
             except Exception:
                 pass
-            _request_windows_window_close(
-                retry_pids, synchronous=True, system_close=True
-            )
+            if os.name == "nt":
+                _request_windows_window_close(
+                    retry_pids, synchronous=True, system_close=True
+                )
+            elif sys.platform.startswith("linux"):
+                _request_linux_process_terminate(retry_pids)
             native_retry_at = time.monotonic() + 1.8
         time.sleep(0.07)
 
