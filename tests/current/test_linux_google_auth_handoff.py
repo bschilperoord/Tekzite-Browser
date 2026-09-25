@@ -171,3 +171,11 @@ def test_google_auth_close_reopens_and_refreshes_original_youtube_tab():
     assert "if not released:" in release
     assert "self._finish_google_auth_handoff" in release
     assert release.index("if not released:") < release.index("self._finish_google_auth_handoff")
+
+
+def test_linux_google_auth_prefers_xwayland_when_display_is_available():
+    source = inspect.getsource(net.start_standalone_auth_chromium)
+    assert 'sys.platform.startswith("linux") and os.environ.get("DISPLAY")' in source
+    assert 'command.append("--ozone-platform=x11")' in source
+    assert '"auth_window_backend": (' in source
+    assert '"x11"' in source
