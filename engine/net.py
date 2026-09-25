@@ -6568,9 +6568,9 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
     handle tracks the actual profile-owning browser PID(s), so a launcher handoff
     cannot make Tekzite restart its embedded helper while auth is still open.
     """
-    if os.name != "nt":
+    if os.name != "nt" and not sys.platform.startswith("linux"):
         raise RuntimeError(
-            "Standalone authentication handoff is currently implemented for Windows"
+            "Standalone authentication handoff is supported on Windows and Linux"
         )
 
     target_url = str(url or "").strip()
@@ -6629,8 +6629,9 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
             startupinfo=None,
+            start_new_session=sys.platform.startswith("linux"),
         )
 
         # Chromium may keep this launcher as the browser process or hand the
