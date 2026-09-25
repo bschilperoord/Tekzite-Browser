@@ -161,3 +161,14 @@ def test_linux_root_installs_motif_hint_before_deiconify():
                    MAIN.index("# Shell activation must win over session restore.")]
     assert startup.index("self._apply_linux_managed_frameless(self.root)") < startup.index("self.root.deiconify()")
     assert "self.root.after(40" in startup
+
+
+def test_linux_frameless_hint_queries_tk_x11_wrapper_parent():
+    start = MAIN.index("def _apply_linux_managed_frameless")
+    end = MAIN.index("def _write_stability_log", start)
+    block = MAIN[start:end]
+    assert "x11.XQueryTree.argtypes" in block
+    assert "client_xid = int(win.winfo_id())" in block
+    assert "x11.XQueryTree(" in block
+    assert "parent_xid = int(parent_ret.value or 0)" in block
+    assert "xids.add(parent_xid)" in block
