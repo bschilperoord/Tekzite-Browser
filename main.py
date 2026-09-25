@@ -4825,7 +4825,10 @@ class BrowserApp(BrowserFeatures):
         self.root.after(40, self._poll_google_auth_launch)
 
     def _maybe_start_google_auth_handoff(self, url, previous_url="", tab=None):
-        if os.name != "nt" or getattr(self, "_google_auth_handoff_active", False):
+        if (
+            (os.name != "nt" and not sys.platform.startswith("linux"))
+            or getattr(self, "_google_auth_handoff_active", False)
+        ):
             return False
         if not self._is_google_auth_url(url):
             return False
@@ -4864,9 +4867,9 @@ class BrowserApp(BrowserFeatures):
         self.status_var.set("Google sign-in: complete authentication in Chromium; Tekzite will close it automatically")
         self._refresh_tab_strip()
 
-        # Let Tk finish destroying/hiding every native DWM surface before the
-        # worker closes Chromium. This avoids a source-HWND teardown racing
-        # callbacks still running on the UI thread.
+        # Let Tk finish quiescing the embedded Chromium presentation before the
+        # worker closes Chromium and hands the shared profile to the visible
+        # authentication window.
         try:
             self.root.after(90, self._launch_google_auth_worker, launch_url, return_url)
         except Exception:
