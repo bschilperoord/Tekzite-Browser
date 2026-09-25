@@ -5110,6 +5110,198 @@ def _apply_privacy_profile_preferences(profile_dir):
         pass
 
 
+_LINUX_GPU_VENDOR_NAMES = {
+    "0x1002": "AMD",
+    "0x8086": "Intel",
+    "0x10de": "NVIDIA",
+}
+
+
+@lru_cache(maxsize=8)
+def _linux_gpu_inventory(sysfs_root="/sys/class/drm", dev_root="/dev"):
+    """Return a small, privacy-safe Linux GPU inventory for launch decisions."""
+    if not sys.platform.startswith("linux"):
+        return {
+            "available": False, "vendors": [], "render_nodes": [],
+            "nvidia_device_nodes": [],
+        }
+    vendors = set()
+    sysfs = Path(sysfs_root)
+    try:
+        vendor_files = list(sysfs.glob("card*/device/vendor"))
+        vendor_files += list(sysfs.glob("renderD*/device/vendor"))
+    except Exception:
+        vendor_files = []
+    for vendor_file in vendor_files:
+        try:
+            raw = vendor_file.read_text(encoding="ascii", errors="ignore").strip().lower()
+        except Exception:
+            continue
+        name = _LINUX_GPU_VENDOR_NAMES.get(raw)
+        if name:
+            vendors.add(name)
+
+    dev = Path(dev_root)
+    try:
+        render_nodes = sorted(str(path) for path in (dev / "dri").glob("renderD*") if path.exists())
+    except Exception:
+        render_nodes = []
+    nvidia_device_nodes = []
+    for name in ("nvidiactl", "nvidia0", "nvidia-modeset"):
+        try:
+            path = dev / name
+            if path.exists():
+                nvidia_device_nodes.append(str(path))
+        except Exception:
+            pass
+    if nvidia_device_nodes:
+        vendors.add("NVIDIA")
+    return {
+        "available": bool(render_nodes or nvidia_device_nodes),
+        "vendors": sorted(vendors),
+        "render_nodes": render_nodes,
+        "nvidia_device_nodes": nvidia_device_nodes,
+    }
+
+
+@lru_cache(maxsize=4)
+def _linux_vaapi_available(render_node=""):
+    """Check VA-API only when libva-utils is installed; never make it a dependency."""
+    if not sys.platform.startswith("linux"):
+        return False
+    vainfo = shutil.which("vainfo")
+    if not vainfo:
+        return False
+    command = [vainfo]
+    if render_node:
+        command.extend(["--display", "drm", "--device", str(render_node)])
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.5,
+            check=False,
+        )
+        return int(result.returncode) == 0
+    except Exception:
+        return False
+
+
+def _linux_gpu_launch_policy(attempt=1, inventory=None, vaapi_ok=None):
+    """Choose a vendor-neutral GPU launch policy with an automatic safe fallback.
+
+    Attempt 1 enables Chromium GPU rasterization when Linux exposes a render
+    device. Attempt 2 deliberately disables the GPU, so a broken driver/ANGLE
+    stack cannot prevent Tekzite from starting. No blocklist or driver
+    workaround is bypassed automatically.
+    """
+    inventory = dict(inventory or _linux_gpu_inventory())
+    mode = str(os.environ.get("TEKZITE_LINUX_GPU", "auto") or "auto").strip().lower()
+    software_requested = mode in {"0", "off", "false", "software", "cpu"}
+    fallback = int(attempt or 1) > 1
+    hardware_requested = bool(inventory.get("available")) and not software_requested and not fallback
+    flags = []
+    video_decode_requested = False
+    video_mode = str(os.environ.get("TEKZITE_LINUX_HW_VIDEO", "auto") or "auto").strip().lower()
+
+    if hardware_requested:
+        # Do not force GLX/EGL/Vulkan/ANGLE selection here. Chromium knows the
+        # distro/driver stack better than Tekzite and can retain its blocklist
+        # and bug workarounds. These switches request acceleration without
+        # overriding those safety decisions.
+        flags.extend(["--enable-gpu-rasterization", "--enable-zero-copy"])
+
+        vendors = set(inventory.get("vendors") or [])
+        video_forced = video_mode in {"1", "on", "true", "force"}
+        video_disabled = video_mode in {"0", "off", "false", "software", "cpu"}
+        allow_auto_vaapi = bool(vendors.intersection({"AMD", "Intel"}))
+        if not video_disabled and (video_forced or allow_auto_vaapi):
+            if vaapi_ok is None:
+                render_nodes = list(inventory.get("render_nodes") or [])
+                vaapi_ok = _linux_vaapi_available(render_nodes[0] if render_nodes else "")
+            if vaapi_ok:
+                video_features = [
+                    "AcceleratedVideoDecodeLinuxGL",
+                    "AcceleratedVideoDecodeLinuxZeroCopyGL",
+                ]
+                # Chromium documents NVIDIA VA-API as an experimental path.
+                # Keep it off in auto mode, but allow an explicit user opt-in.
+                if "NVIDIA" in vendors and video_forced:
+                    video_features.append("VaapiOnNvidiaGPUs")
+                flags.extend([
+                    "--use-gl=angle",
+                    "--use-angle=gl",
+                    "--enable-features=" + ",".join(video_features),
+                ])
+                video_decode_requested = True
+    else:
+        # This is the guaranteed recovery path if a Linux GPU process/driver
+        # prevents Chromium from starting.
+        flags.append("--disable-gpu")
+
+    return {
+        "mode": mode,
+        "hardware_requested": hardware_requested,
+        "fallback": fallback,
+        "vendors": list(inventory.get("vendors") or []),
+        "render_nodes": list(inventory.get("render_nodes") or []),
+        "nvidia_device_nodes": list(inventory.get("nvidia_device_nodes") or []),
+        "video_decode_requested": video_decode_requested,
+        "flags": flags,
+    }
+
+
+def _probe_chromium_gpu_info(browser_ws_url):
+    """Read Chromium's runtime GPU report without making startup depend on it."""
+    if not browser_ws_url:
+        return {}
+    ws = None
+    try:
+        ws = _open_devtools_websocket(str(browser_ws_url), timeout=2)
+        result = _cdp_call(ws, "SystemInfo.getInfo", {}, timeout=2.0)
+        gpu = dict((result or {}).get("gpu") or {})
+        devices = []
+        for row in list(gpu.get("devices") or [])[:8]:
+            if not isinstance(row, dict):
+                continue
+            devices.append({
+                "vendor_id": row.get("vendorId"),
+                "device_id": row.get("deviceId"),
+                "vendor_string": str(row.get("vendorString") or "")[:160],
+                "device_string": str(row.get("deviceString") or "")[:240],
+                "driver_vendor": str(row.get("driverVendor") or "")[:160],
+                "driver_version": str(row.get("driverVersion") or "")[:160],
+            })
+        aux = dict(gpu.get("auxAttributes") or {})
+        renderer = str(
+            aux.get("glRenderer")
+            or aux.get("gl_renderer")
+            or aux.get("renderer")
+            or ""
+        )[:500]
+        feature_status = dict(gpu.get("featureStatus") or {})
+        renderer_lower = renderer.lower()
+        software_tokens = ("swiftshader", "llvmpipe", "lavapipe", "software rasterizer")
+        software_renderer = any(token in renderer_lower for token in software_tokens)
+        hardware_active = bool((renderer or devices) and not software_renderer)
+        return {
+            "hardware_active": hardware_active,
+            "software_renderer": software_renderer,
+            "renderer": renderer,
+            "devices": devices,
+            "feature_status": feature_status,
+        }
+    except Exception as exc:
+        return {"probe_error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+
 def _chromium_launch_target_args(launch_url=None, platform_name=None):
     """Return the Chromium argument that creates Tekzite's initial page target.
 
@@ -5264,19 +5456,27 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     f"--window-size={launch_w},{launch_h}",
                 ]
                 if os.name != "nt":
-                    # Linux Preview presents Chromium through Tekzite's existing
-                    # CDP software compositor. Modern headless Chromium needs no
-                    # X11/XWayland child-window reparenting and therefore works
-                    # under native Wayland as well as X11. Keep Chromium's sandbox
-                    # for normal desktop users. Root-only CI/container smoke tests
-                    # cannot start Chromium's sandbox, so opt out only in that
-                    # exceptional execution context.
+                    # Linux presents Chromium through Tekzite's CDP compositor,
+                    # but page raster/compositing may still run on the real GPU.
+                    # The first attempt requests a vendor-neutral accelerated
+                    # path; the second attempt is an explicit software fallback.
+                    gpu_policy = _linux_gpu_launch_policy(attempt=attempt)
                     command.extend(["--headless=new", "--disable-gpu-vsync"])
+                    command.extend(gpu_policy["flags"])
                     geteuid = getattr(os, "geteuid", None)
                     if callable(geteuid) and int(geteuid()) == 0:
                         command.append("--no-sandbox")
                         _CHROMIUM_LAUNCH_DEBUG["linux_root_no_sandbox"] = True
-                    _CHROMIUM_LAUNCH_DEBUG["linux_headless_software_backend"] = True
+                    _CHROMIUM_LAUNCH_DEBUG.update({
+                        "linux_presentation_backend": "cdp-software",
+                        "linux_gpu_mode": gpu_policy["mode"],
+                        "linux_gpu_vendors": list(gpu_policy["vendors"]),
+                        "linux_gpu_render_nodes": list(gpu_policy["render_nodes"]),
+                        "linux_gpu_hardware_requested": bool(gpu_policy["hardware_requested"]),
+                        "linux_gpu_software_fallback": bool(gpu_policy["fallback"]),
+                        "linux_hw_video_requested": bool(gpu_policy["video_decode_requested"]),
+                        "linux_gpu_flags": list(gpu_policy["flags"]),
+                    })
                 # Keep the initial page target platform-correct. In particular,
                 # Linux headless Chromium gets a positional URL instead of
                 # --app=..., which avoids service-worker-only DevTools target lists
@@ -5365,6 +5565,14 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                 })
                 _CHROMIUM_LAUNCH_DEBUG["recovered"] = bool(attempt > 1)
                 _CHROMIUM_LAUNCH_DEBUG["last_error"] = None
+                if os.name != "nt":
+                    gpu_runtime = _probe_chromium_gpu_info(_EDGE_SESSION.get("browser_ws_url"))
+                    _EDGE_SESSION["gpu_info"] = gpu_runtime
+                    _EDGE_SESSION["gpu_policy"] = dict(gpu_policy)
+                    _CHROMIUM_LAUNCH_DEBUG["linux_gpu_runtime"] = gpu_runtime
+                    _CHROMIUM_LAUNCH_DEBUG["linux_gpu_hardware_active"] = bool(
+                        gpu_runtime.get("hardware_active")
+                    )
                 if os.name == "nt":
                     try:
                         window_find_started = time.monotonic()
