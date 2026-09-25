@@ -6134,13 +6134,15 @@ def _standalone_auth_window_snapshot(handle):
 
 
 def _auth_window_title_has_returned(handle):
-    """Use the live auth-window title as an immediate YouTube return signal.
+    """Treat YouTube as complete only after the auth window first leaves it.
 
-    Chromium can postpone History/WAL writes for seconds even though the visible
-    tab has already reached YouTube.  The Google account page itself does not
-    carry a YouTube window title, so for youtube.com returns the live HWND title
-    is a safe, zero-disk-lag completion signal.  Other sites continue using the
-    cookie/history fallbacks.
+    A freshly launched Chromium auth window can briefly inherit/render the
+    YouTube page before Google's sign-in redirect takes over. Reading that first
+    title as success closes the window before the user can log in. Arm the live
+    title detector only after this exact auth window has visibly entered a
+    non-YouTube state; a later return to YouTube is then authoritative.
+    Cookie/history signals remain independent fallbacks, including for very fast
+    already-authenticated redirects where no intermediate title is observable.
     """
     if not isinstance(handle, dict):
         return False
@@ -6151,26 +6153,40 @@ def _auth_window_title_has_returned(handle):
         return False
     if host not in {"youtube.com", "music.youtube.com"}:
         return False
-    launched_at = float(handle.get("launched_monotonic") or 0.0)
-    # v10.5.69: the live HWND belongs to the dedicated auth launch, so once its
-    # title has actually become YouTube there is no benefit in holding the
-    # authenticated window on screen for nearly half a second. Keep only a
-    # tiny startup guard against a transient title inherited during window
-    # creation.
-    if launched_at and (time.monotonic() - launched_at) < 0.12:
-        return False
+
     windows = _standalone_auth_window_snapshot(handle)
+    saw_non_youtube = bool(handle.get("google_auth_window_left_return_site"))
+    youtube_rows = []
+
     for row in windows:
-        title = str(row.get("title") or "").strip().casefold()
+        raw_title = str(row.get("title") or "").strip()
+        title = raw_title.casefold()
+        if not title:
+            continue
         if "youtube" in title:
-            window_id = int(row.get("hwnd") or row.get("xid") or 0)
-            handle["google_auth_return_window_id"] = window_id
-            if row.get("hwnd"):
-                handle["google_auth_return_hwnd"] = int(row.get("hwnd") or 0)
-            if row.get("xid"):
-                handle["google_auth_return_xid"] = int(row.get("xid") or 0)
-            handle["google_auth_return_title"] = str(row.get("title") or "")
-            return True
+            youtube_rows.append(row)
+            continue
+
+        # Any meaningful non-YouTube title proves the standalone window has
+        # progressed into the Google/account flow (or another intermediate
+        # page). Only after this transition may a YouTube title mean "returned".
+        saw_non_youtube = True
+        handle["google_auth_window_left_return_site"] = True
+        handle["google_auth_intermediate_title"] = raw_title
+
+    if not saw_non_youtube:
+        # Initial YouTube is just launch state, never authentication success.
+        return False
+
+    for row in youtube_rows:
+        window_id = int(row.get("hwnd") or row.get("xid") or 0)
+        handle["google_auth_return_window_id"] = window_id
+        if row.get("hwnd"):
+            handle["google_auth_return_hwnd"] = int(row.get("hwnd") or 0)
+        if row.get("xid"):
+            handle["google_auth_return_xid"] = int(row.get("xid") or 0)
+        handle["google_auth_return_title"] = str(row.get("title") or "")
+        return True
     return False
 
 
@@ -6867,6 +6883,8 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             "history_visit_baseline": tuple(history_visit_baseline) if history_visit_baseline else None,
             "google_auth_cookie_last_snapshot": dict(google_auth_cookie_baseline),
             "google_auth_cookie_change_at": None,
+            "google_auth_window_left_return_site": False,
+            "google_auth_intermediate_title": "",
             "auto_close_requested": False,
             "command_flags": [arg for arg in command[1:] if str(arg).startswith("--")],
             "remote_debugging": False,
