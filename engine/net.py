@@ -6645,9 +6645,19 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             "--disable-session-crashed-bubble",
             f"--window-position={x},{y}",
             f"--window-size={width},{height}",
-            "--new-window",
-            target_url,
         ]
+        if os.name == "nt":
+            # Windows Chromium can reuse an existing profile-owned browser
+            # process, so keep the explicit new-window request used by the
+            # established handoff path.
+            command.append("--new-window")
+        else:
+            # On Linux, forcing --new-window while starting a fresh profile
+            # owner can create a blank startup window plus a second auth window.
+            # Let the requested auth URL become the initial browser window.
+            command.append("--no-startup-window")
+            command.remove("--no-startup-window")
+        command.append(target_url)
         process = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
