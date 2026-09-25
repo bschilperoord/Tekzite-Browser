@@ -100,3 +100,41 @@ def test_auth_profile_release_wait_is_shared_across_platforms():
     assert "standalone_auth_chromium_running(handle)" in source
     assert "_profile_chromium_pids(profile)" in source
     assert "_profile_recovery_needed(profile)" in source
+
+
+def test_linux_auth_window_snapshot_uses_ewmh_title_and_pid():
+    source = inspect.getsource(net._linux_x11_auth_window_snapshot)
+    assert '"_NET_CLIENT_LIST"' in source
+    assert '"_NET_WM_PID"' in source
+    assert '"_NET_WM_NAME"' in source
+    assert '"UTF8_STRING"' in source
+    assert "handle[\"auth_xids\"]" in source
+
+
+def test_linux_youtube_window_title_completes_auth_immediately(monkeypatch):
+    handle = {
+        "profile": "/tmp/tekzite-profile",
+        "return_url": "https://www.youtube.com/",
+        "url": "https://accounts.google.com/signin/v2/identifier",
+        "launched_monotonic": 0.0,
+    }
+    monkeypatch.setattr(
+        net,
+        "_standalone_auth_window_snapshot",
+        lambda _handle: [{
+            "xid": 0x1234,
+            "pid": 4321,
+            "class": "X11",
+            "title": "YouTube",
+        }],
+    )
+    monkeypatch.setattr(
+        net,
+        "_snapshot_google_auth_cookie_state",
+        lambda profile: (_ for _ in ()).throw(AssertionError("disk fallback should not run")),
+    )
+
+    assert net.standalone_google_auth_succeeded(handle) is True
+    assert handle["google_auth_return_xid"] == 0x1234
+    assert handle["google_auth_return_title"] == "YouTube"
+    assert handle["google_auth_success_signal"][0] == "window"
