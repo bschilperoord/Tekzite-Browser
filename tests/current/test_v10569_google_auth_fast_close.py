@@ -6,10 +6,10 @@ import engine.net as net
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.80"  # sync_version updates this pin
+    assert main.BROWSER_VERSION == "10.5.80"
 
 
-def test_live_youtube_hwnd_succeeds_on_first_observation(monkeypatch):
+def test_live_youtube_return_needs_authenticated_cookie(monkeypatch):
     handle = {
         "profile": "profile",
         "return_url": "https://www.youtube.com/",
@@ -17,23 +17,34 @@ def test_live_youtube_hwnd_succeeds_on_first_observation(monkeypatch):
         "launched_monotonic": time.monotonic() - 1.0,
     }
     monkeypatch.setattr(net, "_auth_window_title_has_returned", lambda _handle: True)
-    handle["google_auth_return_hwnd"] = 4242
-    handle["google_auth_return_title"] = "YouTube - Chromium"
+    monkeypatch.setattr(net, "_auth_navigation_has_returned", lambda _handle: True)
+    monkeypatch.setattr(net, "_snapshot_google_auth_cookie_state", lambda _profile: {})
 
-    def disk_should_not_be_touched(_value):
-        raise AssertionError("first live-HWND success must not wait on disk fallbacks")
-
-    monkeypatch.setattr(net, "_snapshot_google_auth_cookie_state", disk_should_not_be_touched)
-    monkeypatch.setattr(net, "_auth_navigation_has_returned", disk_should_not_be_touched)
-
-    assert net.standalone_google_auth_succeeded(handle, 1.35)
-    assert handle["google_auth_success_signal"] == ("window", 4242, "YouTube - Chromium")
+    assert net.standalone_google_auth_succeeded(handle, 1.35) is False
 
 
-def test_live_return_startup_guard_is_short(monkeypatch):
+def test_new_authenticated_cookie_can_complete_after_return(monkeypatch):
+    baseline = {}
+    current = {(".google.com", "SID"): "new-cookie"}
+    handle = {
+        "profile": "profile",
+        "return_url": "https://www.youtube.com/",
+        "google_auth_cookie_baseline": baseline,
+        "launched_monotonic": time.monotonic() - 1.0,
+    }
+    monkeypatch.setattr(net, "_auth_window_title_has_returned", lambda _handle: True)
+    monkeypatch.setattr(net, "_auth_navigation_has_returned", lambda _handle: True)
+    monkeypatch.setattr(net, "_snapshot_google_auth_cookie_state", lambda _profile: dict(current))
+
+    assert net.standalone_google_auth_succeeded(handle, 1.35) is False
+    assert net.standalone_google_auth_succeeded(handle, 1.35) is True
+    assert handle["google_auth_success_signal"][0] == "authenticated-cookie"
+
+
+def test_initial_youtube_title_does_not_arm_completion(monkeypatch):
     handle = {
         "return_url": "https://www.youtube.com/",
-        "launched_monotonic": time.monotonic() - 0.2,
+        "google_auth_window_left_return_site": False,
     }
     monkeypatch.setattr(
         net,
@@ -45,7 +56,8 @@ def test_live_return_startup_guard_is_short(monkeypatch):
             "title": "YouTube - Chromium",
         }],
     )
-    assert net._auth_window_title_has_returned(handle)
+    assert net._auth_window_title_has_returned(handle) is False
+    assert handle.get("google_auth_window_left_return_site") is not True
 
 
 def test_auth_window_polling_uses_fast_live_hwnd_cadence():
@@ -55,27 +67,7 @@ def test_auth_window_polling_uses_fast_live_hwnd_cadence():
     assert "after(70, self._poll_google_auth_window)" in auth_poll
 
 
-def test_live_return_that_happens_during_disk_fallback_closes_same_cycle(monkeypatch):
-    handle = {
-        "profile": "profile",
-        "return_url": "https://www.youtube.com/",
-        "google_auth_cookie_baseline": {},
-        "launched_monotonic": time.monotonic() - 1.0,
-    }
-    calls = {"live": 0}
-
-    def live_return(_handle):
-        calls["live"] += 1
-        if calls["live"] >= 2:
-            _handle["google_auth_return_hwnd"] = 4343
-            _handle["google_auth_return_title"] = "YouTube - Chromium"
-            return True
-        return False
-
-    monkeypatch.setattr(net, "_auth_window_title_has_returned", live_return)
-    monkeypatch.setattr(net, "_snapshot_google_auth_cookie_state", lambda _profile: {})
-    monkeypatch.setattr(net, "_auth_navigation_has_returned", lambda _handle: False)
-
-    assert net.standalone_google_auth_succeeded(handle, 1.35)
-    assert calls["live"] == 2
-    assert handle["google_auth_success_signal"] == ("window", 4343, "YouTube - Chromium")
+def test_strong_auth_cookie_set_excludes_account_chooser_only_cookie():
+    assert "__Host-GAPS" in net._GOOGLE_AUTH_COOKIE_NAMES
+    assert "__Host-GAPS" not in net._GOOGLE_STRONG_AUTH_COOKIE_NAMES
+    assert "SID" in net._GOOGLE_STRONG_AUTH_COOKIE_NAMES
