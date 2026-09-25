@@ -138,3 +138,36 @@ def test_linux_youtube_window_title_completes_auth_immediately(monkeypatch):
     assert handle["google_auth_return_xid"] == 0x1234
     assert handle["google_auth_return_title"] == "YouTube"
     assert handle["google_auth_success_signal"][0] == "window"
+
+
+def test_google_auth_return_remembers_exact_tekzite_tab():
+    start = MAIN.index("def _maybe_start_google_auth_handoff")
+    end = MAIN.index("def _poll_google_auth_launch", start)
+    block = MAIN[start:end]
+    assert "self._google_auth_return_tab_id = tab.get(\"id\")" in block
+
+
+def test_google_auth_close_reopens_and_refreshes_original_youtube_tab():
+    finish = inspect.getsource(main.BrowserApp._finish_google_auth_handoff)
+    refresh = inspect.getsource(main.BrowserApp._refresh_after_google_auth)
+    poll = inspect.getsource(main.BrowserApp._poll_embedded_navigation)
+    release = inspect.getsource(main.BrowserApp._poll_google_auth_profile_release)
+
+    assert "return_tab_id = getattr(self, \"_google_auth_return_tab_id\", None)" in finish
+    assert "item.get(\"id\") == return_tab_id" in finish
+    assert "self.active_tab_id = tab.get(\"id\")" in finish
+    assert "Google sign-in complete; refreshing YouTube in Tekzite" in finish
+    assert "self.navigate_to(return_url, add_history=False, reuse_existing=False)" in finish
+
+    assert "pending_auth_tab_id == self.active_tab_id" in poll
+    assert "self._refresh_after_google_auth" in poll
+    assert "pending_auth_tab_id" in poll
+
+    assert "item.get(\"id\") == expected_tab_id" in refresh
+    assert "self.navigate_to(expected_url, add_history=False, reuse_existing=False)" in refresh
+
+    # The return path must start only after the external Chromium profile has
+    # been fully released.
+    assert "if not released:" in release
+    assert "self._finish_google_auth_handoff" in release
+    assert release.index("if not released:") < release.index("self._finish_google_auth_handoff")
