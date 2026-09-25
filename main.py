@@ -5231,6 +5231,22 @@ class BrowserApp(BrowserFeatures):
             self.navigate_to(value, add_history=True)
         return "break"
 
+    def _dismiss_active_popup_menu(self):
+        """Close any open Tekzite menu without consuming the caller's click."""
+        menu = getattr(self, "_active_popup_menu", None)
+        if not isinstance(menu, _AnimatedPopupMenu):
+            return False
+        try:
+            menu.dismiss(include_parent=True)
+            return True
+        except Exception:
+            try:
+                menu.dismiss(include_parent=False)
+                return True
+            except Exception:
+                self._active_popup_menu = None
+                return False
+
     def _make_modern_menu(self, parent=None, *, font_size=None):
         """Create Tekzite's animated rounded popup menu surface.
 
@@ -7593,6 +7609,11 @@ class BrowserApp(BrowserFeatures):
 
     def _dispatch_chromium_press_xy(self, x, y):
         """Send one left press in already-mapped Chromium page coordinates."""
+        # Chromium is not part of Tk's widget event tree, so Tk's global
+        # outside-click binding never sees a click on the webpage. Explicitly
+        # close an open Tekzite menu first, then continue forwarding the same
+        # physical click to Chromium.
+        self._dismiss_active_popup_menu()
         if not self._chromium_input_surface_active():
             return None
         # State matching also de-duplicates the native DWM fallback if the same
