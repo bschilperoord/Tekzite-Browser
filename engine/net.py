@@ -5686,6 +5686,30 @@ _GOOGLE_AUTH_COOKIE_NAMES = frozenset({
     "LOGIN_INFO", "__Host-GAPS",
 })
 
+# Cookies that are meaningful evidence of an authenticated Google/YouTube
+# session. __Host-GAPS is intentionally excluded because it can exist during
+# account-selection/sign-in flows without proving the user is signed in.
+_GOOGLE_STRONG_AUTH_COOKIE_NAMES = frozenset({
+    "SID", "HSID", "SSID", "APISID", "SAPISID", "LSID", "SIDCC",
+    "__Secure-1PSID", "__Secure-3PSID",
+    "__Secure-1PAPISID", "__Secure-3PAPISID",
+    "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+    "__Secure-1PSIDCC", "__Secure-3PSIDCC",
+    "__Secure-OSID", "__Host-1PLSID", "__Host-3PLSID",
+    "LOGIN_INFO",
+})
+
+
+def _google_auth_snapshot_has_authenticated_session(snapshot):
+    """Return True only when a cookie snapshot proves a signed-in session."""
+    if not isinstance(snapshot, dict) or not snapshot:
+        return False
+    return any(
+        str(key[1] if isinstance(key, tuple) and len(key) > 1 else "") in
+        _GOOGLE_STRONG_AUTH_COOKIE_NAMES
+        for key in snapshot
+    )
+
 
 def _google_cookie_db_candidates(profile):
     root = Path(str(profile or ""))
@@ -6306,12 +6330,16 @@ def _snapshot_google_auth_cookie_state(profile):
 
 
 def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
-    """Detect settled auth completion from the live HWND, then disk fallbacks.
+    """Require real authenticated profile state before declaring Google success.
 
-    The visible auth window is authoritative for YouTube: once its real Win32
-    title has returned to YouTube there is no reason to wait for Chromium to
-    flush History or Cookies. Cookie and History signals remain useful fallback
-    paths for other/older auth transitions.
+    A return to YouTube is only a navigation/phase signal. It is not proof that
+    the user signed in: Google can cancel, fail, or return an anonymous browser
+    to YouTube. Successful handoff therefore requires a strong authenticated
+    Google/YouTube cookie state in the shared Chromium profile.
+
+    If the profile was already authenticated before the handoff, a confirmed
+    return from the auth flow is enough. Otherwise at least one strong auth
+    cookie must be new or changed compared with the pre-login baseline.
     """
     if not isinstance(handle, dict):
         return False
@@ -6319,79 +6347,83 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     if not profile:
         return False
 
-    window_signal = None
-    if _auth_window_title_has_returned(handle):
-        window_signal = (
-            "window",
-            int(
-                handle.get("google_auth_return_window_id")
-                or handle.get("google_auth_return_hwnd")
-                or handle.get("google_auth_return_xid")
-                or 0
-            ),
-            str(handle.get("google_auth_return_title") or ""),
+    baseline = handle.get("google_auth_cookie_baseline") or {}
+    baseline_authenticated = _google_auth_snapshot_has_authenticated_session(baseline)
+
+    current = _snapshot_google_auth_cookie_state(profile)
+    current_authenticated = _google_auth_snapshot_has_authenticated_session(current)
+
+    changed_authenticated_cookie = False
+    if isinstance(current, dict) and current:
+        changed_authenticated_cookie = any(
+            key[1] in _GOOGLE_STRONG_AUTH_COOKIE_NAMES
+            and baseline.get(key) != value
+            for key, value in current.items()
+            if isinstance(key, tuple) and len(key) > 1
         )
 
-    # v10.5.69: the live returned HWND is already the strongest completion
-    # signal we have. It is the exact standalone auth window, it has left the
-    # Google account UI, and its visible title is now YouTube. Close on the
-    # first observation instead of forcing a second 0.55 s settle cycle. Disk
-    # based cookie/history signals keep their conservative settling below.
-    if window_signal is not None:
-        handle["google_auth_success_signal"] = window_signal
-        handle["google_auth_cookie_change_at"] = time.monotonic()
-        return True
+    window_returned = _auth_window_title_has_returned(handle)
+    navigation_returned = _auth_navigation_has_returned(handle)
+    returned = bool(window_returned or navigation_returned)
 
-    current = None
-    signal = None
-    if signal is None:
-        baseline = handle.get("google_auth_cookie_baseline") or {}
-        current = _snapshot_google_auth_cookie_state(profile)
-        cookie_signal = None
-        if current is not None and current:
-            changed = any(
-                baseline.get(key) != value
-                for key, value in current.items()
-                if key[1] in _GOOGLE_AUTH_COOKIE_NAMES
-            )
-            if changed:
-                cookie_signal = ("cookie", tuple(sorted(current.items())))
+    if returned:
+        handle["google_auth_return_observed"] = True
 
-        return_signal = None
-        if _auth_navigation_has_returned(handle):
-            return_signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
-        signal = return_signal or cookie_signal
-
-        # The title can flip to YouTube while a slower SQLite fallback is in
-        # progress. Re-sample the live HWND before yielding so that transition
-        # is closed in this same detector cycle rather than one poll later.
-        if signal is None and _auth_window_title_has_returned(handle):
-            live_signal = (
-                "window",
-                int(handle.get("google_auth_return_hwnd") or 0),
-                str(handle.get("google_auth_return_title") or ""),
-            )
-            handle["google_auth_success_signal"] = live_signal
-            handle["google_auth_cookie_change_at"] = time.monotonic()
-            return True
-
-    if signal is None:
+    # Returning to YouTube anonymously is never authentication success.
+    if not current_authenticated:
         handle["google_auth_success_signal"] = None
         handle["google_auth_cookie_change_at"] = None
         return False
+
+    # If this profile was already authenticated before the handoff, a genuine
+    # leave-and-return cycle is sufficient. No cookie delta is expected.
+    if baseline_authenticated and returned:
+        signal = (
+            "already-authenticated-return",
+            str(handle.get("google_auth_return_title") or ""),
+            tuple(handle.get("google_auth_return_visit") or ()),
+        )
+        handle["google_auth_success_signal"] = signal
+        handle["google_auth_cookie_change_at"] = time.monotonic()
+        return True
+
+    # For a previously anonymous profile, require a real authenticated-cookie
+    # transition. A YouTube title/history return by itself is insufficient.
+    if not changed_authenticated_cookie:
+        handle["google_auth_success_signal"] = None
+        handle["google_auth_cookie_change_at"] = None
+        return False
+
+    signal = (
+        "authenticated-cookie",
+        tuple(sorted(
+            (key, value)
+            for key, value in current.items()
+            if isinstance(key, tuple)
+            and len(key) > 1
+            and key[1] in _GOOGLE_STRONG_AUTH_COOKIE_NAMES
+        )),
+    )
 
     now = time.monotonic()
     if handle.get("google_auth_success_signal") != signal:
         handle["google_auth_success_signal"] = signal
         handle["google_auth_cookie_change_at"] = now
-        if current is not None:
-            handle["google_auth_cookie_last_snapshot"] = dict(current)
+        handle["google_auth_cookie_last_snapshot"] = dict(current)
         return False
 
     changed_at = handle.get("google_auth_cookie_change_at")
     if changed_at is None:
         handle["google_auth_cookie_change_at"] = now
         return False
+
+    # When we can observe the auth flow returning to YouTube, the changed
+    # authenticated profile is immediately trustworthy. On pure Wayland or
+    # other environments without a live return signal, require the cookie state
+    # to remain stable briefly before accepting it.
+    if returned or handle.get("google_auth_return_observed"):
+        return True
+
     required_settle = max(0.8, float(settle_seconds))
     return (now - float(changed_at)) >= required_settle
 
@@ -6883,6 +6915,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             "history_visit_baseline": tuple(history_visit_baseline) if history_visit_baseline else None,
             "google_auth_cookie_last_snapshot": dict(google_auth_cookie_baseline),
             "google_auth_cookie_change_at": None,
+            "google_auth_return_observed": False,
             "google_auth_window_left_return_site": False,
             "google_auth_intermediate_title": "",
             "auto_close_requested": False,
