@@ -6651,12 +6651,9 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             # process, so keep the explicit new-window request used by the
             # established handoff path.
             command.append("--new-window")
-        else:
-            # On Linux, forcing --new-window while starting a fresh profile
-            # owner can create a blank startup window plus a second auth window.
-            # Let the requested auth URL become the initial browser window.
-            command.append("--no-startup-window")
-            command.remove("--no-startup-window")
+        # On Linux, do not force --new-window. A fresh profile owner can create
+        # a normal startup window and then a second auth window when that switch
+        # is present. Appending only the target URL makes it the initial window.
         command.append(target_url)
         process = subprocess.Popen(
             command,
