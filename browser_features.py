@@ -1111,6 +1111,28 @@ class BrowserFeatures:
             state.append(f'Chromium DevTools port: {session.get("port")}')
             state.append(f'Chromium profile: {session.get("profile")}')
             state.append(f'Current target: {session.get("target_id")}')
+            if sys.platform.startswith("linux"):
+                policy = dict(session.get("gpu_policy") or {})
+                gpu = dict(session.get("gpu_info") or {})
+                vendors = ", ".join(policy.get("vendors") or []) or "not detected"
+                requested = "hardware" if policy.get("hardware_requested") else "software"
+                actual = (
+                    "hardware"
+                    if gpu.get("hardware_active")
+                    else "software"
+                    if gpu and not gpu.get("probe_error")
+                    else "unknown"
+                )
+                state.append(f'Linux GPU vendors: {vendors}')
+                state.append(f'Linux Chromium GPU request: {requested}')
+                state.append(f'Linux Chromium GPU active: {actual}')
+                if gpu.get("renderer"):
+                    state.append(f'Linux Chromium renderer: {gpu.get("renderer")}')
+                state.append(
+                    f'Linux hardware video requested: '
+                    f'{bool(policy.get("video_decode_requested"))}'
+                )
+                state.append('Linux presentation: CDP software compositor')
         try:
             network = features.net._NETWORK_ENGINE or {}
             state.append(f'Network engine: {network.get("proxy_url") or "not started"}')
