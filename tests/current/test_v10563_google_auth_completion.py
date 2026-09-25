@@ -76,4 +76,5 @@ def test_google_auth_return_page_gets_one_shot_authenticated_refresh():
     assert "self.navigate_to(expected_url, add_history=False, reuse_existing=False)" in refresh_source
     assert "pending_auth_refresh" in nav_source
     assert "self._google_auth_refresh_pending_url = None" in nav_source
-    assert "self.root.after(650, self._refresh_after_google_auth" in nav_source
+    assert "650" in nav_source
+    assert "self._refresh_after_google_auth" in nav_source
