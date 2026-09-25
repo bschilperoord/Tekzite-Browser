@@ -58,6 +58,16 @@ def test_linux_auth_window_is_normal_visible_chromium_without_cdp():
     assert '"cdp_control": False' in source
 
 
+def test_linux_google_auth_launch_uses_one_initial_window():
+    source = inspect.getsource(net.start_standalone_auth_chromium)
+    linux_comment = "On Linux, do not force --new-window."
+    assert linux_comment in source
+    # The switch must be Windows-only.
+    conditional = source[source.index('if os.name == "nt":'):source.index("command.append(target_url)")]
+    assert 'command.append("--new-window")' in conditional
+    assert 'else:' not in conditional
+
+
 def test_linux_google_auth_close_is_cooperative_only():
     helper = inspect.getsource(net._request_linux_process_terminate)
     close = inspect.getsource(net.close_standalone_auth_chromium)
