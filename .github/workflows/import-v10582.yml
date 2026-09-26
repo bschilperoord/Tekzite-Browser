@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - ".release/v10582-minimal.patch.gz"
+      - ".github/workflows/import-v10582.yml"
 
 permissions:
   contents: write
@@ -34,8 +35,33 @@ jobs:
           $ErrorActionPreference = "Stop"
           $patch = Join-Path $env:RUNNER_TEMP "v10582-minimal.patch"
           python -c "import gzip,pathlib; pathlib.Path(r'$patch').write_bytes(gzip.decompress(pathlib.Path(r'.release/v10582-minimal.patch.gz').read_bytes()))"
-          git apply --ignore-space-change --whitespace=nowarn $patch
+          git apply --ignore-space-change --whitespace=nowarn --exclude=CHANGELOG.md $patch
           if ($LASTEXITCODE -ne 0) { throw "Could not apply v10.5.82 source patch" }
+
+      - name: Add v10.5.82 changelog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $entry = @'
+          # v10.5.82 - Strict favicon tab ownership
+
+          - Binds every decoded favicon to the exact Tekzite tab, Chromium target, page URL, and favicon source URL that produced it.
+          - Clears a site's favicon immediately when that tab starts or observes a navigation, so the previous website's icon cannot linger on the new website.
+          - Adds a per-tab page-state epoch so a slow metadata/favicon completion from before a user navigation is ignored instead of writing stale chrome state.
+          - Rechecks Chromium's live page URL after the browser-owned favicon fetch; if the target navigated while the icon was downloading, the fetched bytes are discarded.
+          - Refetches when a page changes its favicon source instead of keeping a decoded image tied to an older favicon URL.
+          - Adds regression coverage for same-tab site changes, stale in-flight favicon results, and navigation-during-fetch ownership races.
+
+          # v10.5.81 - Per-tab Chromium target isolation
+
+          - Fixes later Tekzite tabs accidentally reusing the first tab's already-claimed Chromium bootstrap target.
+          - Each new tab now receives its own Chromium page target, so navigating or typing a URL in one tab cannot replace the page owned by another tab.
+          - Keeps bootstrap-target reuse limited to the first native startup tab and adds regression coverage for both the first-tab reuse path and later-tab isolation.
+          '@
+          $current = Get-Content -Raw "CHANGELOG.md"
+          if ($current -notmatch '(?m)^# v10\.5\.82\b') {
+            Set-Content "CHANGELOG.md" ($entry.Trim() + "`r`n`r`n" + $current) -Encoding utf8
+          }
 
       - name: Synchronize version metadata
         shell: pwsh
