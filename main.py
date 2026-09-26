@@ -822,7 +822,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.82"
+BROWSER_VERSION = "10.5.83"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -2002,6 +2002,7 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_handle = None
         self._google_auth_return_url = None
         self._google_auth_source_url = None
+        self._google_auth_source_tab_id = None
         self._google_auth_refresh_pending_url = None
         self.preferences = load_preferences()
         if not self._private_mode and self.preferences.get("privacy_lockdown", True):
@@ -4548,6 +4549,7 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_handoff_active = True
         self._google_auth_return_url = return_url
         self._google_auth_source_url = str(url or "")
+        self._google_auth_source_tab_id = tab.get("id")
         self._suspend_chromium_for_external_auth()
 
         for item in self.tabs:
@@ -4725,23 +4727,38 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_success_future = None
         self._google_auth_close_future = None
         return_url = str(getattr(self, "_google_auth_return_url", "") or "")
+        source_tab_id = getattr(self, "_google_auth_source_tab_id", None)
         self._google_auth_return_url = None
         self._google_auth_source_url = None
-        tab = self._active_tab()
+        self._google_auth_source_tab_id = None
+        tab = next((item for item in self.tabs if item.get("id") == source_tab_id), None)
         if tab is None:
+            self._google_auth_refresh_pending_url = None
             return
         if return_url:
             tab["url"] = return_url
             tab["title"] = self._tab_title_for_url(return_url)
             tab["loaded"] = False
             tab["loading"] = False
-            tab["sleeping"] = False
-            tab["restore_pending"] = False
-            self._google_auth_refresh_pending_url = return_url
-            self.url_var.set(return_url)
-            self._refresh_tab_strip()
-            self.status_var.set("Returning from Google sign-in…")
-            self.navigate_to(return_url, add_history=False, reuse_existing=False)
+            tab["ready_state"] = ""
+            tab["page_state_epoch"] = int(tab.get("page_state_epoch") or 0) + 1
+            self._clear_tab_favicon(tab)
+            if tab.get("id") == self.active_tab_id:
+                tab["sleeping"] = False
+                tab["restore_pending"] = False
+                self._google_auth_refresh_pending_url = return_url
+                self.url_var.set(return_url)
+                self._refresh_tab_strip()
+                self.status_var.set("Returning from Google sign-in…")
+                self.navigate_to(return_url, add_history=False, reuse_existing=False)
+            else:
+                # The auth result belongs to the tab that initiated it, never to
+                # whichever tab happens to be selected when the popup closes.
+                tab["sleeping"] = True
+                tab["restore_pending"] = True
+                self._google_auth_refresh_pending_url = None
+                self._refresh_tab_strip()
+                self.status_var.set("Google sign-in complete")
         else:
             self._google_auth_refresh_pending_url = None
             self.status_var.set("Google sign-in window closed")
@@ -6574,6 +6591,18 @@ class BrowserApp(BrowserFeatures):
                 )
             w, h = max(1, int(host_size[0])), max(1, int(host_size[1]))
 
+            # A restored DWM destination must mirror the exact Tekzite tab that
+            # is selected now. Session-global Chromium state can point at a tab
+            # that completed navigation while Tekzite was minimized, so reclaim
+            # the selected target before registering any visible thumbnail.
+            active_tab = self._active_tab()
+            active_target_id = active_tab.get("chromium_target_id") if active_tab else None
+            if not active_target_id:
+                raise RuntimeError("Selected Tekzite tab has no Chromium target to restore")
+            if not activate_embedded_chromium_target(active_target_id):
+                raise RuntimeError("Could not reactivate selected Chromium target during DWM restore")
+            self._chromium_frame_target_id = active_target_id
+
             # attach_embedded_chromium updates engine.session['embedded_parent']
             # to this new HWND, primes Chromium's DComp source, and registers a
             # thumbnail against the new destination before anything is shown.
@@ -6918,14 +6947,15 @@ class BrowserApp(BrowserFeatures):
             self.canvas.pack(side="left", fill="both", expand=True)
 
     def _use_chromium_software_surface_for_url(self, url):
-        """Return True only when the user explicitly selects diagnostic software mode.
+        """Select the supported Chromium presentation for this platform.
 
-        v4.68 stops auto-selecting the screenshot/CDP presentation for Startpage
-        or any other normal site.  That path necessarily adds Python capture,
-        decode and input-forwarding latency.  Native GPU-backed Chromium is the
-        normal interactive presentation; software mode is retained only for
-        troubleshooting systems where the native compositor cannot present.
+        Windows uses Tekzite's native DWM presentation by default.  Linux does
+        not have that Win32/DWM surface, so the packaged Linux build always
+        uses the CDP software presentation instead of attempting an unsupported
+        native attach and failing after Chromium has already launched.
         """
+        if os.name != "nt":
+            return True
         mode = str(getattr(self, "preferences", DEFAULT_PREFERENCES).get(
             "chromium_presentation", "native"
         )).strip().lower()
@@ -8641,126 +8671,146 @@ class BrowserApp(BrowserFeatures):
             self._show_chromium_software_surface(target_id)
         return True
 
-    def _poll_embedded_navigation(self, generation, future, url, add_history):
-        if generation != self._navigation_generation:
-            return
+    def _poll_embedded_navigation(self, generation, future, url, add_history,
+                                  owner_tab_id=None, owner_page_epoch=0):
+        """Finish one Chromium navigation without letting it escape its tab.
+
+        Chromium target creation/activation happens off the Tk thread. A user can
+        switch tabs before that worker finishes, so completion must be tied to the
+        tab/document that started the request instead of consulting _active_tab().
+        """
         if not future.done():
             self.root.after(8, self._poll_embedded_navigation,
-                            generation, future, url, add_history)
-            return
-        try:
-            session = future.result()
-            hot_native_reuse = bool(session.get("hot_navigation_reused_native_surface"))
-            tab = self._active_tab()
-            if tab is not None:
-                tab["chromium_target_id"] = session.get("target_id")
-                tab["engine"] = "chromium"
-                tab["url"] = url
-                tab["title"] = self._tab_title_for_url(url)
-                tab["loaded"] = True
-                tab["loading"] = True
-                tab["document"] = None
-                self._refresh_tab_strip()
-            self._schedule_chromium_zoom_apply(all_tabs=True)
-            pending_auth_refresh = str(getattr(self, "_google_auth_refresh_pending_url", "") or "")
-            if (pending_auth_refresh and
-                    self._canonical_tab_url(pending_auth_refresh) == self._canonical_tab_url(url)):
-                self._google_auth_refresh_pending_url = None
-                try:
-                    self.root.after(650, self._refresh_after_google_auth,
-                                    generation, session.get("target_id"), url)
-                except Exception:
-                    pass
-            if self._use_chromium_software_surface_for_url(url):
-                if tab is not None:
-                    tab["presentation"] = "software"
-                self._show_chromium_software_surface(session.get("target_id"))
-            else:
-                if tab is not None:
-                    tab["presentation"] = "native"
-                    tab.pop("software_fallback_reason", None)
-                    tab.pop("native_recovery_viewport", None)
-                # v10.5.67: a hot navigation/refresh already owns a healthy,
-                # visible DWM destination.  Do not tear that surface down and
-                # reveal it again on a fixed timer.  Chromium can replace its
-                # renderer one compositor beat after Page.navigate returns;
-                # hiding + re-showing the destination in that gap exposed the
-                # DComp black backing surface and made refreshes intermittently
-                # look dead.  Keep the last good destination continuously
-                # mapped and let Chromium paint the new document into it.
-                if (hot_native_reuse and self._embedded_mode
-                        and self._chromium_dwm_mode and self._dwm_host):
-                    self._set_chromium_presentation_fast(
-                        "native", tab.get("chromium_target_id") if tab else None
-                    )
-                    self._chromium_frame_target_id = (
-                        tab.get("chromium_target_id") if tab else session.get("target_id")
-                    )
-                    self._chromium_software_mode = False
-                    self._dwm_surface_ready = True
-                    self._dwm_reveal_pending = False
-                    self._cancel_dwm_host_reveal()
-                    self._sync_dwm_host_geometry(show=True, transparent=False)
-                    self._schedule_dwm_geometry_sync(resize=True, delay=1)
-                else:
-                    self._show_embedded_host()
-                # v5.42: navigation can rebuild Chromium's presenter/chrome after
-                # the first committed frame (notably YouTube and consent shells).
-                # Re-measure the DWM crop while that geometry settles so title-bar
-                # pixels from the previous site can never leak into the mirror.
-                # v10.5.68: hot navigation already owns a healthy live DWM source.
-                # Do not hit that source with four eager full-recrops while Chromium
-                # is replacing its RenderWidgetHost. Three later samples still meet
-                # the crop-stability contract, but avoid the 60/180 ms DComp churn
-                # that could itself make Native look stalled.
-                recrop_delays = (260, 700, 1250) if hot_native_reuse else (60, 180, 420, 850)
-                for delay_index, delay_ms in enumerate(recrop_delays):
-                    self.root.after(
-                        delay_ms,
-                        self._refresh_dwm_crop_after_navigation,
-                        generation,
-                        delay_index,
-                    )
-                # v10.5.68: never run the old fixed-220ms visible-surface probe on
-                # a hot Native/DWM handoff.  open_embedded_chromium returns the same
-                # session dictionary on that path, so its attached-frame diagnostics
-                # can describe the *previous* document. Sampling the screen during a
-                # renderer swap then produced false "native surface stalled" reports.
-                # Cold/new-target paths still get the on-screen safety probe below.
-                if not hot_native_reuse:
-                    visible_probe_expected = bool(
-                        session.get("attached_frame_visual")
-                        or int(session.get("attached_frame_text_len") or 0) >= 8
-                        or int(session.get("first_frame_text_len") or 0) >= 8
-                    )
-                    self.root.after(260, self._probe_visible_embedded_surface,
-                                    generation, session.get("target_id"),
-                                    visible_probe_expected)
-            self.root.after(1000, lambda current=session: self._start_optional_services(current))
-        except Exception as exc:
-            self._show_native_canvas()
-            self._finish_navigation_error(generation, exc, allow_chromium_fallback=False)
+                            generation, future, url, add_history,
+                            owner_tab_id, owner_page_epoch)
             return
 
-        if add_history:
-            if self.history_index < len(self.history) - 1:
-                self.history = self.history[:self.history_index + 1]
-            if not self.history or self.history[-1] != url:
-                self.history.append(url)
-                self.history_index = len(self.history) - 1
+        navigation_is_current = generation == self._navigation_generation
+        try:
+            session = future.result()
+        except Exception as exc:
+            if navigation_is_current:
+                self._show_native_canvas()
+                self._finish_navigation_error(generation, exc, allow_chromium_fallback=False)
+            return
+
+        target_id = str(session.get("target_id") or "")
+        tab = next((item for item in self.tabs if item.get("id") == owner_tab_id), None)
+        owner_is_current_document = bool(
+            tab is not None
+            and int(tab.get("page_state_epoch") or 0) == int(owner_page_epoch or 0)
+            and self._canonical_tab_url(tab.get("url")) == self._canonical_tab_url(url)
+        )
+        owner_is_active = bool(
+            owner_is_current_document
+            and tab.get("id") == self.active_tab_id
+            and navigation_is_current
+        )
+
+        if owner_is_current_document:
+            tab["chromium_target_id"] = target_id or tab.get("chromium_target_id")
+            tab["engine"] = "chromium"
+            tab["url"] = url
+            tab["title"] = self._tab_title_for_url(url)
+            tab["loaded"] = True
+            tab["loading"] = True
+            tab["document"] = None
+            if add_history:
+                history = list(tab.get("history") or [])
+                history_index = int(tab.get("history_index", len(history) - 1))
+                if history_index < len(history) - 1:
+                    history = history[:history_index + 1]
+                if not history or history[-1] != url:
+                    history.append(url)
+                    history_index = len(history) - 1
+                tab["history"] = history
+                tab["history_index"] = history_index
+            self._refresh_tab_strip()
+        else:
+            # A superseded new-target navigation can otherwise leave an orphaned
+            # Chromium tab activated underneath unrelated Tekzite chrome. Retire
+            # it only when no live Tekzite tab owns that target.
+            if target_id and not any(
+                str(item.get("chromium_target_id") or "") == target_id for item in self.tabs
+            ):
+                self._queue_closed_target_retirement(target_id, 250)
+
+        if not owner_is_active:
+            # Chromium may have activated the completed target even though the
+            # user moved elsewhere. Immediately restore the currently selected
+            # Tekzite target so DWM and the tab strip cannot diverge.
+            active = self._active_tab()
+            active_target_id = str(active.get("chromium_target_id") or "") if active else ""
+            if active_target_id and active_target_id != target_id:
+                try:
+                    self._tab_switch_executor.submit(
+                        activate_embedded_chromium_target, active_target_id
+                    )
+                except Exception:
+                    pass
+            elif not active_target_id:
+                self._show_native_canvas()
+            return
+
+        hot_native_reuse = bool(session.get("hot_navigation_reused_native_surface"))
+        self._schedule_chromium_zoom_apply(all_tabs=True)
+        pending_auth_refresh = str(getattr(self, "_google_auth_refresh_pending_url", "") or "")
+        if (pending_auth_refresh and
+                self._canonical_tab_url(pending_auth_refresh) == self._canonical_tab_url(url)):
+            self._google_auth_refresh_pending_url = None
+            try:
+                self.root.after(650, self._refresh_after_google_auth,
+                                generation, target_id, url)
+            except Exception:
+                pass
+
+        if self._use_chromium_software_surface_for_url(url):
+            tab["presentation"] = "software"
+            self._show_chromium_software_surface(target_id)
+        else:
+            tab["presentation"] = "native"
+            tab.pop("software_fallback_reason", None)
+            tab.pop("native_recovery_viewport", None)
+            if (hot_native_reuse and self._embedded_mode
+                    and self._chromium_dwm_mode and self._dwm_host):
+                self._set_chromium_presentation_fast("native", target_id)
+                self._chromium_frame_target_id = target_id
+                self._chromium_software_mode = False
+                self._dwm_surface_ready = True
+                self._dwm_reveal_pending = False
+                self._cancel_dwm_host_reveal()
+                self._sync_dwm_host_geometry(show=True, transparent=False)
+                self._schedule_dwm_geometry_sync(resize=True, delay=1)
+            else:
+                self._show_embedded_host()
+            recrop_delays = (260, 700, 1250) if hot_native_reuse else (60, 180, 420, 850)
+            for delay_index, delay_ms in enumerate(recrop_delays):
+                self.root.after(
+                    delay_ms, self._refresh_dwm_crop_after_navigation,
+                    generation, delay_index,
+                )
+            if not hot_native_reuse:
+                visible_probe_expected = bool(
+                    session.get("attached_frame_visual")
+                    or int(session.get("attached_frame_text_len") or 0) >= 8
+                    or int(session.get("first_frame_text_len") or 0) >= 8
+                )
+                self.root.after(260, self._probe_visible_embedded_surface,
+                                generation, target_id, visible_probe_expected)
+        self.root.after(1000, lambda current=session: self._start_optional_services(current))
+
+        self.history = list(tab.get("history") or [])
+        self.history_index = int(tab.get("history_index", -1))
         self.update_history_buttons()
-        tab = self._active_tab()
-        if tab is not None:
-            tab["history"] = list(self.history)
-            tab["history_index"] = self.history_index
         self.url_var.set(url)
         self._current_document = None
         self.js_runtime = None
         self.status_var.set(f"Embedded Chromium compatibility | {url}")
 
-    def _navigate_embedded(self, url, add_history, generation):
+    def _navigate_embedded(self, url, add_history, generation,
+                           owner_tab_id=None, owner_page_epoch=0):
         # Do not expose the compatibility host until Chromium has a verified
-        # compositor frame.  While the helper renders off-screen, keep the
+        # compositor frame. While the helper renders off-screen, keep the
         # current/native surface visible instead of showing a dead gray panel.
         self.status_var.set(f"Preparing Chromium frame | {url}…")
         try:
@@ -8769,7 +8819,7 @@ class BrowserApp(BrowserFeatures):
             pass
         width = max(1, int(self.content_frame.winfo_width()))
         height = max(1, int(self.content_frame.winfo_height()))
-        tab = self._active_tab()
+        tab = next((item for item in self.tabs if item.get("id") == owner_tab_id), None)
         target_id = tab.get("chromium_target_id") if tab is not None else None
         other_targets_exist = any(
             t.get("chromium_target_id")
@@ -8778,13 +8828,6 @@ class BrowserApp(BrowserFeatures):
         )
         create_new_target = bool(tab is not None and not target_id and other_targets_exist)
         software_presentation = self._use_chromium_software_surface_for_url(url)
-        # v10.5.67: normal navigation and F5/Ctrl+R on an already attached
-        # native target keep the current DWM surface visible while Chromium
-        # accepts the new navigation.  The old code unconditionally hid the
-        # destination here even though the comment above promised to preserve
-        # the current frame.  A subsequent 45 ms timed reveal could race a
-        # renderer swap and expose a black frame.  Only cold/new-target paths
-        # need the hidden preparation ceremony.
         keep_live_native_surface = bool(
             not software_presentation
             and self._embedded_mode
@@ -8815,7 +8858,8 @@ class BrowserApp(BrowserFeatures):
             self._page_zoom_percent(),
         )
         self._poll_embedded_navigation(
-            generation, self._embedded_future, url, add_history
+            generation, self._embedded_future, url, add_history,
+            owner_tab_id, owner_page_epoch
         )
 
     def _refresh_dwm_crop_after_navigation(self, generation, delay_index=0):
@@ -11982,13 +12026,17 @@ class BrowserApp(BrowserFeatures):
 
         self._navigation_generation += 1
         generation = self._navigation_generation
+        owner_tab_id = active.get("id") if active is not None else None
+        owner_page_epoch = int(active.get("page_state_epoch") or 0) if active is not None else 0
         if self._resize_after_id is not None:
             try:
                 self.root.after_cancel(self._resize_after_id)
             except Exception:
                 pass
             self._resize_after_id = None
-        self._navigate_embedded(url, add_history, generation)
+        self._navigate_embedded(
+            url, add_history, generation, owner_tab_id, owner_page_epoch
+        )
 
 
 

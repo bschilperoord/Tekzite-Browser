@@ -1,3 +1,15 @@
+# v10.5.83 - Strict navigation and DWM target ownership
+
+- Binds asynchronous Chromium navigation completion to the exact Tekzite tab and page epoch that started it instead of whichever tab is active when the worker finishes.
+- Keeps polling superseded navigation workers long enough to reclaim/retire their Chromium targets safely; a late target can no longer remain visibly activated underneath another tab's chrome.
+- Re-activates the currently selected tab when a background/stale navigation completion temporarily activates another Chromium target.
+- Prevents an older same-tab navigation from overwriting a newer document and retires unowned replacement targets.
+- Binds Google authentication return URLs to the tab that initiated the handoff instead of the tab selected when the authentication window closes.
+- Reclaims the selected Chromium target before rebuilding a DWM destination after taskbar restore, preventing a restored surface from mirroring a different/blank tab.
+- Adds regression coverage for switched-tab navigation completion, superseded same-tab navigation, Google-auth source ownership, and DWM restore target ordering.
+- Adds a native Linux x86_64 PyInstaller release pipeline with a bundled Tekzite Network helper.
+- Linux packages now select Tekzite's CDP software presentation automatically instead of attempting the Windows-only DWM attach path.
+
 # v10.5.82 - Strict favicon tab ownership
 
 - Binds every decoded favicon to the exact Tekzite tab, Chromium target, page URL, and favicon source URL that produced it.

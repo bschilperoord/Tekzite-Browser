@@ -1,0 +1,34 @@
+Tekzite Browser v10.5.83 validation
+Date: 2026-09-26
+
+Issue investigated
+------------------
+A late Chromium navigation could become visible under the wrong Tekzite tab.
+The navigation completion callback used the globally active tab and abandoned
+workers as soon as the global navigation generation changed. Chromium could
+already have created/activated a target by then, leaving DWM and Tekzite chrome
+out of sync. Google-auth completion and DWM taskbar restore also had ownership
+paths that relied on the current/global tab rather than the originating/selected
+target.
+
+Fix
+---
+- Navigation completion is bound to owner tab id + page-state epoch.
+- Stale/background completions cannot mutate the active tab.
+- The selected Chromium target is reactivated after a stale completion.
+- Unowned stale replacement targets are retired.
+- Google-auth return is bound to its source tab.
+- DWM restore explicitly reactivates the selected tab target before attach.
+- Linux x86_64 packaging uses a bundled native Tekzite Network helper.
+- Linux forces the supported CDP software presentation rather than entering the
+  Windows-only DWM attach path.
+
+Validation
+----------
+- python tools/sync_version.py 10.5.83 --check: PASS
+- python -m py_compile main.py engine/net.py tests/current/test_v10583_tab_navigation_ownership.py tests/current/test_v10583_linux_packaging.py: PASS
+- tests/current/test_v10583_tab_navigation_ownership.py + test_v10583_linux_packaging.py: 8 PASS
+- python -m pytest -q tests/current: 560 PASS
+- node tests/current/test_extension_features.cjs: PASS
+- python tools/doctor.py: PASS (expected Linux warning for Windows-only DWM runtime)
+- Local Linux PyInstaller packaging could not be completed in this sandbox because outbound package installation is unavailable; GitHub's ubuntu-latest release runner performs the authoritative Linux build.

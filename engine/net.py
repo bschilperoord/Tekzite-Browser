@@ -342,7 +342,8 @@ def _ensure_network_engine_locked():
     # services. Register the proxy destination before the readiness probe.
     allow_loopback_port(port, "Tekzite Network proxy (HTTP/HTTPS filtering and ad blocking)", owner="tekzite-network")
     root = _network_engine_root()
-    exe = root / "tekzite-network.exe"
+    helper_name = "tekzite-network.exe" if os.name == "nt" else "tekzite-network"
+    exe = root / helper_name
     script = root / "tekzite_network.py"
     instance_token = secrets.token_hex(16)
     if exe.is_file():
