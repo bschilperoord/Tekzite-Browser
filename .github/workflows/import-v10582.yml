@@ -1,0 +1,75 @@
+name: Import v10.5.82
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".release/v10582-minimal.patch.gz"
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  import:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout staged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Apply v10.5.82 changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $patch = Join-Path $env:RUNNER_TEMP "v10582-minimal.patch"
+          python -c "import gzip,pathlib; pathlib.Path(r'$patch').write_bytes(gzip.decompress(pathlib.Path(r'.release/v10582-minimal.patch.gz').read_bytes()))"
+          git apply --ignore-space-change --whitespace=nowarn $patch
+          if ($LASTEXITCODE -ne 0) { throw "Could not apply v10.5.82 source patch" }
+
+      - name: Synchronize version metadata
+        shell: pwsh
+        run: |
+          python tools\sync_version.py 10.5.82
+          python tools\sync_version.py 10.5.82 --check
+
+      - name: Install test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
+          python -m pip install --only-binary=:all: -r requirements-dev.txt
+
+      - name: Run regression suite
+        shell: pwsh
+        run: python -m pytest -q
+
+      - name: Commit verified source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .release
+          rm -f .github/workflows/import-v10582.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -u
+          git add VALIDATION-v10.5.81.txt VALIDATION-v10.5.82.txt \
+            tests/current/test_v10581_tab_target_isolation.py \
+            tests/current/test_v10582_favicon_tab_ownership.py
+          git diff --cached --check
+          git commit -m "Release Tekzite Browser v10.5.82"
+          git push origin HEAD:main
+
+      - name: Dispatch Windows release workflow
+        shell: pwsh
+        run: gh workflow run publish-windows-release.yml --ref main
