@@ -88,6 +88,7 @@ jobs:
           rm -f .github/workflows/import-v10582.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python -c "from pathlib import Path; p=Path('README.md'); b=p.read_bytes(); b=b.replace(b'v10.5.82 UltraSpeed for Windows  \\r\\n',b'v10.5.82 UltraSpeed for Windows\\r\\n').replace(b'v10.5.82 UltraSpeed for Windows  \\n',b'v10.5.82 UltraSpeed for Windows\\n'); p.write_bytes(b); p=Path('CHANGELOG.md'); b=p.read_bytes(); e=b'\\r\\n' if b'\\r\\n' in b else b'\\n'; p.write_bytes(b.rstrip(b'\\r\\n')+e)"
           git add -u
           git add VALIDATION-v10.5.81.txt VALIDATION-v10.5.82.txt \
             tests/current/test_v10581_tab_target_isolation.py \
