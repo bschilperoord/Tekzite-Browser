@@ -6329,7 +6329,15 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
 
     # Reuse an already-claimed bootstrap target when the caller is the first
     # native Tekzite tab returning through the same startup path.
-    claimed_id = session.get("native_app_target_id") if session.get("app_bootstrap_target_claimed") else None
+    # Only the first native Tekzite tab may reuse Chromium's already-claimed
+    # bootstrap app target. Later tabs must get their own CDP target; otherwise
+    # two Tekzite tabs end up sharing one renderer and navigating either tab
+    # changes the page shown by the other.
+    claimed_id = (
+        session.get("native_app_target_id")
+        if require_bootstrap and session.get("app_bootstrap_target_claimed")
+        else None
+    )
     if claimed_id:
         try:
             pages = _devtools_json(session["port"], "/json/list", timeout=1.0)
@@ -11170,11 +11178,24 @@ def get_embedded_chromium_page_state(*, target_id: str = None, include_favicon: 
     value['title'] = str(value.get('title') or '')[:MAX_PAGE_TITLE_CHARS]
     value['url'] = str(value.get('url') or '')[:MAX_PAGE_URL_CHARS]
     value['favicon'] = str(value.get('favicon') or '')[:MAX_FAVICON_URL_CHARS]
-    if include_favicon and value.get('favicon'):
+    # Bind the icon to the exact document URL that exposed it. The fetch itself
+    # happens outside page JavaScript and may outlive a fast navigation, so a
+    # second location read below verifies that Chromium is still on this page
+    # before the bytes are allowed into Tekzite's tab chrome.
+    value['favicon_page_url'] = value['url']
+    if include_favicon and value.get('favicon') and value.get('url'):
         try:
             raw = fetch_favicon_bytes(value['favicon'])
             if raw:
-                value['favicon_b64'] = base64.b64encode(raw).decode('ascii')
+                owner_result = _persistent_page_cdp_call(
+                    session, 'Runtime.evaluate',
+                    {'expression': "String(location.href || '').slice(0, 32768)", 'returnByValue': True},
+                    target_id=target_id, timeout=timeout, purpose='page-state',
+                    internal_source='page-state/favicon-owner',
+                )
+                current_url = str((((owner_result or {}).get('result') or {}).get('value')) or '')[:MAX_PAGE_URL_CHARS]
+                if current_url and current_url == value['favicon_page_url']:
+                    value['favicon_b64'] = base64.b64encode(raw).decode('ascii')
         except Exception:
             pass
     return value

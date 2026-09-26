@@ -822,7 +822,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.80"
+BROWSER_VERSION = "10.5.82"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -4321,6 +4321,28 @@ class BrowserApp(BrowserFeatures):
 
         self._place_new_tab_button_inline()
 
+    @staticmethod
+    def _clear_tab_favicon(tab):
+        """Detach any favicon from a tab when its document identity changes.
+
+        A favicon is page-owned UI state. Keeping the old image while a new
+        navigation is already committed can visually assign site A's identity
+        to site B, so clear both the source URL and decoded image together.
+        """
+        if not isinstance(tab, dict):
+            return False
+        changed = bool(
+            tab.get("favicon_url")
+            or tab.get("favicon_photo") is not None
+            or tab.get("favicon_page_url")
+            or tab.get("favicon_photo_url")
+        )
+        tab["favicon_url"] = ""
+        tab["favicon_photo"] = None
+        tab["favicon_page_url"] = ""
+        tab["favicon_photo_url"] = ""
+        return changed
+
     def _decode_favicon_photo(self, data_b64):
         """Decode a site favicon under strict size/format limits.
 
@@ -4738,8 +4760,16 @@ class BrowserApp(BrowserFeatures):
 
     def _poll_one_tab_state(self, tab_id, target_id, include_favicon=False):
         key = str(target_id or "")
-        if not key or key in self._page_state_inflight:
+        tab_at_start = next((
+            t for t in self.tabs
+            if t.get("id") == tab_id and t.get("chromium_target_id") == target_id
+        ), None)
+        if not key or tab_at_start is None or key in self._page_state_inflight:
             return
+        # Page-state work can include a network favicon fetch. Snapshot the
+        # tab's document epoch so a completion from before a user navigation
+        # can never write title/URL/favicon state into the new document.
+        poll_epoch = int(tab_at_start.get("page_state_epoch") or 0)
         self._page_state_inflight.add(key)
         future = self._executor.submit(
             get_embedded_chromium_page_state,
@@ -4756,7 +4786,7 @@ class BrowserApp(BrowserFeatures):
             except Exception:
                 return
             tab = next((t for t in self.tabs if t.get("id") == tab_id and t.get("chromium_target_id") == target_id), None)
-            if tab is None:
+            if tab is None or int(tab.get("page_state_epoch") or 0) != poll_epoch:
                 return
             changed = False
             title = str(info.get("title") or "").strip()
@@ -4768,7 +4798,12 @@ class BrowserApp(BrowserFeatures):
                 previous_url = str(tab.get("url") or "")
                 if self._maybe_start_google_auth_handoff(live_url, previous_url, tab):
                     return
+                # A renderer-side navigation (link, redirect, history API, etc.)
+                # changes the document owner. Drop the previous site's icon
+                # before recording the new URL.
+                changed = self._clear_tab_favicon(tab) or changed
                 tab["url"] = live_url
+                tab["page_state_epoch"] = int(tab.get("page_state_epoch") or 0) + 1
                 if tab.get("id") == self.active_tab_id and not self._address_focus_active:
                     self.url_var.set(live_url)
                 changed = True
@@ -4782,16 +4817,38 @@ class BrowserApp(BrowserFeatures):
             if audible != bool(tab.get("audible", False)):
                 tab["audible"] = audible
                 changed = True
-            fav_url = str(info.get("favicon") or "")
-            if fav_url and fav_url != tab.get("favicon_url"):
-                tab["favicon_url"] = fav_url
-                changed = True
-            fav_b64 = info.get("favicon_b64")
-            if fav_b64:
-                photo = self._decode_favicon_photo(fav_b64)
-                if photo is not None:
-                    tab["favicon_photo"] = photo
-                    changed = True
+
+            # Favicons are accepted only for the exact page URL observed in the
+            # same metadata sample. This prevents a late icon from tab/page A
+            # being painted onto tab/page B after a navigation race.
+            favicon_page_url = str(info.get("favicon_page_url") or live_url or "").strip()
+            page_owns_favicon = bool(
+                favicon_page_url
+                and favicon_page_url != "about:blank"
+                and self._canonical_tab_url(favicon_page_url) == self._canonical_tab_url(tab.get("url"))
+            )
+            if page_owns_favicon:
+                fav_url = str(info.get("favicon") or "")
+                owner_changed = (
+                    self._canonical_tab_url(tab.get("favicon_page_url"))
+                    != self._canonical_tab_url(favicon_page_url)
+                )
+                source_changed = bool(fav_url and fav_url != tab.get("favicon_url"))
+                if owner_changed or source_changed:
+                    changed = self._clear_tab_favicon(tab) or changed
+                if fav_url:
+                    if fav_url != tab.get("favicon_url") or favicon_page_url != tab.get("favicon_page_url"):
+                        tab["favicon_url"] = fav_url
+                        tab["favicon_page_url"] = favicon_page_url
+                        changed = True
+                    fav_b64 = info.get("favicon_b64")
+                    if fav_b64:
+                        photo = self._decode_favicon_photo(fav_b64)
+                        if photo is not None:
+                            tab["favicon_photo"] = photo
+                            tab["favicon_photo_url"] = fav_url
+                            tab["favicon_page_url"] = favicon_page_url
+                            changed = True
             self._record_page_visit(tab)
             if tab.get("id") == self.active_tab_id:
                 self._refresh_standard_toolbar_state()
@@ -4808,7 +4865,12 @@ class BrowserApp(BrowserFeatures):
             # Active tab gets every poll; background tabs are sampled less often.
             if tab is not active and (self._navigation_generation + tab.get("id", 0) + int(time.monotonic())) % 3:
                 continue
-            need_icon = not tab.get("favicon_photo") or not tab.get("favicon_url")
+            need_icon = (
+                not tab.get("favicon_photo")
+                or not tab.get("favicon_url")
+                or tab.get("favicon_photo_url") != tab.get("favicon_url")
+                or self._canonical_tab_url(tab.get("favicon_page_url")) != self._canonical_tab_url(tab.get("url"))
+            )
             self._poll_one_tab_state(tab.get("id"), tab.get("chromium_target_id"), include_favicon=need_icon)
         self._schedule_page_state_poll()
 
@@ -5032,6 +5094,9 @@ class BrowserApp(BrowserFeatures):
             "ready_state": "",
             "favicon_url": "",
             "favicon_photo": None,
+            "favicon_page_url": "",
+            "favicon_photo_url": "",
+            "page_state_epoch": 0,
             "group": "",
             "sleeping": False,
             "last_active": time.monotonic(),
@@ -5173,6 +5238,8 @@ class BrowserApp(BrowserFeatures):
         target["loaded"] = False
         target["loading"] = False
         target["ready_state"] = ""
+        target["page_state_epoch"] = int(target.get("page_state_epoch") or 0) + 1
+        self._clear_tab_favicon(target)
         self.url_var.set(target.get("url") or "")
         self.update_history_buttons()
         self._refresh_tab_strip()
@@ -5771,6 +5838,9 @@ class BrowserApp(BrowserFeatures):
                 "ready_state": "",
                 "favicon_url": "",
                 "favicon_photo": None,
+                "favicon_page_url": "",
+                "favicon_photo_url": "",
+                "page_state_epoch": 0,
                 "group": "",
                 "sleeping": False,
                 "last_active": time.monotonic(),
@@ -11900,6 +11970,8 @@ class BrowserApp(BrowserFeatures):
 
         self.url_var.set(url)
         if active is not None:
+            active["page_state_epoch"] = int(active.get("page_state_epoch") or 0) + 1
+            self._clear_tab_favicon(active)
             active["url"] = url
             active["title"] = self._tab_title_for_url(url)
             active["engine"] = "chromium"

@@ -1,0 +1,18 @@
+Tekzite Browser v10.5.82 validation
+Date: 2026-09-26
+
+Favicon ownership hardening:
+- Previous-site favicon is cleared immediately when a tab navigates.
+- Favicon image/source/page ownership is tracked per tab.
+- Per-tab page-state epochs reject stale asynchronous metadata/favicon completions.
+- Browser-owned favicon bytes are accepted only if Chromium is still on the exact page URL that exposed the icon after the fetch completes.
+- Changed favicon sources force a fresh decoded icon instead of reusing the previous image.
+
+Validation:
+- python tools/sync_version.py 10.5.82 --check: PASS
+- python -m py_compile main.py engine/net.py tests/current/test_v10582_favicon_tab_ownership.py: PASS
+- PYTHONPATH=. pytest -q tests/current/test_v10582_favicon_tab_ownership.py tests/current/test_v10581_tab_target_isolation.py tests/current/test_v10580_minimal_favicon_fetch.py tests/current/test_v10579_internal_runtime_provenance.py: 21 PASS
+- PYTHONPATH=. pytest -q tests/current: 552 PASS
+
+Platform note:
+- Validation host is Linux. Windows DWM/native presentation behavior and packaged Windows executable still require Windows smoke testing/building.

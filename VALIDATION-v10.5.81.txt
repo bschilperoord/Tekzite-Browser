@@ -1,0 +1,27 @@
+Tekzite Browser v10.5.81 validation
+===================================
+
+Issue fixed
+-----------
+Opening/navigating a second Tekzite tab could change the first tab too because
+create_embedded_chromium_target() could reuse Chromium's already-claimed startup
+bootstrap target for later tabs. That gave two Tekzite tab records the same
+Chromium target id.
+
+Fix
+---
+- Bootstrap target reuse is now gated by require_bootstrap=True.
+- Later tabs always create a distinct Chromium page target.
+- The first native startup tab may still reuse the claimed app target.
+
+Regression coverage
+-------------------
+- Added tests/current/test_v10581_tab_target_isolation.py.
+- Verifies a later tab creates a new target even when the bootstrap target exists.
+- Verifies the first bootstrap path still reuses the claimed startup target.
+
+Validation
+----------
+- Version metadata synchronization: PASS
+- Python compilation: PASS
+- tests/current: 547 passed

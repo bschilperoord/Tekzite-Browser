@@ -1,3 +1,18 @@
+# v10.5.82 - Strict favicon tab ownership
+
+- Binds every decoded favicon to the exact Tekzite tab, Chromium target, page URL, and favicon source URL that produced it.
+- Clears a site's favicon immediately when that tab starts or observes a navigation, so the previous website's icon cannot linger on the new website.
+- Adds a per-tab page-state epoch so a slow metadata/favicon completion from before a user navigation is ignored instead of writing stale chrome state.
+- Rechecks Chromium's live page URL after the browser-owned favicon fetch; if the target navigated while the icon was downloading, the fetched bytes are discarded.
+- Refetches when a page changes its favicon source instead of keeping a decoded image tied to an older favicon URL.
+- Adds regression coverage for same-tab site changes, stale in-flight favicon results, and navigation-during-fetch ownership races.
+
+# v10.5.81 - Per-tab Chromium target isolation
+
+- Fixes later Tekzite tabs accidentally reusing the first tab's already-claimed Chromium bootstrap target.
+- Each new tab now receives its own Chromium page target, so navigating or typing a URL in one tab cannot replace the page owned by another tab.
+- Keeps bootstrap-target reuse limited to the first native startup tab and adds regression coverage for both the first-tab reuse path and later-tab isolation.
+
 # v10.5.80 - Connection Forensics showcase + minimal favicon networking
 
 This is the first published build to bundle Tekzite's complete **Connection Forensics** stack introduced across v10.5.74-v10.5.80. **Tools -> Network Connections** can correlate Windows process/socket ownership, Tekzite Network upstreams, exact requested hostnames, Chromium request metadata, JavaScript initiator stacks and response evidence into a causal path from process to script to network response.
@@ -1201,4 +1216,3 @@ v5.24 makes the first native Chromium tab a true direct-app launch. Chromium sta
 - Reduced DWM destination tracking to roughly 60 Hz while an interactive drag is active, with an immediate exact sync on release.
 - Pure top-level moves continue to avoid Chromium viewport resize work entirely.
 - Added drag-performance regression coverage.
-
