@@ -92,6 +92,7 @@ jobs:
           git add VALIDATION-v10.5.81.txt VALIDATION-v10.5.82.txt \
             tests/current/test_v10581_tab_target_isolation.py \
             tests/current/test_v10582_favicon_tab_ownership.py
+          git config core.whitespace cr-at-eol
           git diff --cached --check
           git commit -m "Release Tekzite Browser v10.5.82"
           git push origin HEAD:main
