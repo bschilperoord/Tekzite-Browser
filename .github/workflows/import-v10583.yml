@@ -1,0 +1,101 @@
+name: Import v10.5.83
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".release/v10583-minimal.patch.gz"
+      - ".github/workflows/import-v10583.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout staged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Apply v10.5.83 source changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $patch = Join-Path $env:RUNNER_TEMP "v10583-minimal.patch"
+          python -c "import gzip,pathlib; pathlib.Path(r'$patch').write_bytes(gzip.decompress(pathlib.Path(r'.release/v10583-minimal.patch.gz').read_bytes()))"
+          git apply --ignore-space-change --whitespace=nowarn $patch
+          if ($LASTEXITCODE -ne 0) { throw "Could not apply v10.5.83 source patch" }
+
+      - name: Synchronize release metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python tools\sync_version.py 10.5.83
+          python -c "from pathlib import Path; p=Path('README.md'); s=p.read_text(encoding='utf-8'); s=s.replace('> **Current release:** v10.5.83 UltraSpeed for Windows  ', '> **Current release:** v10.5.83 UltraSpeed for Windows and Linux', 1).replace('> **Current release:** v10.5.83 UltraSpeed for Windows', '> **Current release:** v10.5.83 UltraSpeed for Windows and Linux', 1); p.write_text(s, encoding='utf-8')"
+          @'
+          from pathlib import Path
+          p = Path("CHANGELOG.md")
+          text = p.read_text(encoding="utf-8")
+          entry = """# v10.5.83 - Strict navigation and DWM target ownership
+
+          - Binds asynchronous Chromium navigation completion to the exact Tekzite tab and page epoch that started it instead of whichever tab is active when the worker finishes.
+          - Keeps polling superseded navigation workers long enough to reclaim/retire their Chromium targets safely; a late target can no longer remain visibly activated underneath another tab's chrome.
+          - Re-activates the currently selected tab when a background/stale navigation completion temporarily activates another Chromium target.
+          - Prevents an older same-tab navigation from overwriting a newer document and retires unowned replacement targets.
+          - Binds Google authentication return URLs to the tab that initiated the handoff instead of the tab selected when the authentication window closes.
+          - Reclaims the selected Chromium target before rebuilding a DWM destination after taskbar restore, preventing a restored surface from mirroring a different/blank tab.
+          - Adds regression coverage for switched-tab navigation completion, superseded same-tab navigation, Google-auth source ownership, and DWM restore target ordering.
+          - Adds a native Linux x86_64 PyInstaller release pipeline with a bundled Tekzite Network helper.
+          - Linux packages now select Tekzite's CDP software presentation automatically instead of attempting the Windows-only DWM attach path.
+          """
+          if not text.startswith("# v10.5.83"):
+              p.write_text(entry.strip() + "\n\n" + text.lstrip(), encoding="utf-8")
+          '@ | python -
+          python tools\sync_version.py 10.5.83 --check
+
+      - name: Install test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
+          python -m pip install --only-binary=:all: -r requirements-dev.txt
+
+      - name: Run regression suite
+        shell: pwsh
+        run: python -m pytest -q tests/current
+
+      - name: Test Chromium extension scripts
+        shell: pwsh
+        run: node tests\current\test_extension_features.cjs
+
+      - name: Run environment doctor
+        shell: pwsh
+        run: python tools\doctor.py
+
+      - name: Commit verified v10.5.83 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .release
+          rm -f .github/workflows/import-v10583.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config core.whitespace cr-at-eol
+          git add -A
+          git diff --cached --check
+          git commit -m "Release Tekzite Browser v10.5.83"
+          git push origin HEAD:main
