@@ -1,3 +1,13 @@
+# v10.5.93 - Fast HTML Inspector and clean shutdown
+
+- Makes Inspect Chromium HTML appear immediately instead of stalling during syntax coloring on large live DOMs.
+- Moves HTML syntax parsing off the Tk UI thread and delays it until after the inspector opening animation.
+- Applies syntax colors in small bounded batches so Tk can keep painting and accepting input while highlighting completes.
+- Keeps the professional HTML source layout, bidirectional search, source statistics, Live DOM mode and native response-source mode.
+- Removes the DWM thumbnail and destination window before Chromium performs its bounded graceful profile flush during shutdown.
+- Withdraws the Tekzite shell immediately on exit so the browser no longer lingers as a white DWM surface while Chromium finishes cleanup.
+- Keeps final native cleanup idempotent and preserves graceful Chromium profile persistence.
+
 # v10.5.92 - Professional HTML Inspector
 
 - Rebuilds Inspect Chromium HTML into a structured, read-only developer source viewer.
