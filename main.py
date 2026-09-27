@@ -877,7 +877,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.91"
+BROWSER_VERSION = "10.5.92"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -13127,110 +13127,408 @@ class BrowserApp(BrowserFeatures):
 
 
     def inspect_html(self):
-        """Open a searchable HTML source viewer for the current page.
+        """Open a polished, searchable HTML source viewer for the current page.
 
         Native pages expose the exact response source that Tekzite parsed.
         Embedded Chromium pages expose the live DOM after JavaScript has run.
+        The viewer is presentation-only: it never rewrites the inspected page.
         """
         window = self._new_animated_toplevel(self.root)
         window.title(f"Tekzite HTML Inspector — v{BROWSER_VERSION}")
-        window.geometry("1180x760")
+        window.geometry("1240x800")
+        window.minsize(860, 540)
         window.configure(bg=self.ui["bg"])
 
-        toolbar = tk.Frame(window, bg=self.ui["chrome"], height=44)
-        toolbar.pack(fill="x")
-        toolbar.pack_propagate(False)
+        editor_bg = "#0b1020"
+        editor_fg = "#d8dee9"
+        editor_muted = "#7f8ea3"
+        editor_border = "#263247"
+
+        # Compact document identity header. Keep this useful rather than verbose:
+        # mode on the left, current page identity in the middle, actions on the right.
+        header = tk.Frame(
+            window, bg=self.ui["chrome"],
+            highlightbackground=self.ui["border"], highlightthickness=1,
+        )
+        header.pack(fill="x")
+
+        identity = tk.Frame(header, bg=self.ui["chrome"])
+        identity.pack(side="left", fill="x", expand=True, padx=(14, 10), pady=10)
+
+        tk.Label(
+            identity, text="</>  HTML Source",
+            bg=self.ui["chrome"], fg=self.ui["text"],
+            font=(self._ui_font_family, self._font_size(11), "bold"),
+        ).pack(anchor="w")
+
+        current_url = ""
+        try:
+            tab = self._active_tab()
+            if isinstance(tab, dict):
+                current_url = str(tab.get("url") or "")
+        except Exception:
+            current_url = ""
+        if not current_url:
+            current_url = str(getattr(self, "_current_url", "") or "")
+
+        display_url = current_url or "Current document"
+        if len(display_url) > 118:
+            display_url = f"{display_url[:74]}…{display_url[-40:]}"
+        document_var = tk.StringVar(value=display_url)
+        tk.Label(
+            identity, textvariable=document_var,
+            bg=self.ui["chrome"], fg=self.ui["muted"],
+            font=(self._ui_font_family, self._font_size(8)),
+            anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
 
         source_var = tk.StringVar(
-            value="Live Chromium DOM" if self._embedded_mode else "Native response source"
+            value="LIVE DOM" if self._embedded_mode else "RESPONSE SOURCE"
         )
         tk.Label(
-            toolbar, textvariable=source_var, bg=self.ui["chrome"],
-            fg=self.ui["muted"], font=(self._ui_font_family, self._font_size(9)), padx=12
-        ).pack(side="left")
+            header, textvariable=source_var,
+            bg=self.ui["accent"], fg="#ffffff",
+            font=(self._ui_font_family, self._font_size(8), "bold"),
+            padx=10, pady=5,
+        ).pack(side="right", padx=(8, 14), pady=12)
+
+        # Search/action row. Search results are counted from the in-memory source
+        # string so navigation remains predictable even while syntax tags exist.
+        toolbar = tk.Frame(window, bg=self.ui["chrome_2"])
+        toolbar.pack(fill="x")
+
+        tk.Label(
+            toolbar, text="Find in source",
+            bg=self.ui["chrome_2"], fg=self.ui["muted"],
+            font=(self._ui_font_family, self._font_size(8)),
+        ).pack(side="left", padx=(14, 7))
 
         find_var = tk.StringVar()
         find_entry = tk.Entry(
-            toolbar, textvariable=find_var, bg=self.ui["field"],
-            fg=self.ui["text"], insertbackground=self.ui["text"],
-            relief="flat", bd=0, font=(self._ui_font_family, self._font_size(9))
+            toolbar, textvariable=find_var,
+            bg=self.ui["field"], fg=self.ui["text"],
+            insertbackground=self.ui["text"],
+            selectbackground=self.ui["accent"], selectforeground="#ffffff",
+            relief="flat", bd=0,
+            font=(self._ui_font_family, self._font_size(9)),
         )
-        find_entry.pack(side="left", fill="x", expand=True, padx=(8, 6), pady=8)
+        find_entry.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=8, ipady=3)
 
-        body = tk.Frame(window, bg=self.ui["bg"])
+        match_var = tk.StringVar(value="")
+        tk.Label(
+            toolbar, textvariable=match_var, width=10, anchor="center",
+            bg=self.ui["chrome_2"], fg=self.ui["muted"],
+            font=(self._ui_font_family, self._font_size(8)),
+        ).pack(side="left", padx=(2, 4))
+
+        def toolbar_button(label, command, padx=10):
+            button = tk.Button(
+                toolbar, text=label, command=command,
+                bg=self.ui["chrome"], fg=self.ui["text"],
+                activebackground=self.ui["accent"], activeforeground="#ffffff",
+                relief="flat", bd=0, padx=padx, pady=4, cursor="hand2",
+                font=(self._ui_font_family, self._font_size(8)),
+            )
+            return button
+
+        body = tk.Frame(
+            window, bg=editor_bg,
+            highlightbackground=editor_border, highlightthickness=1,
+        )
         body.pack(fill="both", expand=True)
+
         yscroll = tk.Scrollbar(body, orient="vertical")
         yscroll.pack(side="right", fill="y")
         xscroll = tk.Scrollbar(body, orient="horizontal")
         xscroll.pack(side="bottom", fill="x")
+
         text = tk.Text(
-            body, wrap="none", font=(self._ui_monospace_font_family, self._font_size(10)),
-            bg="#090d16", fg="#dce6f7", insertbackground="#ffffff",
+            body, wrap="none",
+            font=(self._ui_monospace_font_family, self._font_size(10)),
+            bg=editor_bg, fg=editor_fg, insertbackground="#ffffff",
             selectbackground=self.ui["accent"], selectforeground="#ffffff",
-            relief="flat", bd=0, padx=12, pady=10,
+            relief="flat", bd=0, padx=16, pady=12,
+            spacing1=1, spacing3=1,
             yscrollcommand=yscroll.set, xscrollcommand=xscroll.set,
         )
         text.pack(side="left", fill="both", expand=True)
         yscroll.configure(command=text.yview)
         xscroll.configure(command=text.xview)
 
-        status_var = tk.StringVar(value="Loading HTML…" if self._embedded_mode else "Ready")
-        status = tk.Label(
-            window, textvariable=status_var, anchor="w",
-            bg=self.ui["chrome"], fg=self.ui["muted"],
-            font=(self._ui_font_family, self._font_size(8)), padx=10, pady=4
-        )
-        status.pack(fill="x")
+        # Syntax palette inspired by modern code editors, with enough contrast to
+        # distinguish structure at a glance without turning the DOM into confetti.
+        syntax_tags = {
+            "html_comment": {"foreground": "#6a9955"},
+            "html_doctype": {"foreground": "#c586c0"},
+            "html_bracket": {"foreground": "#808fa8"},
+            "html_tag": {"foreground": "#ff7ab2"},
+            "html_attr": {"foreground": "#7ee787"},
+            "html_value": {"foreground": "#f2cc60"},
+            "html_entity": {"foreground": "#79c0ff"},
+            "html_script": {"foreground": "#dcdcaa"},
+            "html_style": {"foreground": "#ce9178"},
+        }
+        for tag_name, options in syntax_tags.items():
+            text.tag_configure(tag_name, **options)
 
-        text.tag_configure("match", background="#4b3f83", foreground="#ffffff")
-        search_state = {"start": "1.0"}
+        text.tag_configure(
+            "match_all", background="#23304f", foreground="#ffffff"
+        )
+        text.tag_configure(
+            "match_current", background="#744fc6", foreground="#ffffff"
+        )
+
+        footer = tk.Frame(
+            window, bg=self.ui["chrome"],
+            highlightbackground=self.ui["border"], highlightthickness=1,
+        )
+        footer.pack(fill="x")
+        stats_var = tk.StringVar(value="Loading HTML…" if self._embedded_mode else "Ready")
+        tk.Label(
+            footer, textvariable=stats_var, anchor="w",
+            bg=self.ui["chrome"], fg=self.ui["muted"],
+            font=(self._ui_font_family, self._font_size(8)),
+            padx=12, pady=6,
+        ).pack(side="left", fill="x", expand=True)
+        tk.Label(
+            footer, text="Read-only",
+            bg=self.ui["chrome"], fg=editor_muted,
+            font=(self._ui_font_family, self._font_size(8)),
+            padx=12, pady=6,
+        ).pack(side="right")
+
+        source_state = {"html": "", "generation": 0}
+        search_state = {"query": "", "matches": [], "position": -1}
+        highlight_limit = 750_000
+
+        def tk_index(offset):
+            return f"1.0+{max(0, int(offset))}c"
+
+        def add_tag(tag_name, start_offset, end_offset):
+            if end_offset <= start_offset:
+                return
+            text.tag_add(tag_name, tk_index(start_offset), tk_index(end_offset))
+
+        def apply_syntax_highlighting(html, generation):
+            if generation != source_state["generation"] or not window.winfo_exists():
+                return
+
+            text.configure(state="normal")
+            for tag_name in syntax_tags:
+                text.tag_remove(tag_name, "1.0", "end")
+
+            sample = html[:highlight_limit]
+
+            # Comments and declarations are treated as whole tokens first.
+            for match in re.finditer(r"<!--.*?-->", sample, flags=re.DOTALL):
+                add_tag("html_comment", match.start(), match.end())
+            for match in re.finditer(r"<![^>]*>", sample, flags=re.IGNORECASE | re.DOTALL):
+                if sample.startswith("<!--", match.start()):
+                    continue
+                add_tag("html_doctype", match.start(), match.end())
+
+            # Element tags, punctuation, attributes and quoted/unquoted values.
+            tag_pattern = re.compile(
+                r"</?\s*[A-Za-z][^<>]*?>",
+                flags=re.DOTALL,
+            )
+            attr_pattern = re.compile(
+                r"([A-Za-z_:][\w:.-]*)(\s*=\s*)(\"[^\"]*\"|'[^']*'|[^\s>]+)",
+                flags=re.DOTALL,
+            )
+            for match in tag_pattern.finditer(sample):
+                token = match.group(0)
+                token_start = match.start()
+
+                opening = re.match(r"</?\s*", token)
+                if opening:
+                    add_tag(
+                        "html_bracket",
+                        token_start + opening.start(),
+                        token_start + opening.end(),
+                    )
+
+                tag_name_match = re.match(r"</?\s*([A-Za-z][\w:.-]*)", token)
+                if tag_name_match:
+                    add_tag(
+                        "html_tag",
+                        token_start + tag_name_match.start(1),
+                        token_start + tag_name_match.end(1),
+                    )
+                    attr_start = tag_name_match.end(1)
+                else:
+                    attr_start = 0
+
+                closing_start = max(token.rfind("/>"), token.rfind(">"))
+                if closing_start >= 0:
+                    add_tag(
+                        "html_bracket",
+                        token_start + closing_start,
+                        token_start + len(token),
+                    )
+
+                for attr in attr_pattern.finditer(token, attr_start):
+                    add_tag(
+                        "html_attr",
+                        token_start + attr.start(1),
+                        token_start + attr.end(1),
+                    )
+                    add_tag(
+                        "html_value",
+                        token_start + attr.start(3),
+                        token_start + attr.end(3),
+                    )
+
+            for match in re.finditer(
+                r"&(?:#[0-9]+|#x[0-9a-f]+|[A-Za-z][A-Za-z0-9]+);",
+                sample, flags=re.IGNORECASE,
+            ):
+                add_tag("html_entity", match.start(), match.end())
+
+            # Give script/style bodies a gentle secondary tint. HTML tokens above
+            # remain independently colored because their tags are raised later.
+            for match in re.finditer(
+                r"<script\b[^>]*>(.*?)</script\s*>",
+                sample, flags=re.IGNORECASE | re.DOTALL,
+            ):
+                add_tag("html_script", match.start(1), match.end(1))
+            for match in re.finditer(
+                r"<style\b[^>]*>(.*?)</style\s*>",
+                sample, flags=re.IGNORECASE | re.DOTALL,
+            ):
+                add_tag("html_style", match.start(1), match.end(1))
+
+            for tag_name in (
+                "html_script", "html_style", "html_comment", "html_doctype",
+                "html_bracket", "html_tag", "html_attr", "html_value", "html_entity",
+            ):
+                text.tag_raise(tag_name)
+            text.tag_raise("match_all")
+            text.tag_raise("match_current")
+            text.configure(state="disabled")
+
+            if len(html) > highlight_limit:
+                base = stats_var.get().split("  •  Syntax:")[0]
+                stats_var.set(
+                    f"{base}  •  Syntax: first {highlight_limit:,} characters"
+                )
+
+        def update_stats(html):
+            lines = html.count("\n") + 1 if html else 0
+            tags = len(re.findall(
+                r"<(?![!/?])\s*[A-Za-z][\w:.-]*(?:\s|/?>)",
+                html,
+            ))
+            comments = html.count("<!--")
+            stats_var.set(
+                f"{lines:,} lines  •  {tags:,} elements  •  "
+                f"{comments:,} comments  •  {len(html):,} characters"
+            )
+
+        def clear_search_highlights():
+            text.configure(state="normal")
+            text.tag_remove("match_all", "1.0", "end")
+            text.tag_remove("match_current", "1.0", "end")
+            text.configure(state="disabled")
+
+        def rebuild_search_matches():
+            query = find_var.get()
+            clear_search_highlights()
+            search_state["query"] = query
+            search_state["matches"] = []
+            search_state["position"] = -1
+            match_var.set("")
+            if not query:
+                return []
+
+            html = source_state["html"]
+            matches = [
+                (match.start(), match.end())
+                for match in re.finditer(re.escape(query), html, flags=re.IGNORECASE)
+            ]
+            search_state["matches"] = matches
+            if not matches:
+                match_var.set("0 matches")
+                return []
+
+            text.configure(state="normal")
+            for start_offset, end_offset in matches[:2000]:
+                add_tag("match_all", start_offset, end_offset)
+            text.tag_raise("match_all")
+            text.configure(state="disabled")
+            match_var.set(f"0 / {len(matches):,}")
+            return matches
+
+        def move_search(direction):
+            query = find_var.get()
+            if query != search_state["query"]:
+                rebuild_search_matches()
+
+            matches = search_state["matches"]
+            if not matches:
+                return "break"
+
+            position = search_state["position"]
+            if position < 0:
+                position = 0 if direction > 0 else len(matches) - 1
+            else:
+                position = (position + direction) % len(matches)
+            search_state["position"] = position
+
+            start_offset, end_offset = matches[position]
+            text.configure(state="normal")
+            text.tag_remove("match_current", "1.0", "end")
+            add_tag("match_current", start_offset, end_offset)
+            text.tag_raise("match_current")
+            text.configure(state="disabled")
+            text.see(tk_index(start_offset))
+            match_var.set(f"{position + 1:,} / {len(matches):,}")
+            return "break"
+
+        def find_next(event=None):
+            return move_search(1)
+
+        def find_previous(event=None):
+            return move_search(-1)
 
         def set_html(html):
             html = str(html or "")
+            source_state["html"] = html
+            source_state["generation"] += 1
+            generation = source_state["generation"]
+
             text.configure(state="normal")
             text.delete("1.0", "end")
             text.insert("1.0", html)
             text.configure(state="disabled")
-            status_var.set(f"{len(html):,} characters")
-            search_state["start"] = "1.0"
 
-        def find_next(event=None):
-            query = find_var.get()
-            text.tag_remove("match", "1.0", "end")
-            if not query:
-                return "break"
-            idx = text.search(query, search_state["start"], stopindex="end", nocase=True)
-            if not idx:
-                idx = text.search(query, "1.0", stopindex="end", nocase=True)
-            if not idx:
-                status_var.set(f"Not found: {query}")
-                return "break"
-            end = f"{idx}+{len(query)}c"
-            text.tag_add("match", idx, end)
-            text.see(idx)
-            search_state["start"] = end
-            status_var.set(f"Match: {query}")
-            return "break"
+            search_state["query"] = ""
+            search_state["matches"] = []
+            search_state["position"] = -1
+            match_var.set("")
+            update_stats(html)
+
+            # Paint content immediately, then colorize on the next idle turn so
+            # large DOMs do not delay the first visible source frame.
+            window.after_idle(
+                lambda content=html, gen=generation: apply_syntax_highlighting(content, gen)
+            )
 
         def copy_all():
-            html = text.get("1.0", "end-1c")
+            html = source_state["html"]
             self.root.clipboard_clear()
             self.root.clipboard_append(html)
-            status_var.set(f"Copied {len(html):,} characters")
+            stats_var.set(f"Copied {len(html):,} characters to clipboard")
 
         find_entry.bind("<Return>", find_next)
-        tk.Button(
-            toolbar, text="Find", command=find_next,
-            bg=self.ui["chrome_2"], fg=self.ui["text"],
-            activebackground=self.ui["accent"], activeforeground="#ffffff",
-            relief="flat", bd=0, padx=12, cursor="hand2"
-        ).pack(side="left", padx=4, pady=7)
-        tk.Button(
-            toolbar, text="Copy All", command=copy_all,
-            bg=self.ui["chrome_2"], fg=self.ui["text"],
-            activebackground=self.ui["accent"], activeforeground="#ffffff",
-            relief="flat", bd=0, padx=12, cursor="hand2"
-        ).pack(side="left", padx=(2, 10), pady=7)
+        find_entry.bind("<Shift-Return>", find_previous)
+        find_entry.bind("<Escape>", lambda event: (find_var.set(""), rebuild_search_matches(), "break")[-1])
+
+        toolbar_button("Previous", find_previous).pack(side="left", padx=2, pady=7)
+        toolbar_button("Next", find_next).pack(side="left", padx=2, pady=7)
+        toolbar_button("Copy Source", copy_all, padx=12).pack(
+            side="left", padx=(8, 14), pady=7
+        )
 
         if self._embedded_mode:
             future = self._executor.submit(get_embedded_chromium_html)
@@ -13244,8 +13542,10 @@ class BrowserApp(BrowserFeatures):
                 try:
                     set_html(future.result())
                 except Exception as exc:
-                    source_var.set("Chromium DOM inspection failed")
-                    set_html(f"<!-- Tekzite could not inspect the live Chromium DOM: {exc} -->")
+                    source_var.set("INSPECTION FAILED")
+                    set_html(
+                        f"<!-- Tekzite could not inspect the live Chromium DOM: {exc} -->"
+                    )
 
             window.after(20, poll_html)
         else:

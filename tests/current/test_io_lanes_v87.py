@@ -6,7 +6,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_version_87():
-    assert 'BROWSER_VERSION = "10.5.91"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.92"' in MAIN
 
 
 def test_latency_sensitive_io_channels_are_warmed():

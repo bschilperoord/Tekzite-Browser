@@ -1,3 +1,12 @@
+# v10.5.92 - Professional HTML Inspector
+
+- Rebuilds Inspect Chromium HTML into a structured, read-only developer source viewer.
+- Adds semantic syntax coloring for HTML tags, attributes, values, comments, entities, declarations, script bodies and style bodies.
+- Adds a clear document header with page identity and LIVE DOM / RESPONSE SOURCE mode badges.
+- Adds bidirectional source search with result counts, highlighted matches, Previous/Next controls and Shift+Enter navigation.
+- Adds source statistics for lines, elements, comments and characters plus a clearer Copy Source action.
+- Preserves the existing live Chromium DOM and native response-source inspection paths without rewriting inspected pages.
+
 # v10.5.91 - Startup drag priority
 
 - Gives active top-level window dragging priority over cold-start maintenance so the shell stays responsive during the first seconds after launch.
