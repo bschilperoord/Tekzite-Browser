@@ -126,6 +126,6 @@ def test_windows_and_extension_version_metadata_match_release():
     extension = json.loads((root / 'chromium_zoom_extension' / 'manifest.json').read_text(encoding='utf-8'))
     assert extension['version'] == '10.5.93'
     info = (root / 'tekzite_version_info.txt').read_text(encoding='utf-8')
-    assert 'filevers=(10, 5, 92, 0)' in info
+    assert 'filevers=(10, 5, 93, 0)' in info
     assert "u'ProductVersion', u'10.5.93'" in info
 
