@@ -877,7 +877,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.90"
+BROWSER_VERSION = "10.5.91"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -2364,6 +2364,15 @@ class BrowserApp(BrowserFeatures):
         self._window_drag_active = False
         self._window_drag_pending_xy = None
         self._window_drag_after_id = None
+        # v10.5.91: interactive top-level movement outranks startup maintenance.
+        # Keep only the newest expensive startup request and replay it after
+        # mouse release instead of letting Tk drain it mid-drag.
+        self._window_drag_deferred_recrop = None
+        self._window_drag_deferred_probe = None
+        self._window_drag_deferred_zoom_all = False
+        self._window_drag_deferred_zoom_targets = set()
+        self._window_drag_deferred_dwm_zoom_refresh = False
+        self._window_drag_settle_after_id = None
         # v10.5.89: coalesced frameless window resizing. Invisible edge/corner
         # hit zones drive root geometry while normal Configure handling keeps the
         # Chromium/DWM viewport synchronized.
@@ -5074,6 +5083,9 @@ class BrowserApp(BrowserFeatures):
             if not future.done():
                 self.root.after(35, finish)
                 return
+            if getattr(self, "_window_drag_active", False):
+                self.root.after(80, finish)
+                return
             self._page_state_inflight.discard(key)
             try:
                 info = future.result() or {}
@@ -5153,6 +5165,12 @@ class BrowserApp(BrowserFeatures):
 
     def _page_state_tick(self):
         self._page_state_after_id = None
+        if getattr(self, "_window_drag_active", False):
+            try:
+                self._page_state_after_id = self.root.after(250, self._page_state_tick)
+            except Exception:
+                self._page_state_after_id = None
+            return
         live = [t for t in self.tabs if t.get("chromium_target_id")]
         active = self._active_tab()
         for tab in live:
@@ -7145,6 +7163,10 @@ class BrowserApp(BrowserFeatures):
 
         def _flush():
             self._dwm_geometry_after_id = None
+            if getattr(self, "_window_drag_active", False):
+                # Preserve the pending flags. Drag release performs one exact
+                # reconciliation against the final root position.
+                return
             do_resize = bool(self._dwm_pending_resize)
             force_now = bool(self._dwm_pending_force_resize)
             refresh_metrics_now = bool(self._dwm_pending_input_metrics_refresh)
@@ -7893,6 +7915,9 @@ class BrowserApp(BrowserFeatures):
         """
         self._dwm_pointer_after_id = None
         if getattr(self, "_closing", False):
+            return
+        if getattr(self, "_window_drag_active", False):
+            self._schedule_dwm_pointer_bridge(delay=48)
             return
         if not (os.name == "nt" and self._embedded_mode and self._chromium_dwm_mode
                 and self._dwm_surface_ready and self._dwm_host_visible and self._dwm_host):
@@ -8838,7 +8863,8 @@ class BrowserApp(BrowserFeatures):
             pass
         if not self.edge_host.winfo_ismapped():
             self.edge_host.pack(fill="both", expand=True)
-        self.root.update_idletasks()
+        if not getattr(self, "_window_drag_active", False):
+            self.root.update_idletasks()
         self._cancel_dwm_host_reveal()
         # v6.1: position the DWM destination while it is still hidden. The
         # surface is revealed only after Chromium has received its real viewport.
@@ -8932,6 +8958,8 @@ class BrowserApp(BrowserFeatures):
         try:
             if getattr(event, "widget", self.root) is not self.root:
                 return
+            if getattr(self, "_window_drag_active", False):
+                return
             self._apply_window_rounding()
         except Exception:
             pass
@@ -8976,7 +9004,14 @@ class BrowserApp(BrowserFeatures):
         frames without being called stalled, and a completed page must produce two
         consecutive blank samples before the DComp source is diagnosed as stuck.
         """
-        if generation != self._navigation_generation or not self._embedded_mode:
+        if generation != self._navigation_generation:
+            return
+        if getattr(self, "_window_drag_active", False):
+            self._window_drag_deferred_probe = (
+                generation, target_id, bool(cdp_visual), int(attempt)
+            )
+            return
+        if not self._embedded_mode:
             return
         if self._chromium_software_mode or not cdp_visual:
             return
@@ -9125,7 +9160,15 @@ class BrowserApp(BrowserFeatures):
         tab/document that started the request instead of consulting _active_tab().
         """
         if not future.done():
-            self.root.after(8, self._poll_embedded_navigation,
+            self.root.after(32 if getattr(self, "_window_drag_active", False) else 8,
+                            self._poll_embedded_navigation,
+                            generation, future, url, add_history,
+                            owner_tab_id, owner_page_epoch)
+            return
+        if getattr(self, "_window_drag_active", False):
+            # A completed cold-start navigation can rebuild DWM/source geometry.
+            # Commit that UI transition only after the user releases the window.
+            self.root.after(40, self._poll_embedded_navigation,
                             generation, future, url, add_history,
                             owner_tab_id, owner_page_epoch)
             return
@@ -9316,6 +9359,9 @@ class BrowserApp(BrowserFeatures):
         RenderWidgetHost instead of keeping the previous site's chrome inset.
         """
         if generation != self._navigation_generation:
+            return
+        if getattr(self, "_window_drag_active", False):
+            self._window_drag_deferred_recrop = (generation, int(delay_index))
             return
         if not self._embedded_mode or not self._chromium_dwm_mode:
             return
@@ -9534,6 +9580,11 @@ class BrowserApp(BrowserFeatures):
         """
         if sys.platform != "win32":
             return False
+        # Moving the window cannot change its corner contract. Avoid the
+        # update_idletasks() below while dragging because it can recursively
+        # drain startup timers and cause visible hitches.
+        if getattr(self, "_window_drag_active", False):
+            return True
         try:
             import ctypes
             from ctypes import wintypes
@@ -9621,6 +9672,9 @@ class BrowserApp(BrowserFeatures):
         """Keep Tekzite's real top-level Win32 wrapper permanently taskbar-eligible."""
         if sys.platform != "win32":
             return False
+        if (getattr(self, "_window_drag_active", False)
+                and int(getattr(self, "_taskbar_identity_hwnd", 0) or 0)):
+            return True
         try:
             import ctypes
             from ctypes import wintypes
@@ -9711,6 +9765,9 @@ class BrowserApp(BrowserFeatures):
 
     def _taskbar_presence_guard(self):
         self._taskbar_presence_guard_after_id = None
+        if getattr(self, "_window_drag_active", False):
+            self._schedule_taskbar_presence_guard(300)
+            return
         try:
             if not bool(self.root.winfo_exists()):
                 return
@@ -10005,7 +10062,8 @@ class BrowserApp(BrowserFeatures):
             from ctypes import wintypes
             user32 = ctypes.windll.user32
             self._native_drag_user32 = user32
-            self.root.update_idletasks()
+            if not getattr(self, "_window_drag_active", False):
+                self.root.update_idletasks()
             hwnd = int(self._current_native_root_hwnd() or 0)
             if not hwnd:
                 raise RuntimeError("Tekzite native root HWND is unavailable")
@@ -10055,6 +10113,19 @@ class BrowserApp(BrowserFeatures):
             if self._native_drag_last_xy == (x, y):
                 return True
             offset = self._native_drag_dwm_offset
+            if (offset is None and self._dwm_host_rect is not None
+                    and self._embedded_mode and self._chromium_dwm_mode and self._dwm_host):
+                try:
+                    anchor = self._native_drag_last_xy
+                    if anchor is None:
+                        anchor = (int(self.root.winfo_x()), int(self.root.winfo_y()))
+                    offset = (
+                        int(self._dwm_host_rect[0]) - int(anchor[0]),
+                        int(self._dwm_host_rect[1]) - int(anchor[1]),
+                    )
+                    self._native_drag_dwm_offset = offset
+                except Exception:
+                    offset = None
             has_dwm = bool(
                 offset is not None and self._embedded_mode and self._chromium_dwm_mode
                 and self._dwm_host and self._dwm_host_size
@@ -10116,6 +10187,12 @@ class BrowserApp(BrowserFeatures):
         self._window_drag_active = True
         self._window_drag_pending_xy = None
         self._native_drag_last_xy = None
+        if self._dwm_geometry_after_id is not None:
+            try:
+                self.root.after_cancel(self._dwm_geometry_after_id)
+            except Exception:
+                pass
+            self._dwm_geometry_after_id = None
         # v10.5.54: refresh once at every drag start. The Tk top-level HWND can
         # change across taskbar minimize/restore, so a pre-minimize cache is not
         # safe even when it is non-zero.
@@ -10187,6 +10264,58 @@ class BrowserApp(BrowserFeatures):
         self._native_drag_last_xy = None
         if self._embedded_mode and self._chromium_dwm_mode:
             self._schedule_dwm_geometry_sync(resize=False, delay=1)
+        self._schedule_post_drag_maintenance()
+
+
+    def _schedule_post_drag_maintenance(self, delay=24):
+        if self._window_drag_settle_after_id is not None:
+            try:
+                self.root.after_cancel(self._window_drag_settle_after_id)
+            except Exception:
+                pass
+        try:
+            self._window_drag_settle_after_id = self.root.after(
+                max(1, int(delay)), self._flush_post_drag_maintenance
+            )
+        except Exception:
+            self._window_drag_settle_after_id = None
+
+    def _flush_post_drag_maintenance(self):
+        """Replay deferred startup work in small post-drag slices."""
+        self._window_drag_settle_after_id = None
+        if getattr(self, "_window_drag_active", False):
+            self._schedule_post_drag_maintenance(80)
+            return
+
+        recrop = self._window_drag_deferred_recrop
+        probe = self._window_drag_deferred_probe
+        zoom_all = bool(self._window_drag_deferred_zoom_all)
+        zoom_targets = tuple(self._window_drag_deferred_zoom_targets)
+        dwm_zoom = bool(self._window_drag_deferred_dwm_zoom_refresh)
+        self._window_drag_deferred_recrop = None
+        self._window_drag_deferred_probe = None
+        self._window_drag_deferred_zoom_all = False
+        self._window_drag_deferred_zoom_targets.clear()
+        self._window_drag_deferred_dwm_zoom_refresh = False
+
+        try:
+            if recrop is not None:
+                self.root.after(35, self._refresh_dwm_crop_after_navigation, *recrop)
+            if zoom_all:
+                self.root.after(85, self._run_scheduled_chromium_zoom_apply, None, True)
+            elif zoom_targets:
+                for index, target_id in enumerate(zoom_targets):
+                    self.root.after(
+                        85 + index * 35,
+                        self._run_scheduled_chromium_zoom_apply,
+                        target_id, False,
+                    )
+            if dwm_zoom:
+                self.root.after(150, self._run_scheduled_dwm_zoom_refresh)
+            if probe is not None:
+                self.root.after(220, self._probe_visible_embedded_surface, *probe)
+        except Exception:
+            pass
 
     def _install_window_resize_handles(self):
         """Install invisible edge/corner grips for the frameless browser root."""
@@ -10878,6 +11007,9 @@ class BrowserApp(BrowserFeatures):
         this refresh merely re-establishes the current viewport/crop at 1:1 so
         the thumbnail can never become a second, image-level zoom transform.
         """
+        if getattr(self, "_window_drag_active", False):
+            self._window_drag_deferred_dwm_zoom_refresh = True
+            return False
         if not self._embedded_mode or not self._chromium_dwm_mode:
             return False
         try:
@@ -10889,11 +11021,17 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             return False
 
+    def _run_scheduled_dwm_zoom_refresh(self):
+        if getattr(self, "_window_drag_active", False):
+            self._window_drag_deferred_dwm_zoom_refresh = True
+            return False
+        return self._refresh_dwm_after_zoom()
+
     def _schedule_dwm_zoom_refresh(self):
         """Follow Chromium's short zoom/reflow settle window without DWM scaling."""
         for delay in (0, 45, 120, 260, 520):
             try:
-                self.root.after(delay, self._refresh_dwm_after_zoom)
+                self.root.after(delay, self._run_scheduled_dwm_zoom_refresh)
             except Exception:
                 pass
 
@@ -10922,6 +11060,18 @@ class BrowserApp(BrowserFeatures):
             pass
         return applied
 
+    def _run_scheduled_chromium_zoom_apply(self, target_id=None, all_tabs=False):
+        """Run one zoom settle pass unless top-level dragging owns the UI."""
+        if getattr(self, "_window_drag_active", False):
+            if all_tabs:
+                self._window_drag_deferred_zoom_all = True
+            else:
+                self._window_drag_deferred_zoom_targets.add(target_id)
+            return False
+        if all_tabs:
+            return self._apply_chromium_zoom_to_all_tabs()
+        return self._apply_chromium_zoom(target_id)
+
     def _schedule_chromium_zoom_apply(self, target_id=None, all_tabs=False):
         """Re-apply zoom across the short redirect/renderer-settle window.
 
@@ -10932,10 +11082,10 @@ class BrowserApp(BrowserFeatures):
         """
         for delay in (120, 350, 900, 1800, 3500, 6000):
             try:
-                if all_tabs:
-                    self.root.after(delay, self._apply_chromium_zoom_to_all_tabs)
-                else:
-                    self.root.after(delay, lambda tid=target_id: self._apply_chromium_zoom(tid))
+                self.root.after(
+                    delay, self._run_scheduled_chromium_zoom_apply,
+                    target_id, bool(all_tabs),
+                )
             except Exception:
                 pass
 
@@ -10947,6 +11097,12 @@ class BrowserApp(BrowserFeatures):
         browser zoom immediately. This Tk watchdog is a low-frequency safety net.
         """
         self._zoom_watchdog_after_id = None
+        if getattr(self, "_window_drag_active", False):
+            try:
+                self._zoom_watchdog_after_id = self.root.after(300, self._zoom_watchdog_tick)
+            except Exception:
+                self._zoom_watchdog_after_id = None
+            return
         wanted = self._page_zoom_percent()
         statuses = []
         for target_id in self._live_chromium_target_ids():
@@ -12946,7 +13102,7 @@ class BrowserApp(BrowserFeatures):
                 f"Copied {label} to clipboard ({len(report):,} chars)"
             )
         except Exception as exc:
-            self._show_message("error", 
+            self._show_message("error",
                 label,
                 f"Could not copy debug output:\\n{exc}",
             )

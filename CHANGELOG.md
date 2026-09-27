@@ -1,3 +1,14 @@
+# v10.5.91 - Startup drag priority
+
+- Gives active top-level window dragging priority over cold-start maintenance so the shell stays responsive during the first seconds after launch.
+- Defers forced DWM recrops and visible-surface ImageGrab probes while the user is moving the browser window.
+- Defers Chromium zoom settle passes, DWM zoom refreshes, synchronous zoom watchdog checks, and page-state UI updates until after drag release.
+- Makes root Configure handling effectively zero-work during native window movement and prevents rounding/taskbar helpers from draining Tk idle work mid-drag.
+- Preserves queued DWM geometry state during a drag and performs one exact reconciliation against the final window position after release.
+- Allows the native drag path to adopt a DWM host offset lazily if Chromium becomes visible after the drag already started.
+- Replays deferred startup maintenance in staggered post-drag slices instead of releasing one large callback burst.
+- Keeps normal navigation polling at 8 ms while using a lighter 32 ms polling cadence only during an active top-level drag.
+
 # v10.5.90 - Compact dialogs and feature copy
 
 - Removes large explanatory text blocks from Tekzite-owned dialogs and feature windows without removing their controls, state, or diagnostic values.
