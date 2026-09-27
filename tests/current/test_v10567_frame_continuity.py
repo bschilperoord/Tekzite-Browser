@@ -10,7 +10,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.92"
+    assert main.BROWSER_VERSION == "10.5.93"
 
 
 def test_hot_native_navigation_keeps_existing_dwm_surface_visible():
