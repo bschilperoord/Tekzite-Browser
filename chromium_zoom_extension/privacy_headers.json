@@ -5,7 +5,24 @@
     "action": {
       "type": "modifyHeaders",
       "requestHeaders": [
-        {"header": "referer", "operation": "remove"},
+        {"header": "referer", "operation": "remove"}
+      ]
+    },
+    "condition": {
+      "regexFilter": "^https?://",
+      "excludedRequestDomains": [
+        "chatgpt.com",
+        "openai.com",
+        "challenges.cloudflare.com"
+      ]
+    }
+  },
+  {
+    "id": 11002,
+    "priority": 100,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
         {"header": "x-client-data", "operation": "remove"},
         {"header": "x-chrome-connected", "operation": "remove"}
       ]

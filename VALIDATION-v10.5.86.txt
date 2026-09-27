@@ -1,0 +1,18 @@
+Tekzite Browser v10.5.86 validation
+Date: 2026-09-27
+
+Smooth scrolling:
+- Coarse CDP wheel deltas are eased across short 8 ms steps.
+- Small high-resolution touchpad/precision-wheel deltas remain direct.
+- New wheel input coalesces into the active eased tail instead of queueing behind clicks/keys.
+- Shift+wheel and modifier forwarding remain on the existing mouseWheel CDP path.
+- Linux/X11 Button-4/Button-5 wheel ticks are normalized into the same smoothing path.
+- Chromium is not launched with disable-smooth-scrolling.
+
+Validation:
+- Version metadata synchronization: PASS
+- Python compilation: PASS
+- focused smooth-scroll/input tests: PASS
+- tests/current: 577 PASS
+- Chromium extension mocked-API checks: PASS
+- tools/doctor.py: no blocking setup issues (Linux host notes Windows DWM runtime is Windows-only)

@@ -16,7 +16,7 @@ SECURITY = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.83"
+    assert main.BROWSER_VERSION == "10.5.89"
 
 
 def test_stale_pid_requires_profile_chromium_verification():
@@ -25,8 +25,10 @@ def test_stale_pid_requires_profile_chromium_verification():
     assert block.index("_profile_chromium_pids") < block.index('["taskkill", "/PID"')
 
 
-def test_cdp_uses_chromium_ephemeral_port_and_no_wildcard_origin():
-    assert '"--remote-debugging-port=0"' in NET
+def test_cdp_uses_explicit_loopback_port_and_no_wildcard_origin():
+    assert '"--remote-debugging-port=0"' not in NET
+    assert 'f"--remote-debugging-port={port}"' in NET
+    assert 'port = _free_loopback_port()' in NET
     assert "--remote-allow-origins=*" not in NET
     assert "DevToolsActivePort" in NET
     assert "_validate_devtools_ws_url" in NET
@@ -94,6 +96,6 @@ def test_dependency_and_build_hardening_present():
 def test_security_policy_matches_real_extension_boundary():
     assert "declarativeNetRequest" in SECURITY
     assert "http://*/*" in SECURITY and "https://*/*" in SECURITY
-    assert "--remote-debugging-port=0" in SECURITY
+    assert "port-0 automation signal" in SECURITY
     assert "--remote-allow-origins=*` is not used" in SECURITY
 

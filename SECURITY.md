@@ -22,7 +22,7 @@ The intended design is:
 - HTTPS CONNECT is tunneled without TLS decryption;
 - Chromium uses a dedicated Tekzite profile;
 - the bundled local browser-services extension has `tabs`, `storage`, `downloads`, `downloads.open` and `declarativeNetRequest`; it has `http://*/*` and `https://*/*` host access because its privacy content script and declarative network rules operate on ordinary web pages;
-- Chromium chooses an ephemeral DevTools port (`--remote-debugging-port=0`); Tekzite accepts the `DevToolsActivePort` endpoint only when it is loopback, the port matches, and on Windows the listener belongs to Chromium using the exact Tekzite profile;
+- Tekzite asks the OS for an unused loopback port and launches Chromium with that explicit DevTools port; this avoids Chromium's port-0 automation signal while preserving loopback-only CDP. Tekzite validates the endpoint/port and, on Windows, verifies that the listener belongs to Chromium using the exact Tekzite profile; `DevToolsActivePort` parsing remains available for compatibility/recovery;
 - `--remote-allow-origins=*` is not used; Tekzite's internal CDP WebSocket client connects without an Origin header;
 - the network helper receives a per-launch random instance token; a PID discovered from a remembered listener port is never eligible for forced termination unless its Windows process command line matches that token and port;
 - public-looking proxy hostnames are resolved once and rejected if any resolved address is private, loopback, link-local, multicast, unspecified or otherwise non-global; explicit IP literals and conventional local names remain local-intent exceptions;

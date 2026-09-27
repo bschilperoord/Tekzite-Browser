@@ -1,0 +1,23 @@
+Tekzite Browser v10.5.85 validation
+Date: 2026-09-26
+
+Function-key routing:
+- F1-F12 are handled by one browser-shell dispatcher.
+- F5/Ctrl+F5 refresh the committed current-tab URL, not unfinished omnibox text.
+- Function keys work while Tekzite chrome, Chromium software presentation, or native Windows DWM page focus owns input.
+- Native DWM polling routes F1-F12 to Tekzite rather than swallowing them or forwarding them into the webpage.
+- Held DWM function keys are one-shot to prevent reload storms and repeated fullscreen toggles.
+- Alt-modified function keys remain available to the operating system/application.
+
+Mappings:
+F1 About, F2 New Tab, F3/Shift+F3 Find next/previous, F4 Address,
+F5 Reload, F6 Address, F7 Site Info, F8 Downloads, F9 Privacy Shield,
+F10 File menu, F11 Fullscreen, F12 Inspect Chromium HTML.
+
+Validation:
+- python -m py_compile: PASS
+- focused v10.5.85 function-key tests: 7 PASS
+- tests/current: 570 PASS
+- Chromium extension mocked-API checks: PASS
+- tools/sync_version.py 10.5.85 --check: PASS
+- tools/doctor.py: no blocking setup issues (Linux host notes Windows DWM runtime is Windows-only)

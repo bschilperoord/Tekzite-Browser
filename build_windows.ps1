@@ -101,7 +101,15 @@ analysis = Analysis(
     pathex=[str(project)],
     binaries=[(str(helper), ".")],
     datas=datas,
-    hiddenimports=[],
+    # Keep Customize Tekzite's Tk modules explicit in the OneFile graph.
+    hiddenimports=[
+        "tkinter.ttk",
+        "tkinter.font",
+        "tkinter.colorchooser",
+        "tkinter.filedialog",
+        "tkinter.messagebox",
+        "tkinter.simpledialog",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -164,6 +172,7 @@ Write-Host "  - Windows execution-speed throttling disabled where supported"
 Write-Host "  - cached proxy policy + hostname classification"
 Write-Host "  - coalesced privacy-counter disk writes"
 Write-Host "  - unused heavy Python modules excluded from OneFile"
+Write-Host "  - Customize Tekzite Tk/ttk controls explicitly bundled"
 if ($browserSigned) {
     Write-Host "  - Authenticode signed (SHA-256 + RFC3161 timestamp)" -ForegroundColor Green
 } else {

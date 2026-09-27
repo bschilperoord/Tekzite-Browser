@@ -1,0 +1,24 @@
+Tekzite Browser v10.5.84 validation
+Date: 2026-09-26
+
+Cloudflare / ChatGPT compatibility hardening
+--------------------------------------------
+- Chromium no longer launches with --remote-debugging-port=0.
+- Tekzite selects an available loopback port and launches Chromium with that explicit port.
+- Explicit-port mode keeps the existing loopback URL/port validation and Windows Chromium/profile listener ownership checks.
+- DevToolsActivePort parsing remains available for compatibility/recovery.
+- Referer stripping now excludes only chatgpt.com, openai.com, and challenges.cloudflare.com.
+- x-client-data and x-chrome-connected stripping remain global, including on those compatibility hosts.
+- Ad/tracker blocking, HTTPS-first, DNT/GPC, third-party-cookie controls, QUIC/DoH restrictions, and other Privacy Lockdown protections remain enabled.
+
+Validation
+----------
+- python tools/sync_version.py 10.5.84 --check: PASS
+- python -m py_compile main.py engine/net.py browser_features.py browser_state.py tests/current/test_v10584_cloudflare_compatibility.py: PASS
+- Focused compatibility/security regression selection: PASS
+- PYTHONPATH=. pytest -q tests/current: 563 PASS
+- node tests/current/test_extension_features.cjs: PASS
+
+Live-site note
+--------------
+The real chatgpt.com Cloudflare challenge cannot be conclusively validated from this build environment; user smoke testing against the live challenge is still required.

@@ -2171,13 +2171,13 @@ def _network_helper_pid_matches_state(pid, state):
     return False
 
 
-def _wait_for_devtools(profile_dir, process, timeout=10.0):
-    """Wait for Chromium's OS-assigned loopback DevTools endpoint.
+def _wait_for_devtools(profile_dir, process, timeout=10.0, requested_port=None):
+    """Wait for Tekzite's verified loopback Chromium DevTools endpoint.
 
-    Chromium is launched with ``--remote-debugging-port=0``. It writes the
-    selected port into ``DevToolsActivePort`` inside Tekzite's dedicated profile.
-    Tekzite validates that the listener belongs to Chromium using this exact
-    profile before registering the port with the process-local loopback policy.
+    Tekzite normally launches Chromium on an explicit OS-selected loopback port.
+    Chromium treats the special ``--remote-debugging-port=0`` mode as an
+    automation signal, so normal interactive browsing deliberately avoids that
+    mode. ``DevToolsActivePort`` remains supported for compatibility/recovery.
     """
     deadline = time.monotonic() + timeout
     last_error = None
@@ -2198,11 +2198,20 @@ def _wait_for_devtools(profile_dir, process, timeout=10.0):
                 raise RuntimeError(f"Chromium bridge exited early with code {exit_code}")
             clean_exit_seen = True
 
-        active = _read_devtools_active_port(profile_dir)
-        if not active:
-            time.sleep(0.01)
-            continue
-        port, browser_path = active
+        if requested_port is not None:
+            try:
+                port = int(requested_port)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Requested DevTools port is invalid") from exc
+            if not (1 <= port <= 65535):
+                raise RuntimeError("Requested DevTools port is out of range")
+            browser_path = ""
+        else:
+            active = _read_devtools_active_port(profile_dir)
+            if not active:
+                time.sleep(0.01)
+                continue
+            port, browser_path = active
         try:
             if os.name == "nt":
                 listener_pid = _listener_pid_for_port(port)
@@ -4926,10 +4935,14 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
         for attempt in (1, 2):
             # Let Chromium choose an ephemeral debugging port. This removes the
             # bind-close-rebind TOCTOU window from Tekzite's old free-port probe.
-            port = 0
+            # Chromium marks --remote-debugging-port=0 as automation-controlled.
+            # Tekzite is an interactive browser, not WebDriver, so choose a real
+            # loopback port up front and retry the whole launch if a local race
+            # claims it between selection and Chromium binding.
+            port = _free_loopback_port()
             _CHROMIUM_LAUNCH_DEBUG.update({
                 "attempts": int(_CHROMIUM_LAUNCH_DEBUG.get("attempts", 0)) + 1,
-                "executable": executable, "port": None, "profile": profile,
+                "executable": executable, "port": int(port), "profile": profile,
             })
             process = None
             try:
@@ -4978,7 +4991,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                 _CHROMIUM_LAUNCH_DEBUG["private_profile"] = bool(os.environ.get("TEKZITE_PRIVATE_MODE") == "1")
                 command = [
                     executable,
-                    "--remote-debugging-port=0",
+                    f"--remote-debugging-port={port}",
                     "--remote-debugging-address=127.0.0.1",
                     f"--user-data-dir={profile}",
                     "--no-first-run", "--no-default-browser-check",
@@ -5049,7 +5062,9 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                 )
                 original_pid = int(process.pid)
                 devtools_started = time.monotonic()
-                wait_info = _wait_for_devtools(profile, process, timeout=timeout) or {}
+                wait_info = _wait_for_devtools(
+                    profile, process, timeout=timeout, requested_port=port
+                ) or {}
                 port = int(wait_info.get("port") or 0)
                 if not (1 <= port <= 65535):
                     raise RuntimeError("Chromium did not publish a valid DevToolsActivePort")

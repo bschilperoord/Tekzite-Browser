@@ -1,3 +1,61 @@
+# v10.5.89 - Frameless window resizing
+
+- Fixes **Customize Tekzite** opening without its options: the dialog header passed a two-value `pady` tuple to a Tk `Frame` widget option, which raises `TclError: bad screen distance "4 10"` before the controls are constructed.
+- Hardens **Customize Tekzite** for the packaged Windows build: all five option pages are now scrollable so Windows DPI/font scaling cannot push controls below an unreachable notebook viewport.
+- Re-applies the Tekzite notebook style inside the customization dialog and falls back safely if Windows font enumeration fails, preventing one optional font query from aborting the rest of the controls.
+- Explicitly bundles the Tk/ttk/font/color/file-dialog modules used by Customize Tekzite in the Windows PyInstaller OneFile graph.
+- Adds a dialog readiness/smoke-test seam and packaging regression coverage for the complete five-page customization UI.
+- Adds browser-window resizing from all four edges and all four corners while keeping Tekzite's frameless custom chrome.
+- Uses thin invisible perimeter hit zones instead of restoring an OS title frame, so the existing rounded shell and custom window controls remain intact.
+- Coalesces raw resize motion to roughly one geometry commit per compositor frame to avoid flooding Tk and the DWM Chromium viewport.
+- Keeps opposite edges anchored when resizing from the left/top and enforces the configured minimum browser dimensions.
+- Hides resize grips while maximized or fullscreen and restores them when returning to a normal window.
+- Forces a final DWM viewport and input-metrics reconciliation after resize release so the visible page and click coordinates settle on the same dimensions.
+- Adds regression coverage for all edge/corner grips, minimum-size clamping and final DWM synchronization.
+
+# v10.5.88 - Tab tear-off windows
+
+- Adds browser-style tab tear-off: drag a tab clearly outside the tab strip and release it to move that page into its own Tekzite window.
+- Uses a drag threshold plus an expanded strip boundary so ordinary clicks and small pointer slips cannot accidentally spawn a new window.
+- Supports both Tekzite soft tabs and classic tabs, with the same ownership-safe gesture path on Windows and Linux.
+- The detached window opens near the drop point and receives the moved tab URL through Tekzite's existing shell-activation path.
+- Source Chromium targets are retired only after the destination process launch succeeds, so two Tekzite windows are never assigned the same target.
+- A moved tab is not added to the Ctrl+Shift+T closed-tab stack, preventing duplicate resurrection after tear-off.
+- Adds **Move Tab to New Window** to the tab context menu as a non-drag fallback.
+- Adds regression coverage for drag thresholds, strip escape detection, exact tab ownership, process launch arguments, drop positioning, and closed-tab semantics.
+
+# v10.5.87 - DWM click-through guard
+
+- Fixes the Windows DWM pointer watchdog forwarding a physical click into Chromium when another application, Tekzite popup, or dialog is visually above the browser at the same screen coordinates.
+- The fallback now asks Windows for the actual top native window under the cursor with `WindowFromPoint` and accepts a new page press only when that window is Tekzite's DWM page surface, `edge_host`, or a native child of `edge_host`.
+- Existing drags that genuinely started inside Chromium still receive their matching release even if the pointer later leaves the page or becomes covered, preventing stuck mouse-button state.
+- Adds regression coverage for foreign-window rejection, page-child acceptance, and drag-release cleanup.
+
+# v10.5.86 - Smooth Chromium scrolling
+
+- Adds browser-level smooth scrolling to Tekzite's CDP wheel bridge used by both native Windows DWM presentation and software/Linux Chromium presentation.
+- Coarse mouse-wheel notches are eased into several smaller wheel packets instead of arriving as one abrupt page jump.
+- High-resolution touchpad/precision-wheel deltas stay direct so fine scrolling remains responsive instead of feeling delayed.
+- Normalizes Linux/X11 Button-4/Button-5 wheel ticks into the same smooth scrolling bridge used by Windows MouseWheel events.
+- Preserves nested scrollers, Shift+wheel horizontal scrolling, Ctrl/Alt modifiers and the existing dedicated low-latency scroll lane.
+- Coalesces new wheel input into any active eased tail, so rapid wheel bursts remain fluid without flooding the critical click/keyboard input queue.
+
+# v10.5.85 - Complete function-key routing
+
+- Routes F1-F12 through one browser-shell dispatcher across normal Tk focus, Chromium software presentation and native Windows DWM presentation.
+- Fixes F5 refresh being swallowed by the DWM keyboard poller when the webpage owns focus.
+- Makes DWM function keys one-shot while held so F5 cannot create a reload storm and F11 cannot rapidly toggle fullscreen.
+- Adds useful browser-level actions for every function key and keeps modified OS shortcuts such as Alt+F4 untouched.
+- Updates menu accelerator hints and keyboard-shortcut documentation, with regression coverage for all F1-F12 mappings and DWM routing.
+
+# v10.5.84 - Cloudflare compatibility without privacy rollback
+
+- Replaces Chromium's special `--remote-debugging-port=0` launch mode with an explicit OS-selected loopback CDP port so interactive Tekzite sessions are not marked automation-controlled solely because of port-zero debugging.
+- Keeps CDP loopback-only, validates the returned endpoint, and retains the existing Windows listener/profile ownership checks and launch retry behavior.
+- Splits privacy-header filtering so `Referer` is preserved only for `chatgpt.com`, `openai.com`, and `challenges.cloudflare.com`, while Chromium client-metadata headers remain stripped globally.
+- Keeps ad/tracker blocking, HTTPS-first, DNT/GPC, QUIC/DoH restrictions, and third-party-cookie controls unchanged.
+- Adds regression coverage for explicit-port CDP startup and the narrow Cloudflare/OpenAI header exception.
+
 # v10.5.83 - Strict navigation and DWM target ownership
 
 - Binds asynchronous Chromium navigation completion to the exact Tekzite tab and page epoch that started it instead of whichever tab is active when the worker finishes.

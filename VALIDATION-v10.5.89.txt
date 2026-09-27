@@ -1,0 +1,35 @@
+Tekzite Browser v10.5.89 validation
+===================================
+
+Focus
+-----
+Frameless browser-window resizing plus packaged-Windows Customize Tekzite visibility.
+
+Implementation
+--------------
+- Keeps the root frameless but explicitly resizable.
+- Adds eight invisible resize hit zones: N/S/E/W plus all four corners.
+- Coalesces resize geometry commits to ~8 ms latest-value updates.
+- Preserves the opposite edge when resizing from north/west.
+- Enforces customization window_min_width/window_min_height.
+- Hides grips while maximized/fullscreen.
+- Performs final DWM viewport + input metrics synchronization on release.
+- Fixes invalid two-value Tk Frame padding that aborted Customize Tekzite before its options were constructed.
+- Makes all five Customize Tekzite pages scrollable and locally styles the notebook.
+- Handles packaged-runtime font enumeration failure without aborting the customization controls.
+- Pins Customize Tekzite Tk submodules into the Windows OneFile PyInstaller graph.
+
+Validation
+----------
+- python tools/sync_version.py 10.5.89 --check: PASS
+- python -m py_compile main.py tests/current/test_v10589_frameless_resize.py: PASS
+- focused resize/DWM regression tests: 21 PASS
+- tests/current: 599 PASS
+- Chromium extension checks: PASS
+- environment doctor: no blocking setup issues
+
+Platform note
+-------------
+Validation host is Linux. The resize geometry path is cross-platform. The Windows release
+pipeline additionally carries explicit PyInstaller imports for every Customize Tekzite Tk module;
+the real packaged Windows executable remains the final platform smoke test.

@@ -1,0 +1,24 @@
+Tekzite Browser v10.5.88 validation
+===================================
+
+Feature
+-------
+Browser-style tab tear-off into a separate Tekzite window.
+
+Behavior
+--------
+- Drag must exceed the pointer threshold and leave the expanded tab-strip boundary.
+- Soft and classic tab styles share the same tear-off ownership path.
+- The destination process receives the exact committed tab URL and a drop-adjacent window position.
+- Source tab is removed only after process launch succeeds.
+- Moved tabs bypass the closed-tab stack.
+- Tab context menu exposes Move Tab to New Window.
+
+Validation
+----------
+- Version metadata synchronization: PASS
+- Python compilation: PASS
+- Focused tear-off/tab-close/navigation regressions: PASS
+- Full tests/current suite: 587/587 PASS
+- Chromium extension feature checks: PASS
+- Environment doctor: no blocking issues (Linux host notes Windows-only DWM runtime)

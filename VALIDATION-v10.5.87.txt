@@ -1,0 +1,25 @@
+Tekzite Browser v10.5.87 validation
+===================================
+
+Issue fixed
+-----------
+The Windows DWM pointer fallback samples the global physical mouse. Previously it
+used only Tekzite's screen rectangle, so a click on another application covering
+the browser could still be injected into Chromium underneath.
+
+Fix
+---
+- Uses WindowFromPoint to identify the actual native window under the pointer.
+- New synthetic Chromium presses require the hit window to be the DWM page host,
+  edge_host, or a native child of edge_host.
+- Other applications and Tekzite popups/dialogs block the fallback press.
+- Drags that genuinely started on the page still receive their matching release.
+
+Validation
+----------
+- Version metadata synchronization: PASS
+- Python compilation: PASS
+- Focused DWM click-through/interaction tests: PASS
+- Current regression suite: 580/580 PASS
+- Chromium extension checks: PASS
+- Environment doctor: no blocking issues (Linux host warning for Windows-only DWM runtime is expected)
