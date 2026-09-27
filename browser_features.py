@@ -546,7 +546,7 @@ class BrowserFeatures:
             origin = info.get('origin') or site_host(url)
             if not self._ask_yes_no(
                 'Clear site data',
-                f'Clear this site's Chromium data for\n{origin}?',
+                f"Clear this site's Chromium data for\n{origin}?",
                 parent=win,
             ):
                 return
