@@ -456,7 +456,7 @@ class BrowserFeatures:
         details.insert('1.0', 'Reading Chromium security and storage state…')
         details.configure(state='disabled')
 
-        note_var = tk.StringVar(value='Cookie values are never shown in this panel.')
+        note_var = tk.StringVar(value='Cookie values hidden.')
         tk.Label(win, textvariable=note_var, bg=self.ui['bg'], fg=self.ui['muted'], anchor='w').pack(fill='x', padx=18)
         controls = tk.Frame(win, bg=self.ui['bg'])
         controls.pack(fill='x', padx=14, pady=(8, 16))
@@ -511,9 +511,8 @@ class BrowserFeatures:
             if len(cookie_names) > 12:
                 cookie_preview += f' … +{len(cookie_names) - 12}'
 
-            mode = ('Private window: temporary Chromium profile; browsing history and session '
-                    'are not written to disk.' if getattr(self, '_private_mode', False)
-                    else 'Normal window: uses the Tekzite Chromium profile and your configured exit policy.')
+            mode = ('Private profile; no history/session on disk.' if getattr(self, '_private_mode', False)
+                    else 'Normal profile.')
             lines = [
                 f'Address\n  {info.get("url") or url}',
                 f'\nConnection\n  {connection}',
@@ -521,11 +520,8 @@ class BrowserFeatures:
                 f'\nOrigin storage\n  Chromium usage: {usage}\n  Chromium quota: {quota}\n'
                 f'  localStorage entries: {local_count}\n  sessionStorage entries: {session_count}',
                 f'\nAd blocking\n  {adblock}',
-                '\nDefault privacy controls\n'
-                '  Do Not Track: on\n'
-                '  Global Privacy Control: on\n'
-                '  Third-party cookie controls: restricted where supported\n'
-                '  Notifications, location, camera, microphone and sensors: blocked by Tekzite defaults',
+                '\nPrivacy\n'
+                '  DNT + GPC on • third-party cookies restricted • site permissions blocked',
                 f'\nWindow privacy\n  {mode}',
             ]
             explanations = [x for x in info.get('securityExplanations', []) if x]
@@ -534,7 +530,7 @@ class BrowserFeatures:
             set_text('\n'.join(lines))
             clear_button.configure(state='normal' if str(info.get('origin') or '').startswith(('http://', 'https://')) else 'disabled')
             adblock_button.configure(state='normal' if site_host(info.get('url') or url) else 'disabled')
-            note_var.set('Site data is origin-scoped. Cookie values are deliberately never displayed.')
+            note_var.set('Origin-scoped data • cookie values hidden')
 
         def load():
             set_text('Reading Chromium security and storage state…')
@@ -550,7 +546,7 @@ class BrowserFeatures:
             origin = info.get('origin') or site_host(url)
             if not self._ask_yes_no(
                 'Clear site data',
-                f'Clear cookies, local storage, IndexedDB, caches and other Chromium data for\n{origin}?',
+                f'Clear this site's Chromium data for\n{origin}?',
                 parent=win,
             ):
                 return
@@ -623,9 +619,9 @@ class BrowserFeatures:
         win.geometry('940x520')
         lockdown = bool(self.preferences.get('privacy_lockdown', True))
         note = tk.StringVar(value=(
-            'Privacy Lockdown is active: user extensions are saved but will not load until Lockdown is disabled and Tekzite restarts.'
+            'Lockdown active: extensions are saved but not loaded.'
             if lockdown else
-            'Unpacked Chromium extensions are loaded at Tekzite startup. Changes require a restart.'
+            'Extensions load at startup; restart after changes.'
         ))
         tk.Label(win, textvariable=note, bg=self.ui['bg'], fg=self.ui['muted'], anchor='w').pack(side='bottom', fill='x', padx=12)
         state = {'rows': {}}
@@ -794,7 +790,7 @@ class BrowserFeatures:
         query = tk.StringVar()
         entry = tk.Entry(controls, textvariable=query, bg=self.ui['field'], fg=self.ui['text'], insertbackground=self.ui['text'])
         entry.pack(side='left', fill='x', expand=True, padx=5)
-        tk.Label(win, text='Search by page name or address. Clear browsing data on exit also clears this history.', bg=self.ui['bg'], fg=self.ui['muted']).pack(side='bottom')
+        tk.Label(win, text='Search history. Exit clearing removes it.', bg=self.ui['bg'], fg=self.ui['muted']).pack(side='bottom')
         visible = {}
         def refresh(*_):
             visible.clear()
@@ -1017,7 +1013,7 @@ class BrowserFeatures:
         if repo.count('/') != 1:
             self._show_message("info", 
                 'Tekzite Update',
-                'Set your GitHub repository in Preferences first, for example: owner/tekzite-browser',
+                'Set update repository first (owner/repository).',
                 parent=self.root,
             )
             return 'break'
@@ -1039,9 +1035,9 @@ class BrowserFeatures:
             if win_asset is None:
                 win_asset = next((a for a in assets if isinstance(a, dict) and str(a.get('name') or '').lower().endswith(('.zip','.exe','.msi'))), None)
             lines = [f'Installed: {".".join(map(str,current))}', f'Latest release: {tag or "unknown"}']
-            if latest > current: lines.append('A newer Tekzite release is available.')
-            elif latest == current: lines.append('You are already on the latest published release.')
-            else: lines.append('Your installed build is newer than the latest published release.')
+            if latest > current: lines.append('Update available.')
+            elif latest == current: lines.append('Up to date.')
+            else: lines.append('Installed build is newer.')
             if win_asset and win_asset.get('digest'):
                 lines.append(f'Published digest: {win_asset.get("digest")}')
             win = self._new_animated_toplevel(self.root); win.title('Tekzite Update'); win.geometry('620x300'); win.transient(self.root); win.configure(bg=self.ui['bg'])
@@ -1083,7 +1079,7 @@ class BrowserFeatures:
                             raise
                     def saved(result):
                         path, digest, verified = result
-                        self._show_message("info", 'Tekzite Update', f'Downloaded to:\n{path}\n\nSHA-256: {digest}\n' + ('Verified against GitHub digest.' if verified else 'GitHub did not publish a SHA-256 digest for this asset.'), parent=win)
+                        self._show_message("info", 'Tekzite Update', f'Saved:\n{path}\nSHA-256: {digest}\n' + ('Verified.' if verified else 'No published digest.'), parent=win)
                     self._feature_async(work, saved, win)
                 self._feature_button(bar, 'Download update', download_asset)
             release_url = str(data.get('html_url') or '')
@@ -1163,9 +1159,7 @@ class BrowserFeatures:
         scope_note = tk.Label(
             win,
             text=(
-                'Live Windows sockets for Tekzite + its Chromium/helper children. '
-                'TCP endpoints come from the Windows owner table; UDP remote peers are correlated from live Kernel-Network ETW events. '
-                'Proxy hostnames are exact; CDP attribution adds causal request metadata, same-site/cross-site relation, response evidence, initiator and sanitized JavaScript call stacks. Script source is fetched only on demand in Details, locally pretty-printed/source-map inspected, and is not retained.'
+                'Live Tekzite + Chromium sockets • hostnames from Tekzite Network • attribution from RAM-only CDP.'
             ),
             bg=self.ui['bg'], fg=self.ui['muted'], anchor='w', justify='left',
             wraplength=1650,
@@ -1475,13 +1469,8 @@ class BrowserFeatures:
             lines.extend([
                 '',
                 'INTERPRETATION',
-                'Strong opener = exact requested hostname + socket-open timing + Chromium reported that the request did NOT reuse an existing connection.',
-                'Likely opener = exact requested hostname + timing match, but Chromium did not provide a reuse verdict.',
-                'Probable opener = exact remote endpoint + timing/new-connection evidence without an exact hostname correlation.',
-                'Reused connection = Chromium explicitly reported that this request used an already-open connection.',
-                'Endpoint activity = CDP observed traffic to the exact remote IP:port, but Tekzite cannot prove that request created this TCP connection.',
-                'Host activity = the destination hostname matches recent CDP traffic; HTTP/2 connection reuse can carry many later requests.',
-                'The live audit retains no full URL, query string, headers, cookies, bodies, or script source. Source excerpts are fetched from Chromium only when requested and discarded after display.',
+                'Strong / likely / probable = decreasing attribution confidence; reused = existing Chromium connection.',
+                'Privacy: no full URLs, header values, cookies, bodies, or script source retained.',
             ])
             text.insert('1.0', '\n'.join(lines))
             text.configure(state='disabled')
@@ -1512,7 +1501,7 @@ class BrowserFeatures:
                 source_text.pack(fill='both', expand=True, padx=(12, 0), pady=(12, 0))
                 source_text.insert('1.0', 'Reading the live script from Chromium…')
                 source_text.configure(state='disabled')
-                source_status = tk.StringVar(value='Generated source is analyzed in memory only; external source maps are never fetched automatically.')
+                source_status = tk.StringVar(value='Source analyzed in memory; external maps are not fetched.')
                 source_bar = tk.Frame(source_win, bg=self.ui['bg'])
                 source_bar.pack(side='bottom', fill='x', padx=12, pady=(4, 10))
                 tk.Label(
@@ -1537,7 +1526,7 @@ class BrowserFeatures:
                 if not target_id or not script_id:
                     source_text.configure(state='normal')
                     source_text.delete('1.0', 'end')
-                    source_text.insert('1.0', 'No live script identifier was captured for this request.\n\nParser-initiated requests and some Chromium-generated requests do not have a JavaScript caller.')
+                    source_text.insert('1.0', 'No JavaScript caller was captured.')
                     source_text.configure(state='disabled')
                     source_status.set('No JavaScript source is available for this row.')
                     return
@@ -1569,7 +1558,7 @@ class BrowserFeatures:
                             f"Source map: {source_map.get('label') or 'No source map advertised'}",
                         ]
                         if source_map.get('kind') == 'external':
-                            report.append('Source-map policy: external map advertised but not fetched automatically, so inspection creates no extra network request.')
+                            report.append('External source map advertised; not fetched.')
                         if mapped:
                             original = f"{mapped.get('source_file') or '(original source)'}:{mapped.get('line') or 0}:{mapped.get('column') or 0}"
                             if mapped.get('name'):
@@ -1588,7 +1577,7 @@ class BrowserFeatures:
                                     f"({primitive.get('direction') or ''}, offset {delta})"
                                 )
                         else:
-                            report.append('  No direct fetch/XHR/WebSocket/EventSource/sendBeacon/WebTransport primitive was visible inside the identified function or nearby source window.')
+                            report.append('  No direct network primitive found near this caller.')
 
                         if result.get('pretty_text'):
                             report.extend(['', 'PRETTY-PRINTED CALLER CONTEXT', str(result.get('pretty_text') or '')])
@@ -1601,15 +1590,15 @@ class BrowserFeatures:
                         report.extend([
                             '',
                             'PRIVACY / EVIDENCE',
-                            'The full generated script exists only during this on-demand analysis and is not inserted into the network ledger or written to disk.',
-                            'Inline source maps are decoded locally. External source-map URLs are reported but not downloaded automatically.',
-                            'Pretty-printing and containing-function detection are display heuristics; the captured CDP caller coordinates remain the authoritative generated position.',
+                            'Full source is memory-only and discarded after analysis.',
+                            'Inline maps decode locally; external maps are not fetched.',
+                            'CDP caller coordinates are authoritative.',
                         ])
                         shown = '\n'.join(report)
                         source_text.insert('1.0', shown)
                         copied['text'] = shown
                         copy_button.configure(state='normal')
-                        source_status.set('Live JavaScript analysis complete. Full source discarded after bounded excerpts were produced.')
+                        source_status.set('Analysis complete; source discarded.')
                     else:
                         source_text.insert('1.0', str(result.get('reason') or 'The live script source is no longer available.'))
                         source_status.set('Source lookup failed; the page may have navigated or replaced the script.')
@@ -1645,8 +1634,7 @@ class BrowserFeatures:
             note = tk.Label(
                 timeline,
                 text=(
-                    'Chronological RAM-only CDP request evidence. Full URLs, query strings, headers, cookies and bodies are not retained. '
-                    '“Same site (heuristic)” is informational, not a browser security boundary. Response bytes are Chromium encoded transfer bytes, not packet capture.'
+                    'RAM-only CDP request timeline. No full URLs, header values, cookies, or bodies.'
                 ),
                 bg=self.ui['bg'], fg=self.ui['muted'], anchor='w', justify='left', wraplength=1500,
             )
@@ -1798,7 +1786,7 @@ class BrowserFeatures:
                         lines.append(f"  {number:>2}. {frame.get('label') or ''}")
                 lines.extend([
                     '', 'PRIVACY BOUNDARY',
-                    'No full URL, query string, request/response header values, cookies, body, packet payload, or full script source is retained in this timeline. Header names above are presence hints only; absence is not proof that Chromium sent no such header.',
+                    'No full URLs, header values, cookies, bodies, payloads, or full scripts are retained.',
                 ])
                 body.insert('1.0', '\n'.join(lines)); body.configure(state='disabled')
                 bar = tk.Frame(detail, bg=self.ui['bg']); bar.pack(fill='x', padx=12, pady=(0, 12))
@@ -1900,10 +1888,7 @@ class BrowserFeatures:
         footer = tk.Label(
             win,
             text=(
-                'Exact site hostnames come from Tekzite Network. Purpose/resource/script attribution is RAM-only CDP metadata and starts when this window opens; '
-                'refresh the page for a complete attribution pass. The live ledger retains only origin + final filename + function + line/column; source text is fetched only when you press “Show script source”, displayed as a bounded excerpt, and not stored. '
-                '“Strong opener” combines exact hostname/timing with Chromium’s non-reuse signal; weaker labels stay deliberately cautious because HTTP/2 can reuse one socket for many requests. Tekzite-injected Runtime helpers carry a CDP sourceURL provenance tag so their own favicon/UI requests are labelled as Tekzite internal rather than website JavaScript. The Request timeline adds response/cache/TLS/failure evidence without storing payloads. “Unattributed” is not proof of telemetry. '
-                'PTR enrichment may query your configured DNS. Current TCP is sampled every 250 ms, while UDP peers and short-lived recent TCP connects are event-driven through Kernel-Network ETW.'
+                'Hostnames: Tekzite Network • attribution: RAM-only CDP • script source: on demand • PTR may query DNS.'
             ),
             bg=self.ui['bg'], fg=self.ui['muted_dim'], anchor='w', justify='left', wraplength=1650,
         )
@@ -1942,13 +1927,13 @@ class BrowserFeatures:
         lines.extend([
             '',
             'What these ports do:',
-            '  Tekzite Network proxy: local HTTP/HTTPS proxy used for filtering, ad blocking and browser network policy.',
-            '  Chromium DevTools/CDP: private control channel used by Tekzite Python to control tabs, input, zoom and diagnostics.',
+            '  Proxy: filtering, ad blocking and network policy.',
+            '  CDP: private tab/input/zoom/diagnostics control.',
             '',
             'About numbers such as 127.0.0.1:49563:',
-            '  Windows assigns temporary client/source ports for TCP connections. A number like 49563 can therefore be the',
-            '  short-lived source side of an allowed connection, not a service listening for outside traffic. Tekzite',
-            '  authorizes the stable destination/service port, never the random source port.',
+            '  Temporary Windows source ports are normal;',
+            '  they are not public listening services.',
+            '  Tekzite authorizes service ports, not random source ports.',
             '',
             'Live loopback TCP rows for Tekzite Python processes:',
         ])
@@ -1985,9 +1970,9 @@ class BrowserFeatures:
         lines.extend([
             '',
             'Scope:',
-            '  This guard applies to Python-originated loopback connects in Tekzite. It does not block normal public',
-            '  internet connections, and it does not rewrite Chromium networking. The network helper separately blocks',
-            '  unexpected loopback upstream connects while still accepting Chromium on its own listening proxy port.',
+            '  Guard scope: Tekzite Python loopback only.',
+            '  Chromium networking is separate.',
+            '  The network helper separately guards its proxy loopback.',
         ])
         text.insert('1.0', '\n'.join(lines))
         text.configure(state='disabled')
@@ -2097,7 +2082,7 @@ class BrowserFeatures:
             if kind == 'tab':
                 self._close_tab(value); refresh()
             else:
-                note.set('For safety, close a tab instead of killing a Chromium process that may be shared.')
+                note.set('Close a tab instead of a shared Chromium process.')
 
         self._feature_button(controls, 'Refresh', refresh)
         self._feature_button(controls, 'Close selected tab', close_tab)
