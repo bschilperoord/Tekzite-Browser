@@ -158,6 +158,60 @@ jobs:
           python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
           python -m pip install --only-binary=:all: -r requirements-dev.txt
 
+      - name: Reconcile updated security regression contracts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          @'
+          from pathlib import Path
+
+          # v10.5.84 deliberately stopped using Chromium's special debug port 0,
+          # so the historical security regression must assert the new contract.
+          p = Path("tests/current/test_v10511_security_hardening.py")
+          s = p.read_text(encoding="utf-8")
+          old = '''def test_cdp_uses_chromium_ephemeral_port_and_no_wildcard_origin():
+              assert '"--remote-debugging-port=0"' in NET
+              assert "--remote-allow-origins=*" not in NET
+              assert "DevToolsActivePort" in NET
+              assert "_validate_devtools_ws_url" in NET
+          '''
+          new = '''def test_cdp_uses_explicit_loopback_port_and_no_wildcard_origin():
+              assert '"--remote-debugging-port=0"' not in NET
+              assert 'f"--remote-debugging-port={port}"' in NET
+              assert 'port = _free_loopback_port()' in NET
+              assert "--remote-allow-origins=*" not in NET
+              assert "DevToolsActivePort" in NET
+              assert "_validate_devtools_ws_url" in NET
+          '''
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif "def test_cdp_uses_explicit_loopback_port_and_no_wildcard_origin" not in s:
+              raise SystemExit("Could not update historical CDP security regression")
+          s = s.replace(
+              'assert "--remote-debugging-port=0" in SECURITY',
+              'assert "port-0 automation signal" in SECURITY',
+              1,
+          )
+          p.write_text(s, encoding="utf-8")
+
+          # The explicit-port unit test also runs on Windows CI, where production
+          # code verifies listener ownership. Model that listener as the same fake
+          # Chromium process rather than bypassing the ownership rule.
+          p = Path("tests/current/test_v10584_cloudflare_compatibility.py")
+          s = p.read_text(encoding="utf-8")
+          needle = '    monkeypatch.setattr(net, "_read_devtools_active_port", no_active_file)\n'
+          addition = (
+              needle
+              + '    monkeypatch.setattr(net, "_hide_process_windows", lambda *_args, **_kwargs: None)\n'
+              + '    monkeypatch.setattr(net, "_listener_pid_for_port", lambda _port: Proc.pid)\n'
+          )
+          if '_listener_pid_for_port", lambda _port: Proc.pid' not in s:
+              if needle not in s:
+                  raise SystemExit("Could not locate explicit-port test seam")
+              s = s.replace(needle, addition, 1)
+          p.write_text(s, encoding="utf-8")
+          '@ | python -
+
       - name: Run full Windows regression suite
         shell: pwsh
         run: python -m pytest -q tests/current
