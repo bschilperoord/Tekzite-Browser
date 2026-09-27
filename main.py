@@ -13682,6 +13682,37 @@ class BrowserApp(BrowserFeatures):
 
 
 
+    def _prepare_visual_shutdown(self):
+        """Remove native presentation immediately before graceful process cleanup.
+
+        Chromium may need several seconds to flush its profile on exit. The
+        independent DWM destination must not remain visible during that wait.
+        Detach the thumbnail, destroy the destination HWND, and withdraw the Tk
+        shell first so closing Tekzite is visually immediate.
+        """
+        try:
+            self._cancel_dwm_host_reveal()
+        except Exception:
+            pass
+        try:
+            detach_embedded_chromium_dwm_thumbnail()
+        except Exception:
+            pass
+        try:
+            self._destroy_dwm_host_for_taskbar()
+        except Exception:
+            pass
+        try:
+            self._dwm_surface_ready = False
+            self._dwm_host_visible = False
+            self._chromium_dwm_mode = False
+        except Exception:
+            pass
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+
     def on_close(self):
         # WM_CLOSE, a restart request and a keyboard shortcut can converge on
         # shutdown in the same UI turn. Teardown is intentionally idempotent.
@@ -13715,6 +13746,10 @@ class BrowserApp(BrowserFeatures):
         # windows so none can wake mid-teardown and touch a dead HWND/Tk widget.
         self._cancel_all_tk_after_jobs()
         self._navigation_generation += 1
+        # Make shutdown visually complete before Chromium performs its bounded
+        # graceful profile flush. This prevents the independent DWM destination
+        # from lingering as a white surface after the Tekzite close gesture.
+        self._prepare_visual_shutdown()
         try:
             close_embedded_chromium(
                 clear_profile=bool(
@@ -13765,11 +13800,13 @@ class BrowserApp(BrowserFeatures):
                 self._dwm_keyboard_sink_focused = False
             except Exception:
                 pass
+            # _prepare_visual_shutdown already detached and destroyed the DWM
+            # destination before the potentially slow Chromium profile flush.
+            # Keep finalization idempotent in case native setup never completed.
             try:
-                if self._dwm_host is not None and os.name == "nt":
-                    import ctypes
-                    from ctypes import wintypes
-                    ctypes.WinDLL("user32", use_last_error=True).DestroyWindow(wintypes.HWND(int(self._dwm_host)))
+                if self._dwm_host is not None:
+                    detach_embedded_chromium_dwm_thumbnail()
+                    self._destroy_dwm_host_for_taskbar()
             except Exception:
                 pass
             for temp_profile in (getattr(self, "_private_profile_dir", None), getattr(self, "_privacy_profile_dir", None)):
