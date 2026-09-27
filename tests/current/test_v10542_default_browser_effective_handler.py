@@ -5,7 +5,7 @@ from test_v10541_default_browser_detection import FakeWinreg, _url_path, _file_p
 
 
 def test_release_version_is_10542():
-    assert main.BROWSER_VERSION == "10.5.89"
+    assert main.BROWSER_VERSION == "10.5.90"
 
 
 def test_windows_applications_progid_is_recognized_as_tekzite():
@@ -55,5 +55,5 @@ def test_non_tekzite_effective_handler_wins_over_unrelated_progid():
 
 def test_settings_copy_describes_effective_windows_shell_handler():
     source = Path(main.__file__).read_text(encoding="utf-8")
-    assert "asks the Windows Shell which app actually handles HTTP/HTTPS" in source
+    assert "Windows confirmation required." in source
     assert "_windows_effective_association_executable" in source

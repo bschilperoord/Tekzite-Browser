@@ -5,7 +5,7 @@ from browser_features import omnibox_suggestions
 
 
 def test_release_is_v10548():
-    assert main.BROWSER_VERSION == "10.5.89"
+    assert main.BROWSER_VERSION == "10.5.90"
 
 
 def test_local_suggestions_rank_bookmark_prefix_and_dedupe_url():
@@ -62,4 +62,4 @@ def test_omnibox_popup_keeps_keyboard_focus_on_real_entry():
 def test_autocomplete_preference_is_local_only_and_enabled_by_default():
     assert main.DEFAULT_PREFERENCES["omnibox_suggestions_enabled"] is True
     source = Path(main.__file__).read_text(encoding="utf-8")
-    assert "Typing is not sent to an autocomplete service." in source
+    assert "Local suggestions only." in source

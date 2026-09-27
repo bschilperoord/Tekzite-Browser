@@ -11,7 +11,7 @@ PROXY = (ROOT / "tekzite_network.py").read_text(encoding="utf-8")
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.89"  # sync_version updates this pin
+    assert main.BROWSER_VERSION == "10.5.90"  # sync_version updates this pin
 
 
 def test_proxy_exposes_exact_active_upstream_hostname_without_content(monkeypatch):
@@ -119,4 +119,4 @@ def test_live_socket_ui_has_hostnames_paths_and_fast_updates():
     assert "Resolve hostnames (PTR)" in FEATURES
     assert "Direct external" in FEATURES
     assert "250 ms snapshots" in FEATURES
-    assert "UDP remote peers are correlated from live Kernel-Network ETW events" in FEATURES
+    assert "UDP peers: Kernel-Network ETW" in FEATURES

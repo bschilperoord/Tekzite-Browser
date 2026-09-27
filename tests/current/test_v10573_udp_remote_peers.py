@@ -32,7 +32,7 @@ def _ipv6_payload(pid, size, daddr, saddr, dport, sport):
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.89"  # sync_version updates this pin
+    assert main.BROWSER_VERSION == "10.5.90"  # sync_version updates this pin
 
 
 def test_kernel_network_udp_ipv4_send_and_receive_map_remote_peer_correctly():
@@ -133,7 +133,7 @@ def test_udp_peer_etw_is_native_ram_only_and_ui_surfaces_peer_metadata():
         assert api in ETW
     assert "UDP_PEER_MAX_AGE = 30.0" in ETW
     assert "payload is captured or stored" in ETW.lower()
-    assert "UDP remote peers are correlated from live Kernel-Network ETW events" in FEATURES
+    assert "UDP peers: Kernel-Network ETW" in FEATURES
     assert "Traffic" in FEATURES and "Seen" in FEATURES
     assert "Direct UDP external" in (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
     assert "stop_live_socket_peer_monitor" in FEATURES
