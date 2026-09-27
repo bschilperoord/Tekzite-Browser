@@ -13101,7 +13101,7 @@ class BrowserApp(BrowserFeatures):
                 f"Copied {label} to clipboard ({len(report):,} chars)"
             )
         except Exception as exc:
-            self._show_message("error", 
+            self._show_message("error",
                 label,
                 f"Could not copy debug output:\\n{exc}",
             )
