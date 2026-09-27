@@ -877,7 +877,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.90"
+BROWSER_VERSION = "10.5.91"
 
 
 def _enable_per_monitor_dpi_awareness():
@@ -10265,7 +10265,8 @@ class BrowserApp(BrowserFeatures):
         if self._embedded_mode and self._chromium_dwm_mode:
             self._schedule_dwm_geometry_sync(resize=False, delay=1)
         self._schedule_post_drag_maintenance()
-
+
+
     def _schedule_post_drag_maintenance(self, delay=24):
         if self._window_drag_settle_after_id is not None:
             try:
