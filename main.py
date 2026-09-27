@@ -13143,7 +13143,6 @@ class BrowserApp(BrowserFeatures):
         editor_fg = "#d8dee9"
         editor_muted = "#7f8ea3"
         editor_border = "#263247"
-        editor_gutter = "#10182a"
 
         # Compact document identity header. Keep this useful rather than verbose:
         # mode on the left, current page identity in the middle, actions on the right.
@@ -13172,7 +13171,10 @@ class BrowserApp(BrowserFeatures):
         if not current_url:
             current_url = str(getattr(self, "_current_url", "") or "")
 
-        document_var = tk.StringVar(value=current_url or "Current document")
+        display_url = current_url or "Current document"
+        if len(display_url) > 118:
+            display_url = f"{display_url[:74]}…{display_url[-40:]}"
+        document_var = tk.StringVar(value=display_url)
         tk.Label(
             identity, textvariable=document_var,
             bg=self.ui["chrome"], fg=self.ui["muted"],
