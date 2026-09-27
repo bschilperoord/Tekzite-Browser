@@ -94,7 +94,7 @@ def test_feature_configuration_carries_privacy_switches():
 def test_privacy_shield_is_exposed():
     assert 'Privacy Shield' in MAIN
     assert 'def _show_privacy_shield' in MAIN
-    assert 'A website you visit still sees the public IP address' in MAIN
+    assert 'Sites still see your public IP' in MAIN
 
 
 def test_lockdown_uses_temporary_chromium_profile_and_disables_user_extensions():

@@ -30,7 +30,7 @@ def test_settings_copy_is_compact():
 
 
 def test_privacy_shield_keeps_state_but_drops_manual_sized_prose():
-    block = MAIN[MAIN.index("def _show_privacy_shield"):MAIN.index("def _default_browser_registration")]
+    block = MAIN[MAIN.index("def _show_privacy_shield"):MAIN.index("def _make_tekzite_default_browser")]
     assert '"TEKZITE PRIVACY"' in block
     assert '"Live privacy status."' in block
     assert '"Sites still see your public IP unless you use an upstream privacy layer."' in block
@@ -46,7 +46,7 @@ def test_site_info_and_history_are_compact():
 
 
 def test_network_diagnostics_keep_data_but_remove_text_walls():
-    assert "Live Tekzite + Chromium sockets • hostnames from Tekzite Network • attribution from RAM-only CDP." in FEATURES
+    assert "Live Tekzite + Chromium sockets • UDP peers: Kernel-Network ETW • hostnames: Tekzite Network • attribution: RAM-only CDP." in FEATURES
     assert "Strong / likely / probable = decreasing attribution confidence; reused = existing Chromium connection." in FEATURES
     assert "Hostnames: Tekzite Network • attribution: RAM-only CDP • script source: on demand • PTR may query DNS." in FEATURES
     assert "Strong opener = exact requested hostname + socket-open timing" not in FEATURES

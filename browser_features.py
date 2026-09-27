@@ -1159,7 +1159,7 @@ class BrowserFeatures:
         scope_note = tk.Label(
             win,
             text=(
-                'Live Tekzite + Chromium sockets • hostnames from Tekzite Network • attribution from RAM-only CDP.'
+                'Live Tekzite + Chromium sockets • UDP peers: Kernel-Network ETW • hostnames: Tekzite Network • attribution: RAM-only CDP.'
             ),
             bg=self.ui['bg'], fg=self.ui['muted'], anchor='w', justify='left',
             wraplength=1650,

@@ -48,6 +48,6 @@ def test_network_helper_enforces_loopback_egress_policy_too():
 def test_local_ports_diagnostics_explains_ephemeral_source_ports():
     assert 'Local Ports & Loopback' in MAIN
     assert 'def _show_local_ports' in FEATURES
-    assert 'temporary client/source ports' in FEATURES
+    assert 'Temporary Windows source ports are normal' in FEATURES
     assert 'Recent blocked Python loopback attempts' in FEATURES
 
