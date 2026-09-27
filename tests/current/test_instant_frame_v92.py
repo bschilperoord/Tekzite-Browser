@@ -28,7 +28,8 @@ def test_only_critical_input_warms_before_reveal():
 
 def test_navigation_future_poll_is_low_latency():
     poll = MAIN[MAIN.index("def _poll_embedded_navigation"):MAIN.index("def _navigate_embedded")]
-    assert "self.root.after(8, self._poll_embedded_navigation" in poll
+    assert '32 if getattr(self, "_window_drag_active", False) else 8' in poll
+    assert "self._poll_embedded_navigation" in poll
 
 
 def test_startup_has_no_fixed_quarter_second_delay():
