@@ -13299,7 +13299,11 @@ class BrowserApp(BrowserFeatures):
 
         source_state = {"html": "", "generation": 0}
         search_state = {"query": "", "matches": [], "position": -1}
+        highlight_state = {"future": None, "poll_after": None, "apply_after": None}
         highlight_limit = 750_000
+        highlight_batch_size = 240
+        highlight_start_delay_ms = 210
+        highlight_span_limit = 24000
 
         def tk_index(offset):
             return f"1.0+{max(0, int(offset))}c"
@@ -13309,40 +13313,37 @@ class BrowserApp(BrowserFeatures):
                 return
             text.tag_add(tag_name, tk_index(start_offset), tk_index(end_offset))
 
-        def apply_syntax_highlighting(html, generation):
-            if generation != source_state["generation"] or not window.winfo_exists():
-                return
-
-            text.configure(state="normal")
-            for tag_name in syntax_tags:
-                text.tag_remove(tag_name, "1.0", "end")
-
+        def build_highlight_plan(html, generation):
+            """Parse HTML away from Tk; return bounded color spans plus stats."""
             sample = html[:highlight_limit]
+            spans = []
 
-            # Comments and declarations are treated as whole tokens first.
+            def span(tag_name, start_offset, end_offset):
+                if end_offset <= start_offset or len(spans) >= highlight_span_limit:
+                    return
+                spans.append((tag_name, int(start_offset), int(end_offset)))
+
             for match in re.finditer(r"<!--.*?-->", sample, flags=re.DOTALL):
-                add_tag("html_comment", match.start(), match.end())
+                span("html_comment", match.start(), match.end())
             for match in re.finditer(r"<![^>]*>", sample, flags=re.IGNORECASE | re.DOTALL):
                 if sample.startswith("<!--", match.start()):
                     continue
-                add_tag("html_doctype", match.start(), match.end())
+                span("html_doctype", match.start(), match.end())
 
-            # Element tags, punctuation, attributes and quoted/unquoted values.
-            tag_pattern = re.compile(
-                r"</?\s*[A-Za-z][^<>]*?>",
-                flags=re.DOTALL,
-            )
+            tag_pattern = re.compile(r"</?\s*[A-Za-z][^<>]*?>", flags=re.DOTALL)
             attr_pattern = re.compile(
                 r"([A-Za-z_:][\w:.-]*)(\s*=\s*)(\"[^\"]*\"|'[^']*'|[^\s>]+)",
                 flags=re.DOTALL,
             )
             for match in tag_pattern.finditer(sample):
+                if len(spans) >= highlight_span_limit:
+                    break
                 token = match.group(0)
                 token_start = match.start()
 
                 opening = re.match(r"</?\s*", token)
                 if opening:
-                    add_tag(
+                    span(
                         "html_bracket",
                         token_start + opening.start(),
                         token_start + opening.end(),
@@ -13350,7 +13351,7 @@ class BrowserApp(BrowserFeatures):
 
                 tag_name_match = re.match(r"</?\s*([A-Za-z][\w:.-]*)", token)
                 if tag_name_match:
-                    add_tag(
+                    span(
                         "html_tag",
                         token_start + tag_name_match.start(1),
                         token_start + tag_name_match.end(1),
@@ -13361,42 +13362,97 @@ class BrowserApp(BrowserFeatures):
 
                 closing_start = max(token.rfind("/>"), token.rfind(">"))
                 if closing_start >= 0:
-                    add_tag(
+                    span(
                         "html_bracket",
                         token_start + closing_start,
                         token_start + len(token),
                     )
 
                 for attr in attr_pattern.finditer(token, attr_start):
-                    add_tag(
+                    if len(spans) >= highlight_span_limit:
+                        break
+                    span(
                         "html_attr",
                         token_start + attr.start(1),
                         token_start + attr.end(1),
                     )
-                    add_tag(
+                    span(
                         "html_value",
                         token_start + attr.start(3),
                         token_start + attr.end(3),
                     )
 
-            for match in re.finditer(
-                r"&(?:#[0-9]+|#x[0-9a-f]+|[A-Za-z][A-Za-z0-9]+);",
-                sample, flags=re.IGNORECASE,
-            ):
-                add_tag("html_entity", match.start(), match.end())
+            if len(spans) < highlight_span_limit:
+                for match in re.finditer(
+                    r"&(?:#[0-9]+|#x[0-9a-f]+|[A-Za-z][A-Za-z0-9]+);",
+                    sample, flags=re.IGNORECASE,
+                ):
+                    span("html_entity", match.start(), match.end())
+                    if len(spans) >= highlight_span_limit:
+                        break
 
-            # Give script/style bodies a gentle secondary tint. HTML tokens above
-            # remain independently colored because their tags are raised later.
-            for match in re.finditer(
-                r"<script\b[^>]*>(.*?)</script\s*>",
-                sample, flags=re.IGNORECASE | re.DOTALL,
+            if len(spans) < highlight_span_limit:
+                for match in re.finditer(
+                    r"<script\b[^>]*>(.*?)</script\s*>",
+                    sample, flags=re.IGNORECASE | re.DOTALL,
+                ):
+                    span("html_script", match.start(1), match.end(1))
+                    if len(spans) >= highlight_span_limit:
+                        break
+
+            if len(spans) < highlight_span_limit:
+                for match in re.finditer(
+                    r"<style\b[^>]*>(.*?)</style\s*>",
+                    sample, flags=re.IGNORECASE | re.DOTALL,
+                ):
+                    span("html_style", match.start(1), match.end(1))
+                    if len(spans) >= highlight_span_limit:
+                        break
+
+            lines = html.count("\n") + 1 if html else 0
+            elements = len(re.findall(
+                r"<(?![!/?])\s*[A-Za-z][\w:.-]*(?:\s|/?>)",
+                html,
+            ))
+            comments = html.count("<!--")
+            return {
+                "generation": generation,
+                "spans": spans,
+                "lines": lines,
+                "elements": elements,
+                "comments": comments,
+                "characters": len(html),
+                "syntax_clipped": len(html) > highlight_limit,
+                "span_clipped": len(spans) >= highlight_span_limit,
+            }
+
+        def apply_highlight_plan(plan, offset=0):
+            """Apply a small span batch so Tk keeps painting and accepting input."""
+            if (
+                not window.winfo_exists()
+                or plan.get("generation") != source_state["generation"]
             ):
-                add_tag("html_script", match.start(1), match.end(1))
-            for match in re.finditer(
-                r"<style\b[^>]*>(.*?)</style\s*>",
-                sample, flags=re.IGNORECASE | re.DOTALL,
-            ):
-                add_tag("html_style", match.start(1), match.end(1))
+                return
+
+            spans = plan.get("spans") or []
+            stop = min(len(spans), offset + highlight_batch_size)
+
+            if offset == 0:
+                text.configure(state="normal")
+                for tag_name in syntax_tags:
+                    text.tag_remove(tag_name, "1.0", "end")
+                text.configure(state="disabled")
+
+            text.configure(state="normal")
+            for tag_name, start_offset, end_offset in spans[offset:stop]:
+                add_tag(tag_name, start_offset, end_offset)
+            text.configure(state="disabled")
+
+            if stop < len(spans):
+                highlight_state["apply_after"] = window.after(
+                    1, lambda: apply_highlight_plan(plan, stop)
+                )
+                return
 
             for tag_name in (
                 "html_script", "html_style", "html_comment", "html_doctype",
@@ -13405,24 +13461,52 @@ class BrowserApp(BrowserFeatures):
                 text.tag_raise(tag_name)
             text.tag_raise("match_all")
             text.tag_raise("match_current")
-            text.configure(state="disabled")
 
-            if len(html) > highlight_limit:
-                base = stats_var.get().split("  •  Syntax:")[0]
-                stats_var.set(
-                    f"{base}  •  Syntax: first {highlight_limit:,} characters"
-                )
-
-        def update_stats(html):
-            lines = html.count("\n") + 1 if html else 0
-            tags = len(re.findall(
-                r"<(?![!/?])\s*[A-Za-z][\w:.-]*(?:\s|/?>)",
-                html,
-            ))
-            comments = html.count("<!--")
+            suffix = ""
+            if plan.get("syntax_clipped"):
+                suffix = f"  •  Syntax: first {highlight_limit:,} characters"
+            elif plan.get("span_clipped"):
+                suffix = f"  •  Syntax: first {highlight_span_limit:,} tokens"
             stats_var.set(
-                f"{lines:,} lines  •  {tags:,} elements  •  "
-                f"{comments:,} comments  •  {len(html):,} characters"
+                f"{plan.get('lines', 0):,} lines  •  "
+                f"{plan.get('elements', 0):,} elements  •  "
+                f"{plan.get('comments', 0):,} comments  •  "
+                f"{plan.get('characters', 0):,} characters{suffix}"
+            )
+            highlight_state["apply_after"] = None
+
+        def poll_highlight_plan(future, generation):
+            if not window.winfo_exists() or generation != source_state["generation"]:
+                return
+            if not future.done():
+                highlight_state["poll_after"] = window.after(
+                    18, lambda: poll_highlight_plan(future, generation)
+                )
+                return
+            try:
+                plan = future.result()
+            except Exception:
+                stats_var.set(f"{len(source_state['html']):,} characters")
+                return
+            highlight_state["poll_after"] = None
+            apply_highlight_plan(plan)
+
+        def schedule_syntax_highlighting(html, generation):
+            """Let the inspector finish opening before any syntax work begins."""
+            def start_worker():
+                if (
+                    not window.winfo_exists()
+                    or generation != source_state["generation"]
+                ):
+                    return
+                future = self._executor.submit(
+                    build_highlight_plan, html, generation
+                )
+                highlight_state["future"] = future
+                poll_highlight_plan(future, generation)
+
+            highlight_state["apply_after"] = window.after(
+                highlight_start_delay_ms, start_worker
             )
 
         def clear_search_highlights():
@@ -13506,13 +13590,11 @@ class BrowserApp(BrowserFeatures):
             search_state["matches"] = []
             search_state["position"] = -1
             match_var.set("")
-            update_stats(html)
-
-            # Paint content immediately, then colorize on the next idle turn so
-            # large DOMs do not delay the first visible source frame.
-            window.after_idle(
-                lambda content=html, gen=generation: apply_syntax_highlighting(content, gen)
-            )
+            # Keep the first frame cheap. Detailed stats and syntax parsing run
+            # after the opening motion, with parsing off-thread and Tk tag work
+            # split into tiny batches.
+            stats_var.set(f"{len(html):,} characters  •  Coloring queued")
+            schedule_syntax_highlighting(html, generation)
 
         def copy_all():
             html = source_state["html"]
