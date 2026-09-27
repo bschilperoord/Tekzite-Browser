@@ -1,3 +1,13 @@
+# v10.5.90 - Compact dialogs and feature copy
+
+- Removes large explanatory text blocks from Tekzite-owned dialogs and feature windows without removing their controls, state, or diagnostic values.
+- Compacts Settings labels and helper copy across startup, tabs, renderer, privacy, downloads, default-browser, update, and zoom options.
+- Simplifies Privacy Shield into concise status sections for active privacy controls, network state, and session counters.
+- Shortens Site Info, History, updater, JavaScript inspector, request timeline, and Local Ports copy while retaining security and privacy state.
+- Trims Live Socket View and connection-detail prose while preserving raw endpoints, hostnames, attribution, TLS, response, caller, and process data.
+- Keeps concise provenance hints such as UDP peer attribution through Windows Kernel-Network ETW.
+- Updates regressions to verify the compact wording and the underlying feature guarantees instead of requiring legacy paragraph text.
+
 # v10.5.89 - Frameless window resizing
 
 - Fixes **Customize Tekzite** opening without its options: the dialog header passed a two-value `pady` tuple to a Tk `Frame` widget option, which raises `TclError: bad screen distance "4 10"` before the controls are constructed.

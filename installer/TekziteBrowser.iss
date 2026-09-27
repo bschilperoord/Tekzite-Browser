@@ -1,5 +1,5 @@
 #define MyAppName "Tekzite Browser"
-#define MyAppVersion "10.5.89"
+#define MyAppVersion "10.5.90"
 #define MyAppPublisher "Tekzite"
 #define MyAppExeName "TekziteBrowser.exe"
 
