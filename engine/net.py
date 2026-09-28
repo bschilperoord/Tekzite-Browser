@@ -4612,8 +4612,8 @@ def _get_persistent_page_cdp_channel(session, target_id=None, timeout=5.0, purpo
     # two CDP round trips before the first click could be proven. Keep network
     # configuration on general/control channels and make input/scroll/hover/
     # cursor sockets immediately usable after the websocket handshake.
-    latency_only_purposes = {"input", "scroll", "hover", "cursor", "permission"}
-    if purpose in latency_only_purposes:
+    latency_only_purposes = {"input", "scroll", "hover", "cursor"}
+    if purpose in latency_only_purposes or purpose == "permission":
         channel["privacy_headers"] = False
         channel["network_setup_skipped_for_latency"] = True
     else:
