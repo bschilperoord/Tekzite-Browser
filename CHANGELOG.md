@@ -1,3 +1,13 @@
+# v10.5.98 - Smooth HTML Inspector
+
+- Removes the remaining large Tk/UI bursts from **Inspect Chromium HTML**.
+- Streams large DOM/source documents into the read-only Text widget in 8 KiB slices instead of one monolithic insert.
+- Caps syntax and search tag application to small ~3 ms UI slices.
+- Moves source-search scanning onto a dedicated single-worker inspector executor instead of Chromium's general worker pool.
+- Cooperatively yields during dense regex/token scans so background inspection cannot monopolize Python execution.
+- Pauses background coloring while the user scrolls, drags scrollbars, clicks or types in Find.
+- Keeps live Chromium DOM inspection, native response-source inspection, bidirectional search and semantic syntax coloring intact.
+
 # v10.5.97 - DWM popup-menu dismissal
 
 - Makes clicks on the Chromium/DWM page close any open Tekzite top-bar, hamburger or context popup before the page click is forwarded.
