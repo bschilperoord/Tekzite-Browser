@@ -45,10 +45,6 @@ jobs:
               ('height=self._ui_metric("toolbar_height", 72)', 'height=self._ui_metric("toolbar_height", 62)'),
               ('height=self._ui_metric("status_bar_height", 30)', 'height=self._ui_metric("status_bar_height", 26)'),
               ('self._ui_metric("find_bar_height", 46)', 'self._ui_metric("find_bar_height", 40)'),
-              ('self.app_bar.configure(height=self._ui_metric("app_bar_height", 44)', 'self.app_bar.configure(height=self._ui_metric("app_bar_height", 40)'),
-              ('self.tab_bar.configure(height=self._ui_metric("tab_bar_height", 52)', 'self.tab_bar.configure(height=self._ui_metric("tab_bar_height", 46)'),
-              ('self.toolbar.configure(height=self._ui_metric("toolbar_height", 72)', 'self.toolbar.configure(height=self._ui_metric("toolbar_height", 62)'),
-              ('self.status_bar.configure(height=self._ui_metric("status_bar_height", 30)', 'self.status_bar.configure(height=self._ui_metric("status_bar_height", 26)'),
               ('self._outer_pad = max(6, app._ui_padding(7))\n        self._row_h = max(34, app._ui_padding(36))\n        self._separator_h = max(8, app._ui_padding(9))',
                'self._outer_pad = max(5, app._ui_padding(6))\n        self._row_h = max(30, app._ui_padding(32))\n        self._separator_h = max(6, app._ui_padding(7))'),
               ('self.app_brand.pack(side="left", padx=(self._ui_padding(16), self._ui_padding(14)), fill="y")',
@@ -241,6 +237,94 @@ jobs:
               raise SystemExit("repack tab marker missing")
           text = text.replace(old_repack, new_repack)
 
+          # Customize Tekzite: keep explanatory copy beside labels instead of
+          # stacking helper paragraphs underneath them.
+          old_visible = '''        right = tk.Frame(toolbar_page, bg=self.ui["bg"], padx=24); right.pack(side="left", fill="both", expand=True, pady=8)
+        label(right, "Visible items", bold=True).pack(anchor="w", pady=(0, 5))
+        for item in TOOLBAR_ITEM_IDS:
+            check(right, TOOLBAR_ITEM_NAMES[item], visible_vars[item]).pack(anchor="w", pady=2)
+        label(right, "Tip: hiding the address bar is safe. Ctrl+L reveals it whenever you need it.", muted=True).pack(anchor="w", pady=(12, 0))
+'''
+          new_visible = '''        right = tk.Frame(toolbar_page, bg=self.ui["bg"], padx=18); right.pack(side="left", fill="both", expand=True, pady=6)
+        visible_header = tk.Frame(right, bg=self.ui["bg"])
+        visible_header.pack(fill="x", pady=(0, 5))
+        label(visible_header, "Visible items", bold=True).pack(side="left")
+        label(visible_header, "Ctrl+L reveals a hidden address bar.", muted=True).pack(side="right")
+        for item in TOOLBAR_ITEM_IDS:
+            check(right, TOOLBAR_ITEM_NAMES[item], visible_vars[item]).pack(anchor="w", pady=1)
+'''
+          if old_visible not in text:
+              raise SystemExit("Customize visible-items marker missing")
+          text = text.replace(old_visible, new_visible)
+
+          old_behavior = '''        label(behavior_page, "Homepage", bold=True).pack(anchor="w", pady=(5, 2))
+        entry(behavior_page, homepage_var).pack(fill="x", ipady=5, pady=(0, 10))
+
+        search_row = tk.Frame(behavior_page, bg=self.ui["bg"])
+        search_row.pack(fill="x", pady=(2, 7))
+        label(search_row, "Search engine", bold=True, width=18).pack(side="left")
+        search_engine_box = ttk.Combobox(
+            search_row,
+            textvariable=search_engine_var,
+            values=list(SEARCH_ENGINE_PRESETS) + [CUSTOM_SEARCH_ENGINE],
+            state="readonly",
+            width=24,
+        )
+        search_engine_box.pack(side="left")
+
+        label(behavior_page, "Search URL template", bold=True).pack(anchor="w", pady=(7, 2))
+        search_template_entry = entry(behavior_page, search_var)
+        search_template_entry.pack(fill="x", ipady=5, pady=(0, 5))
+        label(
+            behavior_page,
+            "Choose a provider above, or use Custom with {query}. Local SearXNG URLs work here too.",
+            muted=True,
+        ).pack(anchor="w", pady=(0, 10))
+'''
+          new_behavior = '''        homepage_row = tk.Frame(behavior_page, bg=self.ui["bg"])
+        homepage_row.pack(fill="x", pady=(4, 5))
+        label(homepage_row, "Homepage", bold=True, width=18).pack(side="left")
+        entry(homepage_row, homepage_var).pack(side="left", fill="x", expand=True, ipady=4)
+
+        search_row = tk.Frame(behavior_page, bg=self.ui["bg"])
+        search_row.pack(fill="x", pady=5)
+        label(search_row, "Search engine", bold=True, width=18).pack(side="left")
+        search_engine_box = ttk.Combobox(
+            search_row,
+            textvariable=search_engine_var,
+            values=list(SEARCH_ENGINE_PRESETS) + [CUSTOM_SEARCH_ENGINE],
+            state="readonly",
+            width=24,
+        )
+        search_engine_box.pack(side="left")
+
+        search_template_row = tk.Frame(behavior_page, bg=self.ui["bg"])
+        search_template_row.pack(fill="x", pady=5)
+        label(search_template_row, "Search URL template", bold=True, width=18).pack(side="left")
+        search_template_entry = entry(search_template_row, search_var)
+        search_template_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        label(search_template_row, "Use {query} • local SearXNG supported", muted=True).pack(
+            side="left", padx=(10, 0)
+        )
+'''
+          if old_behavior not in text:
+              raise SystemExit("Customize behavior marker missing")
+          text = text.replace(old_behavior, new_behavior)
+
+          old_recovery = '''        label(advanced_page, "Recovery", bold=True).pack(anchor="w", pady=(18, 5))
+        label(advanced_page, "Ctrl+Shift+Alt+R resets the interface only.", muted=True).pack(anchor="w")
+'''
+          new_recovery = '''        recovery_row = tk.Frame(advanced_page, bg=self.ui["bg"])
+        recovery_row.pack(fill="x", pady=(12, 4))
+        label(recovery_row, "Recovery", bold=True).pack(side="left")
+        label(recovery_row, "Ctrl+Shift+Alt+R resets the interface only.", muted=True).pack(
+            side="left", padx=(12, 0)
+        )
+'''
+          if old_recovery not in text:
+              raise SystemExit("Customize recovery marker missing")
+          text = text.replace(old_recovery, new_recovery)
+
           # Runtime repack uses the same compact app/status spacing as first paint.
           text = text.replace(
               'self.app_brand.pack(side="left", padx=(self._ui_padding(18), self._ui_padding(16)), fill="y")',
@@ -278,6 +362,32 @@ jobs:
           t = t.replace("assert 'padx=(self._ui_padding(16), self._ui_padding(10))' in MAIN", "assert 'padx=(self._ui_padding(12), self._ui_padding(8))' in MAIN")
           t = t.replace("assert 'padx=self._ui_padding(14), pady=self._ui_padding(9)' in MAIN", "assert 'padx=self._ui_padding(10), pady=self._ui_padding(6)' in MAIN")
           p.write_text(t, encoding="utf-8")
+
+          Path("tests/current/test_v105104_customize_rows.py").write_text(
+              '''import inspect
+
+import main
+
+
+CUSTOMIZE_SOURCE = inspect.getsource(main.BrowserApp._show_customize_browser)
+
+
+def test_customize_explanatory_text_is_inline_not_stacked_under_labels():
+    assert "visible_header = tk.Frame" in CUSTOMIZE_SOURCE
+    assert 'label(visible_header, "Ctrl+L reveals a hidden address bar.", muted=True).pack(side="right")' in CUSTOMIZE_SOURCE
+    assert "homepage_row = tk.Frame" in CUSTOMIZE_SOURCE
+    assert "search_template_row = tk.Frame" in CUSTOMIZE_SOURCE
+    assert '"Use {query} • local SearXNG supported"' in CUSTOMIZE_SOURCE
+    assert "recovery_row = tk.Frame" in CUSTOMIZE_SOURCE
+
+
+def test_customize_old_stacked_helper_copy_is_gone():
+    assert "Tip: hiding the address bar is safe." not in CUSTOMIZE_SOURCE
+    assert "Choose a provider above, or use Custom with {query}." not in CUSTOMIZE_SOURCE
+    assert 'label(advanced_page, "Ctrl+Shift+Alt+R resets the interface only."' not in CUSTOMIZE_SOURCE
+''',
+              encoding="utf-8",
+          )
 
           Path("tests/current/test_v105104_compact_gui.py").write_text(
               '''import inspect
