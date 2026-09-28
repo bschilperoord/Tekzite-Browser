@@ -1,3 +1,13 @@
+# v10.5.104 - Compact browser GUI
+
+- Tightens the default browser shell from spacious to comfortable density while preserving user-customized layouts.
+- Brings the tab strip visibly closer to the omnibar with asymmetric shared-edge padding.
+- Reduces app-bar, tab-strip, toolbar, status-bar and find-bar heights while keeping controls readable and clickable.
+- Tightens toolbar gaps, omnibar internals, window controls, popup menus, find controls and status-bar spacing.
+- Makes Settings and Customize Tekzite use less surrounding padding.
+- Reworks Customize Tekzite helper copy so explanatory text sits inline with labels instead of underneath them.
+- Keeps custom generation-2 spacing values intact and migrates only untouched historical default layouts.
+
 # v10.5.103 - Lightweight adaptive idle work
 
 - Makes page-state polling adaptive: 550 ms while the active page is loading/being interacted with, 1.8 s when settled and 3 s when no Chromium tab is live.
