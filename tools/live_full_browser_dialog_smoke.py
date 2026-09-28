@@ -67,6 +67,19 @@ def _dialog_debug(app):
         "channel_dialog_open": channel.get("dialog_open"),
         "channel_events": channel.get("events"),
         "channel_calls": channel.get("calls"),
+        "dialog_channel_keys": sorted(
+            (session.get("javascript_dialog_browser_channels") or {}).keys()
+        ),
+        "dialog_monitor_stage": session.get("javascript_dialog_monitor_stage"),
+        "dialog_monitor_last_error": session.get("javascript_dialog_monitor_last_error"),
+        "dialog_monitor_last_error_at": session.get("javascript_dialog_monitor_last_error_at"),
+        "dialog_monitor_failures": session.get("javascript_dialog_monitor_failures"),
+        "browser_ws_url": session.get("browser_ws_url"),
+        "devtools_port": session.get("port"),
+        "browser_cdp_channel_present": bool(session.get("browser_cdp_channel")),
+        "browser_cdp_channel_closed": bool(
+            (session.get("browser_cdp_channel") or {}).get("closed")
+        ),
         "pages": [
             {
                 "id": row.get("id"),
