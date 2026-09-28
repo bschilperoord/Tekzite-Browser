@@ -29,3 +29,7 @@ jobs:
       - name: Run live Edge/Chromium JavaScript-dialog smoke
         shell: pwsh
         run: python tools\live_js_dialog_smoke.py
+
+      - name: Run full Tekzite Tk/DWM JavaScript-dialog smoke
+        shell: pwsh
+        run: python tools\live_full_browser_dialog_smoke.py
