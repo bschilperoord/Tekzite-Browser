@@ -12,7 +12,7 @@ from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, simpledialog, filedialog, colorchooser
-from browser_features import BrowserFeatures, omnibox_suggestions
+from browser_features import BrowserFeatures, omnibox_suggestions, most_visited_sites
 from browser_state import load_bookmarks, load_session, read_json, session_snapshot, write_json, valid_url
 from PIL import Image, ImageTk, ImageGrab, ImageDraw, ImageFont
 from io import BytesIO
@@ -5440,6 +5440,7 @@ class BrowserApp(BrowserFeatures):
                 except Exception:
                     open_homepage_if_still_current()
             else:
+                self._render_empty_tab_panel()
                 self._focus_address()
         return tab
 
@@ -5689,6 +5690,7 @@ class BrowserApp(BrowserFeatures):
             self.canvas.delete("all")
         except Exception:
             pass
+        self._render_empty_tab_panel()
         self.status_var.set("Ready")
         if target.pop("restore_pending", False):
             self.navigate_to(target["url"], reuse_existing=False)
@@ -6155,6 +6157,7 @@ class BrowserApp(BrowserFeatures):
             # _hide_dwm_host now uses ShowWindowAsync, so this is a Tk-fast path
             # and can make the blank tab visible without waiting on Chromium.
             self._show_native_canvas()
+            self._render_empty_tab_panel()
             self._queue_closed_target_retirement(target_id, 1800)
             try:
                 self.root.after_idle(self._focus_address)
@@ -7284,6 +7287,168 @@ class BrowserApp(BrowserFeatures):
                 except Exception:
                     pass
         return normalized
+
+    def _empty_tab_is_active(self):
+        tab = self._active_tab()
+        return bool(tab is not None and not str(tab.get("url") or "").strip() and not tab.get("chromium_target_id"))
+
+    @staticmethod
+    def _new_tab_host_label(host):
+        host = str(host or "").strip().lower()
+        return host[4:] if host.startswith("www.") else host
+
+    def _render_empty_tab_panel(self):
+        """Render the local Most visited grid into Tekzite's native blank canvas."""
+        if not self._empty_tab_is_active():
+            return False
+        try:
+            canvas = self.canvas
+            width = max(1, int(canvas.winfo_width()))
+            height = max(1, int(canvas.winfo_height()))
+            if width < 80 or height < 80:
+                return False
+
+            canvas.delete("all")
+            canvas.configure(bg=self.ui["bg"], scrollregion=(0, 0, width, height))
+            try:
+                self.scrollbar.pack_forget()
+            except Exception:
+                pass
+
+            cards = most_visited_sites(getattr(self, "visits", []), limit=8)
+            content_width = min(max(540, width - 96), 1040)
+            left = int((width - content_width) / 2)
+            top = max(54, min(116, int(height * 0.13)))
+
+            canvas.create_text(
+                left, top,
+                text="Most visited",
+                anchor="nw",
+                fill=self.ui["text"],
+                font=(self._ui_display_font_family, self._font_size(19), "bold"),
+            )
+            canvas.create_text(
+                left, top + 36,
+                text="From your local Tekzite history",
+                anchor="nw",
+                fill=self.ui["muted"],
+                font=(self._ui_font_family, self._font_size(9)),
+            )
+
+            if not cards:
+                box_top = top + 88
+                box_bottom = min(height - 48, box_top + 150)
+                self._rounded_canvas_rect(
+                    canvas, left, box_top, left + content_width, box_bottom, 18,
+                    fill=self.ui["chrome_2"], outline=self.ui["border_soft"], width=1,
+                )
+                canvas.create_text(
+                    left + 24, box_top + 38,
+                    text="Your most visited sites will appear here.",
+                    anchor="nw", fill=self.ui["text"],
+                    font=(self._ui_font_family, self._font_size(11), "bold"),
+                )
+                canvas.create_text(
+                    left + 24, box_top + 72,
+                    text="Browse normally and Tekzite will build this panel locally.",
+                    anchor="nw", fill=self.ui["muted"],
+                    font=(self._ui_font_family, self._font_size(9)),
+                )
+                return True
+
+            columns = 4 if content_width >= 900 else (3 if content_width >= 690 else 2)
+            gap = 14
+            card_width = int((content_width - gap * (columns - 1)) / columns)
+            card_height = 126
+            grid_top = top + 82
+
+            for index, item in enumerate(cards):
+                row, col = divmod(index, columns)
+                x1 = left + col * (card_width + gap)
+                y1 = grid_top + row * (card_height + gap)
+                x2 = x1 + card_width
+                y2 = y1 + card_height
+                if y2 > height - 28:
+                    break
+
+                tag = f"most_visited_{index}"
+                self._rounded_canvas_rect(
+                    canvas, x1, y1, x2, y2, 16,
+                    fill=self.ui["chrome_2"], outline=self.ui["border_soft"], width=1,
+                    tags=(tag, "most_visited_card"),
+                )
+
+                host = self._new_tab_host_label(item.get("host"))
+                title = str(item.get("title") or host).strip()
+                if title == str(item.get("url") or "").strip():
+                    title = host
+                title = title[:38] + ("…" if len(title) > 38 else "")
+                host_display = host[:34] + ("…" if len(host) > 34 else "")
+                count = max(1, int(item.get("visit_count", 1) or 1))
+                initial = (host[:1] or "•").upper()
+
+                icon_x = x1 + 26
+                icon_y = y1 + 30
+                canvas.create_oval(
+                    icon_x - 15, icon_y - 15, icon_x + 15, icon_y + 15,
+                    fill=self.ui["field_focus"], outline=self.ui["border"], width=1,
+                    tags=(tag,),
+                )
+                canvas.create_text(
+                    icon_x, icon_y, text=initial,
+                    fill=self.ui["accent_hover"],
+                    font=(self._ui_display_font_family, self._font_size(10), "bold"),
+                    tags=(tag,),
+                )
+                canvas.create_text(
+                    x1 + 50, y1 + 20, text=title,
+                    anchor="nw", width=max(80, card_width - 68),
+                    fill=self.ui["text"],
+                    font=(self._ui_font_family, self._font_size(10), "bold"),
+                    tags=(tag,),
+                )
+                canvas.create_text(
+                    x1 + 22, y1 + 72, text=host_display,
+                    anchor="nw", width=max(80, card_width - 44),
+                    fill=self.ui["muted"],
+                    font=(self._ui_font_family, self._font_size(8)),
+                    tags=(tag,),
+                )
+                canvas.create_text(
+                    x1 + 22, y1 + 96,
+                    text=f"{count:,} visit{'s' if count != 1 else ''}",
+                    anchor="nw",
+                    fill=self.ui["muted_dim"],
+                    font=(self._ui_font_family, self._font_size(8)),
+                    tags=(tag,),
+                )
+
+                url = str(item.get("url") or "")
+                def open_current(_event=None, target=url):
+                    if target and self._empty_tab_is_active():
+                        self.navigate_to(target, reuse_existing=False)
+                    return "break"
+
+                def open_new(_event=None, target=url):
+                    if target:
+                        self._new_tab(url=target, switch=True, navigate=True)
+                    return "break"
+
+                canvas.tag_bind(tag, "<Enter>", lambda _e: canvas.configure(cursor="hand2"))
+                canvas.tag_bind(tag, "<Leave>", lambda _e: canvas.configure(cursor=""))
+                canvas.tag_bind(tag, "<ButtonRelease-1>", open_current)
+                canvas.tag_bind(tag, "<ButtonRelease-2>", open_new)
+
+            canvas.create_text(
+                left, min(height - 24, grid_top + ((len(cards) + columns - 1) // columns) * (card_height + gap) + 8),
+                text="Stored locally • no network request is made to build this panel",
+                anchor="nw",
+                fill=self.ui["muted_dim"],
+                font=(self._ui_font_family, self._font_size(8)),
+            )
+            return True
+        except Exception:
+            return False
 
     def _show_native_canvas(self):
         if not self._embedded_mode and not self._chromium_software_mode:
@@ -9469,9 +9634,15 @@ class BrowserApp(BrowserFeatures):
         )
 
     def _on_canvas_configure(self, event):
-        """Debounce every drawable viewport transition into a live reflow."""
+        """Debounce page reflow or redraw the local empty-tab dashboard."""
+        if self._empty_tab_is_active() and self._current_document is None:
+            try:
+                self.root.after_idle(self._render_empty_tab_panel)
+            except Exception:
+                self._render_empty_tab_panel()
+            return
         # Do not trust Configure's dimensions later: another resize/maximize/
-        # restore can happen during the debounce interval.  Re-read the canvas
+        # restore can happen during the debounce interval. Re-read the canvas
         # at execution time instead.
         self._schedule_live_reflow()
 
