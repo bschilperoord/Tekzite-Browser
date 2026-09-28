@@ -183,6 +183,38 @@ def main():
         if not channel.get("session_id"):
             raise AssertionError("No flattened Target session was attached")
 
+        # Tekzite normally arms the dialog observer on its neutral bootstrap
+        # target before navigating the target to the real page. Reproduce that
+        # lifecycle exactly, including a file:// cross-document navigation.
+        smoke_page = profile / "dialog-after-navigation.html"
+        smoke_page.write_text(
+            "<!doctype html><meta charset='utf-8'><title>after navigation</title>"
+            "<h1>after navigation</h1>",
+            encoding="utf-8",
+        )
+        nav_url = smoke_page.resolve().as_uri()
+        net._persistent_page_cdp_call(
+            session,
+            "Page.navigate",
+            {"url": nav_url},
+            target_id=target_id,
+            timeout=3.0,
+            purpose="dialog-smoke-control",
+        )
+        nav_deadline = time.monotonic() + 5.0
+        ready = ""
+        while time.monotonic() < nav_deadline:
+            nav_state = _evaluate(
+                session, target_id, "document.readyState + '|' + location.href", timeout=1.0
+            )
+            ready = str((((nav_state or {}).get("result") or {}).get("value") or ""))
+            if ready.startswith(("interactive|", "complete|")) and nav_url in ready:
+                break
+            time.sleep(0.05)
+        if nav_url not in ready:
+            raise AssertionError(f"Target did not complete smoke navigation: {ready!r}")
+        print("Observer survived navigation to:", nav_url)
+
         # Return from Runtime.evaluate before confirm() opens so this command
         # cannot itself block waiting for the synchronous page dialog.
         result = _evaluate(
