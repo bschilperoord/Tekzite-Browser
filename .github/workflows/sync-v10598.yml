@@ -1,0 +1,92 @@
+name: One-shot v10.5.98 sync
+
+on:
+  push:
+    branches: [dev/v10.5.98-html-inspector-smooth]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+
+      - name: Synchronize v10.5.98 and preserve line endings
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          python tools/sync_version.py 10.5.98
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          changelog = Path("CHANGELOG.md")
+          text = changelog.read_text(encoding="utf-8")
+          section = """# v10.5.98 - Smooth HTML Inspector
+
+          - Removes the remaining large Tk/UI bursts from **Inspect Chromium HTML**.
+          - Streams large DOM/source documents into the read-only Text widget in 8 KiB slices instead of one monolithic insert.
+          - Caps syntax and search tag application to small ~3 ms UI slices.
+          - Moves source-search scanning onto a dedicated single-worker inspector executor instead of Chromium's general worker pool.
+          - Cooperatively yields during dense regex/token scans so background inspection cannot monopolize Python execution.
+          - Pauses background coloring while the user scrolls, drags scrollbars, clicks or types in Find.
+          - Keeps live Chromium DOM inspection, native response-source inspection, bidirectional search and semantic syntax coloring intact.
+
+          """
+          section = "\n".join(line[10:] if line.startswith("          ") else line for line in section.splitlines()) + "\n"
+          if not text.startswith("# v10.5.98"):
+              changelog.write_text(section + text, encoding="utf-8")
+
+          changed = subprocess.check_output(
+              ["git", "diff", "--name-only", "origin/main...HEAD"],
+              text=True,
+          ).splitlines()
+          changed += subprocess.check_output(
+              ["git", "diff", "--name-only"],
+              text=True,
+          ).splitlines()
+
+          for name in dict.fromkeys(changed):
+              path = Path(name)
+              if not path.is_file():
+                  continue
+              try:
+                  original = subprocess.check_output(["git", "show", f"origin/main:{name}"])
+              except subprocess.CalledProcessError:
+                  continue
+              current = path.read_bytes()
+              if b"\0" in current or b"\0" in original:
+                  continue
+              original_crlf = b"\r\n" in original
+              normalized = current.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+              desired = normalized.replace(b"\n", b"\r\n") if original_crlf else normalized
+              if desired != current:
+                  path.write_bytes(desired)
+          PY
+          rm -f .github/workflows/sync-v10598.yml
+
+      - name: Commit synchronized release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to synchronize."
+            exit 0
+          fi
+          git commit -m "Prepare Tekzite Browser v10.5.98"
+          git push origin HEAD:dev/v10.5.98-html-inspector-smooth
