@@ -12117,7 +12117,7 @@ class BrowserApp(BrowserFeatures):
             rows = [
                 "TEKZITE PRIVACY",
                 "=" * 46,
-                f"Lockdown ............ {yes(prefs.get('privacy_lockdown', False))}",
+                f"Privacy Core ........ {yes(prefs.get('privacy_lockdown', False))}",
                 f"Trackers ............ {yes(prefs.get('tracker_blocking_enabled', True))}",
                 f"Tracking params ..... {yes(prefs.get('strip_tracking_parameters', True))}",
                 f"Referer stripping ... {yes(prefs.get('strip_referrer', True))}",
@@ -12280,7 +12280,7 @@ class BrowserApp(BrowserFeatures):
         strip_tracking = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("strip_tracking_parameters", True)))
         strip_referrer = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("strip_referrer", True)))
         https_first = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("https_first", True)))
-        clear_on_exit = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("clear_browsing_data_on_exit", True)))
+        clear_on_exit = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("clear_browsing_data_on_exit", False)))
         adblock_enabled = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("adblock_enabled", True)))
         page_zoom = tk.StringVar(value=f"{self._page_zoom_percent()}%")
         sleeping_tabs_enabled = tk.BooleanVar(value=bool(self.preferences.get("sleeping_tabs_enabled", True)))
@@ -13706,7 +13706,7 @@ class BrowserApp(BrowserFeatures):
         if not getattr(self, "_private_mode", False):
             try:
                 self._save_session()
-                write_json(self._state_directory / "history.json", [] if self.preferences.get("clear_browsing_data_on_exit", True) else self.visits)
+                write_json(self._state_directory / "history.json", [] if self.preferences.get("clear_browsing_data_on_exit", False) else self.visits)
             except OSError as exc:
                 if not self._ask_yes_no("Save browser state", f"Could not save browser state:\n{exc}\n\nClose anyway?", parent=self.root):
                     self._restart_after_close = False
