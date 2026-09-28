@@ -275,6 +275,7 @@ class BrowserFeatures:
         if not getattr(self, '_private_mode', False):
             self._checkpoint_job = self.root.after(3500, self._checkpoint_features)
         self._schedule_network_health_watch(3000)
+        self._schedule_permission_prompt_poll(450)
         scheduler = getattr(self, '_schedule_sleeping_tabs', None)
         if callable(scheduler):
             scheduler(15000)
@@ -1023,12 +1024,13 @@ class BrowserFeatures:
             'camera': 'videoCapture',
             'clipboard': 'clipboardReadWrite',
             'sensors': 'sensors',
+            'midi': 'midi',
         }
         setting_map = {'allow': 'granted', 'block': 'denied', 'ask': 'prompt'}
         def apply_all():
             applied = 0
             for key, cdp_name in mapping.items():
-                value = str(rule.get(key) or 'block').lower()
+                value = str(rule.get(key) or 'ask').lower()
                 try:
                     features.net.set_embedded_chromium_permission(
                         origin, cdp_name, setting_map.get(value, 'denied')
@@ -1042,6 +1044,373 @@ class BrowserFeatures:
         except Exception:
             pass
 
+
+    @staticmethod
+    def _permission_pref_key(permission):
+        return {
+            'notifications': 'notifications',
+            'location': 'location',
+            'microphone': 'microphone',
+            'camera': 'camera',
+            'clipboard': 'clipboard',
+            'sensors': 'sensors',
+            'midi': 'midi',
+            'midiSysex': 'midi',
+        }.get(str(permission or ''))
+
+    @staticmethod
+    def _permission_cdp_name(permission):
+        return {
+            'notifications': 'notifications',
+            'location': 'geolocation',
+            'microphone': 'audioCapture',
+            'camera': 'videoCapture',
+            'clipboard': 'clipboardReadWrite',
+            'sensors': 'sensors',
+            'midi': 'midi',
+            'midiSysex': 'midiSysex',
+        }.get(str(permission or ''))
+
+    @staticmethod
+    def _permission_label(permission):
+        return {
+            'notifications': 'notifications',
+            'location': 'your location',
+            'microphone': 'your microphone',
+            'camera': 'your camera',
+            'clipboard': 'your clipboard',
+            'sensors': 'motion / sensors',
+            'midi': 'MIDI devices',
+            'midiSysex': 'MIDI SysEx',
+        }.get(str(permission or ''), str(permission or 'permission'))
+
+    def _permission_policy_for_request(self, origin, permissions):
+        rule = self._permission_rules().get(origin, {})
+        if not isinstance(rule, dict):
+            rule = {}
+        values = []
+        for permission in permissions or ():
+            key = self._permission_pref_key(permission)
+            if not key:
+                continue
+            value = str(rule.get(key) or 'ask').strip().lower()
+            values.append(value if value in {'allow', 'block', 'ask'} else 'ask')
+        if any(value == 'block' for value in values):
+            return 'block'
+        if values and all(value == 'allow' for value in values):
+            return 'allow'
+        return 'ask'
+
+    def _remember_permission_rule(self, origin, permissions, value):
+        updated = dict(self._permission_rules())
+        current = dict(updated.get(origin, {})) if isinstance(updated.get(origin), dict) else {}
+        for permission in permissions or ():
+            key = self._permission_pref_key(permission)
+            if key:
+                current[key] = value
+        updated[origin] = current
+        self.preferences['site_permissions'] = updated
+        try:
+            self._persist_preferences()
+            return True
+        except Exception as exc:
+            self.status_var.set(f'Permission preference save failed: {exc}')
+            return False
+
+    def _schedule_permission_prompt_poll(self, delay_ms=450):
+        if self._closing:
+            return
+        try:
+            self._permission_prompt_after_id = self.root.after(
+                max(80, int(delay_ms)), self._permission_prompt_tick
+            )
+        except Exception:
+            self._permission_prompt_after_id = None
+
+    def _permission_prompt_tick(self):
+        self._permission_prompt_after_id = None
+        if self._closing:
+            return
+        prompt = getattr(self, '_permission_prompt_window', None)
+        if prompt is not None:
+            try:
+                if prompt.winfo_exists():
+                    self._schedule_permission_prompt_poll(350)
+                    return
+            except Exception:
+                pass
+            self._permission_prompt_window = None
+        if getattr(self, '_permission_prompt_poll_busy', False):
+            self._schedule_permission_prompt_poll(250)
+            return
+
+        tab = self._active_tab() or {}
+        target_id = str(tab.get('chromium_target_id') or '')
+        origin = self._origin_for_url(tab.get('url') or self.url_var.get())
+        if not target_id or not origin:
+            self._schedule_permission_prompt_poll(650)
+            return
+
+        self._permission_prompt_poll_busy = True
+        future = self._executor.submit(
+            features.net.poll_embedded_chromium_permission_requests,
+            target_id,
+            timeout=0.8,
+        )
+
+        def finish():
+            if self._closing:
+                return
+            if not future.done():
+                try:
+                    self.root.after(40, finish)
+                except Exception:
+                    pass
+                return
+            self._permission_prompt_poll_busy = False
+            try:
+                rows = future.result() or []
+            except Exception:
+                rows = []
+            if rows:
+                request = rows[0]
+                current = self._active_tab() or {}
+                current_target = str(current.get('chromium_target_id') or '')
+                current_origin = self._origin_for_url(current.get('url') or self.url_var.get())
+                if (str(request.get('target_id') or '') != current_target
+                        or str(request.get('origin') or '') != current_origin):
+                    try:
+                        self._executor.submit(
+                            features.net.resolve_embedded_chromium_permission_request,
+                            str(request.get('target_id') or ''),
+                            int(request.get('id')),
+                            False,
+                            timeout=0.8,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    self._handle_permission_bridge_request(request)
+            self._schedule_permission_prompt_poll(180 if rows else 450)
+
+        try:
+            self.root.after(40, finish)
+        except Exception:
+            self._permission_prompt_poll_busy = False
+
+    def _handle_permission_bridge_request(self, request):
+        origin = str(request.get('origin') or '')
+        permissions = [
+            str(item) for item in (request.get('permissions') or [])
+            if self._permission_pref_key(item) and self._permission_cdp_name(item)
+        ]
+        if not origin or not permissions:
+            return
+        request = dict(request)
+        request['permissions'] = permissions
+        policy = self._permission_policy_for_request(origin, permissions)
+        if policy == 'allow':
+            self._complete_permission_bridge_request(
+                request, True, keep_browser_setting=True, persist_rule=False
+            )
+            return
+        if policy == 'block':
+            self._complete_permission_bridge_request(
+                request, False, keep_browser_setting=True, persist_rule=False
+            )
+            return
+        self._show_permission_request_prompt(request)
+
+    def _complete_permission_bridge_request(
+            self, request, allowed, *, keep_browser_setting=False, persist_rule=False):
+        origin = str(request.get('origin') or '')
+        target_id = str(request.get('target_id') or '')
+        try:
+            request_id = int(request.get('id'))
+        except Exception:
+            return
+        permissions = [
+            str(item) for item in (request.get('permissions') or [])
+            if self._permission_pref_key(item) and self._permission_cdp_name(item)
+        ]
+        if not origin or not target_id or not permissions:
+            return
+
+        if persist_rule:
+            self._remember_permission_rule(origin, permissions, 'allow' if allowed else 'block')
+
+        cdp_names = []
+        for permission in permissions:
+            name = self._permission_cdp_name(permission)
+            if name and name not in cdp_names:
+                cdp_names.append(name)
+
+        def work():
+            if allowed:
+                try:
+                    for name in cdp_names:
+                        features.net.set_embedded_chromium_permission(origin, name, 'granted')
+                except Exception as exc:
+                    try:
+                        features.net.resolve_embedded_chromium_permission_request(
+                            target_id, request_id, False, timeout=0.8
+                        )
+                    except Exception:
+                        pass
+                    return {'ok': False, 'error': str(exc), 'granted': False}
+            elif keep_browser_setting:
+                for name in cdp_names:
+                    try:
+                        features.net.set_embedded_chromium_permission(origin, name, 'denied')
+                    except Exception:
+                        pass
+
+            try:
+                resolved = features.net.resolve_embedded_chromium_permission_request(
+                    target_id, request_id, bool(allowed), timeout=0.8
+                )
+            except Exception as exc:
+                return {'ok': False, 'error': str(exc), 'granted': bool(allowed)}
+            return {'ok': bool(resolved), 'granted': bool(allowed)}
+
+        try:
+            future = self._executor.submit(work)
+        except Exception:
+            return
+
+        def finish():
+            if self._closing:
+                return
+            if not future.done():
+                try:
+                    self.root.after(40, finish)
+                except Exception:
+                    pass
+                return
+            try:
+                result = future.result() or {}
+            except Exception as exc:
+                self.status_var.set(f'Permission request failed: {exc}')
+                return
+            if not result.get('ok'):
+                self.status_var.set(
+                    'Permission request was safely denied because Chromium could not apply it.'
+                )
+                return
+            label = ', '.join(self._permission_label(p) for p in permissions)
+            self.status_var.set(
+                f'{"Allowed" if allowed else "Blocked"} {label} for {origin}'
+            )
+            if allowed and not keep_browser_setting:
+                def reset_once():
+                    if self._closing:
+                        return
+                    if self._permission_policy_for_request(origin, permissions) != 'ask':
+                        return
+                    def reset_work():
+                        for name in cdp_names:
+                            try:
+                                features.net.set_embedded_chromium_permission(origin, name, 'prompt')
+                            except Exception:
+                                pass
+                    try:
+                        self._executor.submit(reset_work)
+                    except Exception:
+                        pass
+                try:
+                    self.root.after(1800, reset_once)
+                except Exception:
+                    pass
+
+        try:
+            self.root.after(40, finish)
+        except Exception:
+            pass
+
+    def _show_permission_request_prompt(self, request):
+        previous = getattr(self, '_permission_prompt_window', None)
+        if previous is not None:
+            try:
+                if previous.winfo_exists():
+                    previous.lift()
+                    return
+            except Exception:
+                pass
+
+        origin = str(request.get('origin') or '')
+        permissions = list(request.get('permissions') or [])
+        labels = [self._permission_label(p) for p in permissions]
+        if not origin or not labels:
+            return
+
+        win = self._new_animated_toplevel(self.root)
+        self._permission_prompt_window = win
+        win.title('Tekzite Site Permission')
+        win.geometry('560x300')
+        win.transient(self.root)
+        win.configure(bg=self.ui['bg'])
+
+        host = origin
+        try:
+            host = urlsplit(origin).hostname or origin
+        except Exception:
+            pass
+        tk.Label(
+            win, text='Site permission', bg=self.ui['bg'], fg=self.ui['text'],
+            font=(self._ui_display_font_family, 17, 'bold')
+        ).pack(anchor='w', padx=20, pady=(18, 4))
+        tk.Label(
+            win, text=host, bg=self.ui['bg'], fg=self.ui['accent'],
+            font=(self._ui_font_family, 10, 'bold')
+        ).pack(anchor='w', padx=20, pady=(0, 12))
+        request_text = (
+            f'{host} wants to use ' + (
+                labels[0] if len(labels) == 1
+                else ', '.join(labels[:-1]) + ' and ' + labels[-1]
+            ) + '.'
+        )
+        tk.Label(
+            win, text=request_text, bg=self.ui['bg'], fg=self.ui['text'],
+            justify='left', wraplength=510, font=(self._ui_font_family, 11)
+        ).pack(anchor='w', padx=20, pady=(0, 10))
+        tk.Label(
+            win,
+            text='Tekzite is handling this request here so Chromium does not hide the decision in an off-screen permission bubble.',
+            bg=self.ui['bg'], fg=self.ui['muted'], justify='left', wraplength=510
+        ).pack(anchor='w', padx=20, pady=(0, 16))
+
+        controls = tk.Frame(win, bg=self.ui['bg'])
+        controls.pack(side='bottom', fill='x', padx=16, pady=16)
+        state = {'done': False}
+
+        def decide(allowed, remember):
+            if state['done']:
+                return
+            state['done'] = True
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self._permission_prompt_window = None
+            self._complete_permission_bridge_request(
+                request,
+                bool(allowed),
+                keep_browser_setting=bool(remember),
+                persist_rule=bool(remember),
+            )
+
+        self._feature_button(controls, 'Allow once', lambda: decide(True, False))
+        self._feature_button(controls, 'Always allow', lambda: decide(True, True))
+        self._feature_button(controls, 'Block once', lambda: decide(False, False))
+        self._feature_button(controls, 'Always block', lambda: decide(False, True))
+        win.protocol('WM_DELETE_WINDOW', lambda: decide(False, False))
+        win.bind('<Escape>', lambda event: decide(False, False))
+        try:
+            win.lift()
+            win.after(60, win.focus_force)
+        except Exception:
+            pass
+
     def _show_permissions_manager(self):
         tab = self._active_tab() or {}
         origin = self._origin_for_url(tab.get('url') or self.url_var.get())
@@ -1050,7 +1419,7 @@ class BrowserFeatures:
             return 'break'
         win = self._new_animated_toplevel(self.root)
         win.title('Tekzite Permissions Manager')
-        win.geometry('560x500')
+        win.geometry('560x540')
         win.transient(self.root)
         win.configure(bg=self.ui['bg'])
         tk.Label(win, text='Site permissions', bg=self.ui['bg'], fg=self.ui['text'],
@@ -1063,13 +1432,14 @@ class BrowserFeatures:
             ('notifications', 'Notifications'), ('location', 'Location'),
             ('microphone', 'Microphone'), ('camera', 'Camera'),
             ('clipboard', 'Clipboard read/write'), ('sensors', 'Motion / sensors'),
+            ('midi', 'MIDI / SysEx'),
         ):
             row = tk.Frame(win, bg=self.ui['bg']); row.pack(fill='x', padx=18, pady=4)
             tk.Label(row, text=label, width=24, anchor='w', bg=self.ui['bg'], fg=self.ui['text']).pack(side='left')
-            var = tk.StringVar(value=str(current.get(key) or 'block').title())
+            var = tk.StringVar(value=str(current.get(key) or 'ask').title())
             ttk.Combobox(row, textvariable=var, values=('Allow', 'Block', 'Ask'), state='readonly', width=16).pack(side='right')
             fields[key] = var
-        note = tk.StringVar(value='Default Tekzite policy is Block. Site-specific rules override it.')
+        note = tk.StringVar(value='Default Tekzite policy is Ask in Tk. Site-specific rules override it.')
         tk.Label(win, textvariable=note, bg=self.ui['bg'], fg=self.ui['muted'], wraplength=500, justify='left').pack(anchor='w', padx=18, pady=(10, 6))
         buttons = tk.Frame(win, bg=self.ui['bg']); buttons.pack(side='bottom', fill='x', padx=18, pady=16)
         def save():
@@ -1089,12 +1459,12 @@ class BrowserFeatures:
             self.preferences['site_permissions'] = updated
             try: self._persist_preferences()
             except Exception: pass
-            for var in fields.values(): var.set('Block')
-            # Explicitly re-apply Tekzite's privacy-first default for this session.
-            self.preferences['site_permissions'][origin] = {key: 'block' for key in fields}
+            for var in fields.values(): var.set('Ask')
+            # Re-apply Tekzite's Tk-owned prompt default for this Chromium session.
+            self.preferences['site_permissions'][origin] = {key: 'ask' for key in fields}
             tab['_permissions_origin_applied'] = None; self._apply_permissions_for_tab(tab)
             self.preferences['site_permissions'].pop(origin, None)
-            note.set('Site override removed; Tekzite default Block policy is active.')
+            note.set('Site override removed; Tekzite will ask in its own Tk permission dialog.')
         self._feature_button(buttons, 'Save', save)
         self._feature_button(buttons, 'Reset to default', reset)
         self._feature_button(buttons, 'Close', win.destroy)
