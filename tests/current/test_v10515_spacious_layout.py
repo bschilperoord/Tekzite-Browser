@@ -10,22 +10,22 @@ def test_release_version():
     assert main.BROWSER_VERSION == "10.5.103"
 
 
-def test_spacious_defaults_are_the_new_baseline():
+def test_comfortable_defaults_are_the_new_baseline():
     c = main.DEFAULT_CUSTOMIZATION
-    assert c["density"] == "spacious"
+    assert c["density"] == "comfortable"
     assert c["font_size"] == 11
     assert c["tab_font_size"] == 10
     assert c["toolbar_font_size"] == 11
-    assert c["tab_min_width"] == 175
-    assert c["tab_max_width"] == 330
-    assert c["app_bar_height"] == 44
-    assert c["tab_bar_height"] == 52
-    assert c["toolbar_height"] == 72
-    assert c["status_bar_height"] == 30
-    assert c["find_bar_height"] == 46
+    assert c["tab_min_width"] == 160
+    assert c["tab_max_width"] == 300
+    assert c["app_bar_height"] == 40
+    assert c["tab_bar_height"] == 46
+    assert c["toolbar_height"] == 62
+    assert c["status_bar_height"] == 26
+    assert c["find_bar_height"] == 40
 
 
-def test_untouched_previous_layout_migrates_to_spacious():
+def test_untouched_previous_layout_migrates_to_current_spacing():
     old = {
         "font_size": 10, "tab_font_size": 9, "toolbar_font_size": 10,
         "ui_scale": 1.0, "density": "comfortable", "tab_title_chars": 24,
@@ -37,10 +37,10 @@ def test_untouched_previous_layout_migrates_to_spacious():
         "window_min_width": 900, "window_min_height": 600,
     }
     migrated = main._normalized_customization(old)
-    assert migrated["spacing_generation"] == 2
-    assert migrated["density"] == "spacious"
-    assert migrated["toolbar_height"] == 72
-    assert migrated["tab_min_width"] == 175
+    assert migrated["spacing_generation"] == 3
+    assert migrated["density"] == "comfortable"
+    assert migrated["toolbar_height"] == 62
+    assert migrated["tab_min_width"] == 160
 
 
 def test_user_adjusted_layout_is_not_forced_to_new_spacing():
@@ -59,9 +59,9 @@ def test_user_adjusted_layout_is_not_forced_to_new_spacing():
     assert normalized["density"] == "comfortable"
 
 
-def test_spacious_padding_is_used_across_primary_chrome():
-    assert 'gap = self._ui_padding(7)' in MAIN
-    assert 'outer = self._ui_padding(12)' in MAIN
-    assert 'padx=(self._ui_padding(16), self._ui_padding(10))' in MAIN
-    assert 'padx=self._ui_padding(14), pady=self._ui_padding(9)' in MAIN
+def test_compact_padding_is_used_across_primary_chrome():
+    assert 'gap = self._ui_padding(5)' in MAIN
+    assert 'outer = self._ui_padding(9)' in MAIN
+    assert 'padx=(self._ui_padding(12), self._ui_padding(8))' in MAIN
+    assert 'padx=self._ui_padding(10), pady=self._ui_padding(6)' in MAIN
 
