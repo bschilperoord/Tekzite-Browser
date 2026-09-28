@@ -12379,7 +12379,9 @@ class BrowserApp(BrowserFeatures):
                  bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(0, 12))
 
         scroll_host = tk.Frame(shell, bg=self.ui["bg"])
-        scroll_host.pack(fill="both", expand=True)
+        # Pack the fixed action footer before this scroll host. If the expanding
+        # body is packed first, Tk can consume the whole shell and squeeze the
+        # Save/Cancel row out of view as Settings grows.
         settings_canvas = tk.Canvas(
             scroll_host, bg=self.ui["bg"], highlightthickness=0, bd=0,
             width=max(520, dialog_width - 70), height=980,
@@ -12654,8 +12656,14 @@ class BrowserApp(BrowserFeatures):
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
 
-        buttons = tk.Frame(shell, bg=self.ui["bg"])
-        buttons.pack(fill="x", pady=(14, 0))
+        buttons = tk.Frame(
+            shell,
+            bg=self.ui["bg"],
+            highlightbackground=self.ui["border_soft"],
+            highlightthickness=1,
+        )
+        buttons.pack(side="bottom", fill="x", pady=(14, 0))
+        scroll_host.pack(side="top", fill="both", expand=True)
         def save_and_close():
             selected_zoom = _normalized_zoom_percent(page_zoom.get(), original_zoom)
             self.preferences.update({
@@ -12715,9 +12723,9 @@ class BrowserApp(BrowserFeatures):
             win.destroy()
 
         tk.Button(buttons, text="Cancel", command=cancel_preferences, bg=self.ui["chrome_2"], fg=self.ui["text"],
-                  relief="flat", padx=16, pady=7).pack(side="right")
-        tk.Button(buttons, text="Save", command=save_and_close, bg=self.ui["accent"], fg="#ffffff",
-                  relief="flat", padx=20, pady=7).pack(side="right", padx=(0, 8))
+                  relief="flat", padx=16, pady=8).pack(side="right", pady=8)
+        tk.Button(buttons, text="Save settings", command=save_and_close, bg=self.ui["accent"], fg="#ffffff",
+                  relief="flat", padx=22, pady=8).pack(side="right", padx=(0, 8), pady=8)
         def fit_and_center_preferences():
             # v10.5.38: Settings has one authoritative geometry calculation.
             # Use Tk screen coordinates for both sizing and placement, then
