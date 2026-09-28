@@ -6,8 +6,10 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import shutil
 import sys
+import threading
 import tempfile
 import time
 
@@ -105,7 +107,21 @@ def main():
         "<h1>Tekzite dialog smoke</h1><button id='b'>button</button>",
         encoding="utf-8",
     )
-    page_url = page.resolve().as_uri()
+
+    class QuietHandler(SimpleHTTPRequestHandler):
+        def log_message(self, _format, *args):
+            pass
+
+    handler = lambda *args, **kwargs: QuietHandler(
+        *args, directory=str(temp_root), **kwargs
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server_thread = threading.Thread(
+        target=httpd.serve_forever, name="tekzite-dialog-http", daemon=True
+    )
+    server_thread.start()
+    page_url = f"http://127.0.0.1:{httpd.server_port}/dialog-smoke.html"
+    print("Full Tekzite smoke page:", page_url)
 
     old_argv = list(sys.argv)
     worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tekzite-dialog-smoke")
@@ -161,6 +177,30 @@ def main():
             if not state["armed"]:
                 if not target_id or not session or not tab.get("loaded"):
                     app.root.after(50, tick)
+                    return
+                channels = session.get("javascript_dialog_browser_channels") or {}
+                dialog_channel = channels.get(target_id) or {}
+                if not state.get("prearm_reported"):
+                    state["prearm_reported"] = True
+                    print(
+                        "Prearm diagnostics:",
+                        json.dumps(
+                            {
+                                "target_id": target_id,
+                                "channel_present": bool(dialog_channel),
+                                "session_id": dialog_channel.get("session_id"),
+                                "page_enabled": dialog_channel.get("page_enabled"),
+                                "stage": session.get("javascript_dialog_monitor_stage"),
+                                "last_error": session.get("javascript_dialog_monitor_last_error"),
+                                "failures": session.get("javascript_dialog_monitor_failures"),
+                                "navigation_error": session.get("javascript_dialog_monitor_error"),
+                            },
+                            default=str,
+                            sort_keys=True,
+                        ),
+                    )
+                if not (dialog_channel.get("session_id") and dialog_channel.get("page_enabled")):
+                    fail("JavaScript dialog monitor was not pre-armed before HTTP page interaction")
                     return
                 if state["arm_future"] is None:
                     def arm():
@@ -261,6 +301,11 @@ def main():
             ):
                 if profile:
                     shutil.rmtree(profile, ignore_errors=True)
+        try:
+            httpd.shutdown()
+            httpd.server_close()
+        except Exception:
+            pass
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
