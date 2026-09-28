@@ -45,4 +45,4 @@ def test_customize_header_uses_valid_tk_widget_padding():
     # accept a two-value external padding tuple.  A tuple here aborts dialog
     # construction with: TclError: bad screen distance "4 10".
     assert 'tk.Frame(win, bg=self.ui["bg"], padx=18, pady=(4, 10))' not in MAIN
-    assert 'tk.Frame(win, bg=self.ui["bg"], padx=18, pady=4)' in MAIN
+    assert 'tk.Frame(win, bg=self.ui["bg"], padx=14, pady=3)' in MAIN
