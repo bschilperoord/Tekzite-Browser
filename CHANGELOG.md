@@ -1,3 +1,12 @@
+# v10.5.100 - Search engine picker
+
+- Adds a proper Search engine selector to Customize Tekzite -> Behavior.
+- Includes Startpage, DuckDuckGo, Google, Bing, Brave Search, Ecosia and Qwant.
+- Keeps the existing URL-template engine underneath, so Custom supports self-hosted/local providers such as SearXNG.
+- Selecting a built-in provider fills its query template automatically.
+- Editing the template automatically identifies matching built-ins or switches the selector to Custom.
+- Preserves the existing {query} validation and URL encoding used by omnibox searches.
+
 # v10.5.99 - Fast rich HTML + CSS coloring
 
 - Upgrades Inspect Chromium HTML with richer semantic markup colors for tag names, attributes, equals signs, quotes, values, entities, comments and declarations.
