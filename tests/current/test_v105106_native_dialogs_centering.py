@@ -39,9 +39,12 @@ def test_dialog_monitor_is_armed_before_navigation():
     block = NET[NET.index("def navigate_embedded_chromium"):NET.index("def _windows_descendant_pids")]
     assert "ensure_embedded_chromium_javascript_dialog_monitor" in block
     assert block.index("ensure_embedded_chromium_javascript_dialog_monitor") < block.index('"Page.navigate"')
-    assert "purpose='dialog'" in NET
+    assert "'Target.attachToTarget'" in NET
+    assert "'flatten': True" in NET
+    assert "'Page.enable'" in NET
     assert "'Page.handleJavaScriptDialog'" in NET
     assert "'Page.javascriptDialogOpening'" in NET
+    assert "session_id=str(channel.get('session_id') or '')" in NET
 
 
 def test_tk_owns_alert_confirm_prompt_and_beforeunload_controls():
@@ -75,3 +78,44 @@ def test_browser_init_uses_centered_geometry_except_tab_tearoff():
     assert 'requested_position = getattr(self, "_requested_window_position", None)' in source
     assert "if requested_position:" in source
     assert "self.root.geometry(_centered_startup_geometry(" in source
+
+
+def test_browser_target_session_filters_and_queues_matching_dialog_events():
+    channel = {
+        "target_id": "tab-target",
+        "session_id": "session-1",
+        "events": [],
+    }
+    ignored = net._record_javascript_dialog_browser_event(
+        channel,
+        {
+            "sessionId": "other-session",
+            "method": "Page.javascriptDialogOpening",
+            "params": {
+                "type": "confirm",
+                "message": "wrong target",
+                "url": "https://wrong.example/",
+            },
+        },
+    )
+    assert ignored is None
+    assert channel["events"] == []
+
+    event = net._record_javascript_dialog_browser_event(
+        channel,
+        {
+            "sessionId": "session-1",
+            "method": "Page.javascriptDialogOpening",
+            "params": {
+                "type": "confirm",
+                "message": "Restart Kea DHCPv4?",
+                "url": "http://192.168.25.254:8083/",
+                "hasBrowserHandler": True,
+            },
+        },
+    )
+    assert event["target_id"] == "tab-target"
+    assert event["type"] == "confirm"
+    assert event["message"] == "Restart Kea DHCPv4?"
+    assert channel["events"] == [event]
+    assert channel["dialog_open"] is True
