@@ -39,18 +39,34 @@ jobs:
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "Release version: $version"
 
+      - name: Check whether release already exists
+        id: release_check
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$tag is already published; nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python
+        if: steps.release_check.outputs.exists != 'true'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
           cache: pip
 
       - name: Set up Node
+        if: steps.release_check.outputs.exists != 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
       - name: Install Linux runtime libraries
+        if: steps.release_check.outputs.exists != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -59,10 +75,12 @@ jobs:
             python3-tk xvfb libgl1 libx11-6 libxext6 libxrender1 libxss1 libxtst6
 
       - name: Verify synchronized version metadata
+        if: steps.release_check.outputs.exists != 'true'
         shell: bash
         run: python tools/sync_version.py "${{ steps.version.outputs.version }}" --check
 
       - name: Install test dependencies
+        if: steps.release_check.outputs.exists != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -71,22 +89,27 @@ jobs:
           python -m pip install --only-binary=:all: -r requirements-dev.txt
 
       - name: Run regression suite
+        if: steps.release_check.outputs.exists != 'true'
         shell: bash
         run: python -m pytest -q tests/current
 
       - name: Test Chromium extension scripts
+        if: steps.release_check.outputs.exists != 'true'
         shell: bash
         run: node tests/current/test_extension_features.cjs
 
       - name: Run environment doctor
+        if: steps.release_check.outputs.exists != 'true'
         shell: bash
         run: python tools/doctor.py
 
       - name: Build Linux x86_64 executable
+        if: steps.release_check.outputs.exists != 'true'
         shell: bash
         run: bash build_linux.sh
 
       - name: Package Linux release assets
+        if: steps.release_check.outputs.exists != 'true'
         id: assets
         shell: bash
         run: |
@@ -102,6 +125,7 @@ jobs:
           echo "tar=$tar_name" >> "$GITHUB_OUTPUT"
 
       - name: Wait for matching Windows release
+        if: steps.release_check.outputs.exists != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -124,6 +148,7 @@ jobs:
           exit 1
 
       - name: Upload Linux assets to GitHub release
+        if: steps.release_check.outputs.exists != 'true'
         shell: bash
         run: |
           set -euo pipefail

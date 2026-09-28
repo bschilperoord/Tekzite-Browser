@@ -1,3 +1,13 @@
+# v10.5.105 - Native Tekzite permission prompts
+
+- Moves common website permission decisions into Tekzite's Tk interface instead of relying on Chromium permission bubbles that can be hidden behind the DWM-hosted browser surface.
+- Adds Allow once, Always allow, Block once and Always block choices for camera, microphone, location, notifications, clipboard, motion/sensors, MIDI and MIDI SysEx requests.
+- Keeps one-time grants temporary while persisting explicit per-site allow/block decisions through Tekzite's existing site-permission settings.
+- Defaults previously unspecified site permissions to Ask so websites can trigger the Tekzite-owned prompt instead of being silently blocked.
+- Installs the permission bridge only for real HTTP(S) navigation, keeping the neutral about:blank startup path free of extra permission CDP work.
+- Preserves the existing low-latency input-lane contract and adds dedicated regression coverage for the permission bridge and Tk prompt behavior.
+- Makes the Linux release publisher skip cleanly when the current version is already published, matching the Windows release workflow behavior.
+
 # v10.5.104 - Compact browser GUI
 
 - Tightens the default browser shell from spacious to comfortable density while preserving user-customized layouts.
