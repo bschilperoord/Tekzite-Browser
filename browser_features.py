@@ -241,6 +241,10 @@ class BrowserFeatures:
         self._history_dirty = False
         self._session_encoded = None
         self._checkpoint_job = None
+        # v10.5.103: avoid serializing browser state every two seconds forever.
+        # Writes stay prompt after real changes, then the checkpoint sleeps.
+        self._checkpoint_dirty_ms = 4000
+        self._checkpoint_idle_ms = 12000
         self._network_health_after_id = None
         self._network_health_future = None
         self._network_health_failures = 0
@@ -269,7 +273,7 @@ class BrowserFeatures:
         action()
         self._apply_quiet_mode()
         if not getattr(self, '_private_mode', False):
-            self._checkpoint_job = self.root.after(2000, self._checkpoint_features)
+            self._checkpoint_job = self.root.after(3500, self._checkpoint_features)
         self._schedule_network_health_watch(3000)
         scheduler = getattr(self, '_schedule_sleeping_tabs', None)
         if callable(scheduler):
@@ -328,6 +332,8 @@ class BrowserFeatures:
     def _checkpoint_features(self):
         if self._closing or getattr(self, '_private_mode', False):
             return
+
+        wrote_state = False
         try:
             if self.preferences.get('restore_tabs', True):
                 snapshot = session_snapshot(self.tabs, self.active_tab_id)
@@ -336,14 +342,24 @@ class BrowserFeatures:
                 if encoded != self._session_encoded:
                     write_json(self._state_directory / 'session.json', snapshot)
                     self._session_encoded = encoded
+                    wrote_state = True
             else:
-                (self._state_directory / 'session.json').unlink(missing_ok=True)
+                session_path = self._state_directory / 'session.json'
+                if session_path.exists():
+                    session_path.unlink(missing_ok=True)
+                    wrote_state = True
             if self._history_dirty:
                 write_json(self._state_directory / 'history.json', self.visits)
                 self._history_dirty = False
+                wrote_state = True
         except OSError as exc:
             self.status_var.set(f'Could not save browser state: {exc}')
-        self._checkpoint_job = self.root.after(2000, self._checkpoint_features)
+            wrote_state = True
+
+        self._checkpoint_job = self.root.after(
+            self._checkpoint_dirty_ms if wrote_state else self._checkpoint_idle_ms,
+            self._checkpoint_features,
+        )
 
     def _record_page_visit(self, tab):
         if getattr(self, '_private_mode', False):

@@ -2189,7 +2189,11 @@ class BrowserApp(BrowserFeatures):
         self.bookmarks = load_bookmarks(self._state_directory / "bookmarks.json")
         self._init_features()
         self._zoom_watchdog_after_id = None
-        self._zoom_watchdog_interval_ms = 5000
+        # v10.5.103: the local Chromium extension handles zoom changes in real
+        # time. The Tk verifier therefore sleeps longer while everything is
+        # healthy and temporarily tightens only after an error/correction.
+        self._zoom_watchdog_idle_ms = 15000
+        self._zoom_watchdog_recovery_ms = 2500
         self._zoom_watchdog_checks = 0
         self._zoom_watchdog_corrections = 0
         self._zoom_watchdog_last_status = None
@@ -2254,7 +2258,11 @@ class BrowserApp(BrowserFeatures):
         # load indicators and favicons fresh without reloading anything.
         self._closed_tabs = []
         self._page_state_after_id = None
-        self._page_state_poll_ms = 850
+        # v10.5.103: page metadata polling is adaptive. Keep load/navigation UI
+        # snappy, then back off sharply once the active page is settled.
+        self._page_state_active_poll_ms = 550
+        self._page_state_idle_poll_ms = 1800
+        self._page_state_empty_poll_ms = 3000
         self._page_state_inflight = set()
         self._favicon_images = {}
         self._sleeping_tabs_after_id = None
@@ -5184,15 +5192,39 @@ class BrowserApp(BrowserFeatures):
         self._page_state_after_id = None
         if getattr(self, "_window_drag_active", False):
             try:
-                self._page_state_after_id = self.root.after(250, self._page_state_tick)
+                self._page_state_after_id = self.root.after(320, self._page_state_tick)
             except Exception:
                 self._page_state_after_id = None
             return
+
         live = [t for t in self.tabs if t.get("chromium_target_id")]
         active = self._active_tab()
+        now = time.monotonic()
+        active_busy = bool(
+            active
+            and (
+                active.get("loading")
+                or str(active.get("ready_state") or "") not in ("interactive", "complete")
+                or now < float(getattr(self, "_chromium_interaction_until", 0.0) or 0.0)
+            )
+        )
+        if not live:
+            next_delay = self._page_state_empty_poll_ms
+        elif active_busy:
+            next_delay = self._page_state_active_poll_ms
+        else:
+            next_delay = self._page_state_idle_poll_ms
+
+        # Active tab gets every poll. Background tabs are intentionally sampled
+        # much less often while the foreground page is settled.
+        background_divisor = 3 if active_busy else 6
+        cadence = int(now * 2.0)
         for tab in live:
-            # Active tab gets every poll; background tabs are sampled less often.
-            if tab is not active and (self._navigation_generation + tab.get("id", 0) + int(time.monotonic())) % 3:
+            if (
+                tab is not active
+                and (self._navigation_generation + tab.get("id", 0) + cadence)
+                % background_divisor
+            ):
                 continue
             need_icon = (
                 not tab.get("favicon_photo")
@@ -5200,16 +5232,24 @@ class BrowserApp(BrowserFeatures):
                 or tab.get("favicon_photo_url") != tab.get("favicon_url")
                 or self._canonical_tab_url(tab.get("favicon_page_url")) != self._canonical_tab_url(tab.get("url"))
             )
-            self._poll_one_tab_state(tab.get("id"), tab.get("chromium_target_id"), include_favicon=need_icon)
-        self._schedule_page_state_poll()
+            self._poll_one_tab_state(
+                tab.get("id"),
+                tab.get("chromium_target_id"),
+                include_favicon=need_icon,
+            )
+        self._schedule_page_state_poll(delay_ms=next_delay)
 
-    def _schedule_page_state_poll(self, initial=False):
+    def _schedule_page_state_poll(self, initial=False, delay_ms=None):
         try:
             if self._page_state_after_id is not None:
                 self.root.after_cancel(self._page_state_after_id)
         except Exception:
             pass
-        self._page_state_after_id = self.root.after(1100 if initial else self._page_state_poll_ms, self._page_state_tick)
+        if delay_ms is None:
+            delay_ms = 1100 if initial else self._page_state_idle_poll_ms
+        self._page_state_after_id = self.root.after(
+            max(100, int(delay_ms)), self._page_state_tick
+        )
 
     def _restore_closed_tab(self):
         if not self._closed_tabs:
@@ -8123,7 +8163,7 @@ class BrowserApp(BrowserFeatures):
         if not (os.name == "nt" and self._embedded_mode and self._chromium_dwm_mode
                 and self._dwm_surface_ready and self._dwm_host_visible and self._dwm_host):
             return
-        next_delay = 24
+        next_delay = 48
         try:
             import ctypes
             from ctypes import wintypes
@@ -8152,25 +8192,31 @@ class BrowserApp(BrowserFeatures):
             rx, ry, rw, rh = map(int, rect)
             rw, rh = max(1, rw), max(1, rh)
             inside_geometry = (rx <= sx < rx + rw and ry <= sy < ry + rh)
-            physical_left_down = bool(user32.GetAsyncKeyState(0x01) & 0x8000)
 
-            # v10.5.87: the fallback watches the *global* physical mouse, so a
-            # coordinate inside Tekzite's rectangle is not proof that Tekzite is
-            # actually on top. WindowFromPoint closes the click-through hole:
-            # other applications, Tekzite popups and dialogs all block a fresh
-            # synthetic page press when they are the real native hit target.
-            hit_hwnd = int(user32.WindowFromPoint(pt) or 0)
-            try:
-                edge_hwnd = int(self.edge_host.winfo_id())
-            except Exception:
-                edge_hwnd = 0
-            page_hit = _native_pointer_hit_is_page_surface(
-                hit_hwnd, edge_hwnd, self._dwm_host,
-                is_child=lambda parent, child: user32.IsChild(
-                    wintypes.HWND(parent), wintypes.HWND(child)
-                ),
-            )
-            inside = bool(inside_geometry and page_hit)
+            # v10.5.103: when the pointer is nowhere near the page and no page
+            # drag is active, GetCursorPos is all the watchdog needs. Skip
+            # GetAsyncKeyState, WindowFromPoint and IsChild entirely.
+            tracking_existing = bool(self._chromium_left_button_down)
+            physical_left_down = False
+            inside = False
+            if inside_geometry or tracking_existing:
+                physical_left_down = bool(
+                    user32.GetAsyncKeyState(0x01) & 0x8000
+                )
+                if inside_geometry:
+                    # v10.5.87: geometry alone is not proof Tekzite is on top.
+                    hit_hwnd = int(user32.WindowFromPoint(pt) or 0)
+                    try:
+                        edge_hwnd = int(self.edge_host.winfo_id())
+                    except Exception:
+                        edge_hwnd = 0
+                    page_hit = _native_pointer_hit_is_page_surface(
+                        hit_hwnd, edge_hwnd, self._dwm_host,
+                        is_child=lambda parent, child: user32.IsChild(
+                            wintypes.HWND(parent), wintypes.HWND(child)
+                        ),
+                    )
+                    inside = bool(page_hit)
 
             # Continue tracking a drag that genuinely started on the page even
             # if the pointer later leaves/gets covered, so Chromium still gets
@@ -11297,44 +11343,58 @@ class BrowserApp(BrowserFeatures):
                 pass
 
     def _zoom_watchdog_tick(self):
-        """Backup verifier for Chromium-native zoom.
-
-        v7.0 delegates the real monitoring to Tekzite's local Chromium extension,
-        which receives chrome.tabs.onZoomChange events and restores the saved
-        browser zoom immediately. This Tk watchdog is a low-frequency safety net.
-        """
+        """Backup verifier for Chromium-native zoom with adaptive idle cadence."""
         self._zoom_watchdog_after_id = None
         if getattr(self, "_window_drag_active", False):
             try:
-                self._zoom_watchdog_after_id = self.root.after(300, self._zoom_watchdog_tick)
+                self._zoom_watchdog_after_id = self.root.after(
+                    500, self._zoom_watchdog_tick
+                )
             except Exception:
                 self._zoom_watchdog_after_id = None
             return
+
         wanted = self._page_zoom_percent()
         statuses = []
+        unstable = False
         for target_id in self._live_chromium_target_ids():
             try:
                 status = check_embedded_chromium_zoom(wanted, target_id) or {}
             except Exception as exc:
-                status = {"target_id": target_id, "error": f"{type(exc).__name__}: {exc}"}
+                status = {
+                    "target_id": target_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                unstable = True
             statuses.append(status)
             self._zoom_watchdog_checks += 1
             if status.get("ready") and not status.get("matches"):
+                unstable = True
                 if self._apply_chromium_zoom(target_id):
                     self._zoom_watchdog_corrections += 1
                     status["corrected"] = True
-        self._zoom_watchdog_last_status = statuses
-        self._schedule_zoom_watchdog()
 
-    def _schedule_zoom_watchdog(self, initial=False):
+        self._zoom_watchdog_last_status = statuses
+        self._schedule_zoom_watchdog(
+            delay_ms=(
+                self._zoom_watchdog_recovery_ms
+                if unstable
+                else self._zoom_watchdog_idle_ms
+            )
+        )
+
+    def _schedule_zoom_watchdog(self, initial=False, delay_ms=None):
         try:
             if self._zoom_watchdog_after_id is not None:
                 self.root.after_cancel(self._zoom_watchdog_after_id)
         except Exception:
             pass
-        delay = 900 if initial else int(self._zoom_watchdog_interval_ms)
+        if delay_ms is None:
+            delay_ms = 900 if initial else self._zoom_watchdog_idle_ms
         try:
-            self._zoom_watchdog_after_id = self.root.after(delay, self._zoom_watchdog_tick)
+            self._zoom_watchdog_after_id = self.root.after(
+                max(250, int(delay_ms)), self._zoom_watchdog_tick
+            )
         except Exception:
             self._zoom_watchdog_after_id = None
 
@@ -13405,7 +13465,7 @@ class BrowserApp(BrowserFeatures):
                 f"target_id: {tab.get('chromium_target_id')}",
                 f"presentation: {tab.get('presentation')}",
                 f"zoom_percent: {self._page_zoom_percent()}",
-                f"zoom_watchdog_interval_ms: {getattr(self, '_zoom_watchdog_interval_ms', None)}",
+                f"zoom_watchdog_idle_ms: {getattr(self, '_zoom_watchdog_idle_ms', None)}",
                 f"zoom_watchdog_checks: {getattr(self, '_zoom_watchdog_checks', 0)}",
                 f"zoom_watchdog_corrections: {getattr(self, '_zoom_watchdog_corrections', 0)}",
                 f"zoom_watchdog_last_status: {getattr(self, '_zoom_watchdog_last_status', None)}",
