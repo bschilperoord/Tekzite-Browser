@@ -2359,6 +2359,12 @@ class BrowserApp(BrowserFeatures):
         # v6.0: Chromium is the only web engine.  Tekzite owns browser UI,
         # while all page parsing/layout/JS/media/storage live in Chromium.
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tekzite-chromium")
+        # JavaScript dialogs can synchronously block renderer/page CDP work. Their
+        # observer and response must never queue behind that blocked work or the
+        # only task capable of dismissing the modal can deadlock in the general pool.
+        self._javascript_dialog_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="tekzite-cdp-dialog"
+        )
         # v10.5.98: HTML inspection uses one serialized background worker. Large
         # DOM syntax/search jobs therefore cannot fan out across the general
         # Chromium pool and create CPU bursts that compete with Tk/DWM input.
@@ -14973,6 +14979,10 @@ class BrowserApp(BrowserFeatures):
                 pass
             try:
                 self._html_inspector_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            try:
+                self._javascript_dialog_executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass
             self._executor.shutdown(wait=False, cancel_futures=True)
