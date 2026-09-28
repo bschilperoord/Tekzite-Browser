@@ -366,26 +366,26 @@ jobs:
           Path("tests/current/test_v105104_customize_rows.py").write_text(
               '''import inspect
 
-import main
+          import main
 
 
-CUSTOMIZE_SOURCE = inspect.getsource(main.BrowserApp._show_customize_browser)
+          CUSTOMIZE_SOURCE = inspect.getsource(main.BrowserApp._show_customize_browser)
 
 
-def test_customize_explanatory_text_is_inline_not_stacked_under_labels():
-    assert "visible_header = tk.Frame" in CUSTOMIZE_SOURCE
-    assert 'label(visible_header, "Ctrl+L reveals a hidden address bar.", muted=True).pack(side="right")' in CUSTOMIZE_SOURCE
-    assert "homepage_row = tk.Frame" in CUSTOMIZE_SOURCE
-    assert "search_template_row = tk.Frame" in CUSTOMIZE_SOURCE
-    assert '"Use {query} • local SearXNG supported"' in CUSTOMIZE_SOURCE
-    assert "recovery_row = tk.Frame" in CUSTOMIZE_SOURCE
+          def test_customize_explanatory_text_is_inline_not_stacked_under_labels():
+              assert "visible_header = tk.Frame" in CUSTOMIZE_SOURCE
+              assert 'label(visible_header, "Ctrl+L reveals a hidden address bar.", muted=True).pack(side="right")' in CUSTOMIZE_SOURCE
+              assert "homepage_row = tk.Frame" in CUSTOMIZE_SOURCE
+              assert "search_template_row = tk.Frame" in CUSTOMIZE_SOURCE
+              assert '"Use {query} • local SearXNG supported"' in CUSTOMIZE_SOURCE
+              assert "recovery_row = tk.Frame" in CUSTOMIZE_SOURCE
 
 
-def test_customize_old_stacked_helper_copy_is_gone():
-    assert "Tip: hiding the address bar is safe." not in CUSTOMIZE_SOURCE
-    assert "Choose a provider above, or use Custom with {query}." not in CUSTOMIZE_SOURCE
-    assert 'label(advanced_page, "Ctrl+Shift+Alt+R resets the interface only."' not in CUSTOMIZE_SOURCE
-''',
+          def test_customize_old_stacked_helper_copy_is_gone():
+              assert "Tip: hiding the address bar is safe." not in CUSTOMIZE_SOURCE
+              assert "Choose a provider above, or use Custom with {query}." not in CUSTOMIZE_SOURCE
+              assert 'label(advanced_page, "Ctrl+Shift+Alt+R resets the interface only."' not in CUSTOMIZE_SOURCE
+          '''.replace("\n          ", "\n").lstrip(),
               encoding="utf-8",
           )
 
