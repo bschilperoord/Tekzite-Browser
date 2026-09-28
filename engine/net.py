@@ -1078,7 +1078,7 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
     network_state = _NETWORK_ENGINE or {}
     chromium_state = _CHROMIUM_SESSION or {}
     network_proc = network_state.get("process") if isinstance(network_state, dict) else None
-    chromium_proc = chromium_state.get("process") if isinstance(edge_state, dict) else None
+    chromium_proc = chromium_state.get("process") if isinstance(chromium_state, dict) else None
     try:
         network_pid = int(getattr(network_proc, "pid", 0) or 0)
     except Exception:
@@ -1088,7 +1088,7 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
     except Exception:
         chromium_pid = 0
     proxy_port = int(network_state.get("port") or 0) if isinstance(network_state, dict) else 0
-    devtools_port = int(chromium_state.get("port") or 0) if isinstance(edge_state, dict) else 0
+    devtools_port = int(chromium_state.get("port") or 0) if isinstance(chromium_state, dict) else 0
 
     # PyInstaller one-file executables may keep the launcher PID while the real
     # helper payload runs in a child process. Treat the full helper/browser
