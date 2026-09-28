@@ -4612,7 +4612,7 @@ def _get_persistent_page_cdp_channel(session, target_id=None, timeout=5.0, purpo
     # two CDP round trips before the first click could be proven. Keep network
     # configuration on general/control channels and make input/scroll/hover/
     # cursor sockets immediately usable after the websocket handshake.
-    latency_only_purposes = {"input", "scroll", "hover", "cursor"}
+    latency_only_purposes = {"input", "scroll", "hover", "cursor", "permission"}
     if purpose in latency_only_purposes:
         channel["privacy_headers"] = False
         channel["network_setup_skipped_for_latency"] = True
@@ -6512,6 +6512,11 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
                 _browser_cdp_call(
                     session, "Target.activateTarget", {"targetId": target_id}, message_id=102
                 )
+                try:
+                    install_embedded_chromium_permission_bridge(target_id, timeout=1.5)
+                    session["permission_bridge_bootstrap_installed"] = True
+                except Exception as exc:
+                    session["permission_bridge_install_error"] = type(exc).__name__
                 requested_url = str(url or "about:blank")
                 requested_lower = requested_url.strip().lower()
                 neutral_equivalent = requested_lower in neutral_urls and actual_lower in neutral_urls
@@ -6554,6 +6559,11 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
         )
         session["native_app_target_reused"] = False
     session["target_id"] = target_id
+    try:
+        install_embedded_chromium_permission_bridge(target_id, timeout=1.5)
+        session["permission_bridge_target_installed"] = target_id
+    except Exception as exc:
+        session["permission_bridge_install_error"] = type(exc).__name__
     # v9.4: 100% is Chromium's native zoom. Calling the extension for the
     # default value on every newly claimed target adds synchronous CDP/extension
     # work before first paint for no visual benefit. Non-default preferences are
@@ -11684,6 +11694,402 @@ def clear_network_cache():
     fetch_bytes.cache_clear()
     fetch_document.cache_clear()
     fetch_url.cache_clear()
+
+
+
+_PERMISSION_BRIDGE_SOURCE = r'''(() => {
+  if (window.__tekzitePermissionBridge && window.__tekzitePermissionBridge.version >= 1) {
+    return true;
+  }
+
+  const state = {
+    nextId: 1,
+    nextWatchId: -1,
+    queue: [],
+    pending: new Map(),
+    pendingKinds: new Map(),
+    geoWatches: new Map()
+  };
+
+  const safeOrigin = () => {
+    try { return String(location.origin || ""); } catch (_) { return ""; }
+  };
+
+  const deniedError = () => {
+    try { return new DOMException("Permission denied by Tekzite", "NotAllowedError"); }
+    catch (_) {
+      const error = new Error("Permission denied by Tekzite");
+      error.name = "NotAllowedError";
+      return error;
+    }
+  };
+
+  const geoDenied = () => Object.freeze({
+    PERMISSION_DENIED: 1,
+    POSITION_UNAVAILABLE: 2,
+    TIMEOUT: 3,
+    code: 1,
+    message: "Permission denied by Tekzite"
+  });
+
+  const replaceMethod = (owner, name, fn) => {
+    if (!owner || typeof owner[name] !== "function") return false;
+    try {
+      Object.defineProperty(owner, name, {
+        value: fn,
+        configurable: true,
+        writable: true
+      });
+      return true;
+    } catch (_) {
+      try { owner[name] = fn; return owner[name] === fn; } catch (_) { return false; }
+    }
+  };
+
+  const request = (kind, permissions) => {
+    kind = String(kind || "");
+    permissions = Array.from(new Set((permissions || []).map(String))).slice(0, 4);
+    if (!kind || !permissions.length) return Promise.resolve(false);
+
+    const existingId = state.pendingKinds.get(kind);
+    if (existingId && state.pending.has(existingId)) {
+      return state.pending.get(existingId).promise;
+    }
+
+    const id = state.nextId++;
+    let resolveFn;
+    const promise = new Promise((resolve) => { resolveFn = resolve; });
+    state.pending.set(id, {promise, resolve: resolveFn, kind});
+    state.pendingKinds.set(kind, id);
+    state.queue.push({
+      id,
+      kind,
+      permissions,
+      origin: safeOrigin()
+    });
+
+    while (state.queue.length > 16) {
+      const stale = state.queue.shift();
+      const pending = stale && state.pending.get(stale.id);
+      if (pending) {
+        state.pending.delete(stale.id);
+        state.pendingKinds.delete(pending.kind);
+        try { pending.resolve(false); } catch (_) {}
+      }
+    }
+    return promise;
+  };
+
+  const resolveRequest = (id, allowed) => {
+    id = Number(id);
+    const pending = state.pending.get(id);
+    if (!pending) return false;
+    state.pending.delete(id);
+    state.pendingKinds.delete(pending.kind);
+    try { pending.resolve(Boolean(allowed)); } catch (_) {}
+    return true;
+  };
+
+  const bridge = Object.freeze({
+    version: 1,
+    take(maxItems) {
+      const n = Math.max(1, Math.min(4, Number(maxItems) || 1));
+      return state.queue.splice(0, n);
+    },
+    resolve(id, allowed) {
+      return resolveRequest(id, allowed);
+    },
+    pendingCount() {
+      return state.pending.size;
+    }
+  });
+
+  try {
+    Object.defineProperty(window, "__tekzitePermissionBridge", {
+      value: bridge,
+      configurable: false,
+      enumerable: false,
+      writable: false
+    });
+  } catch (_) {
+    window.__tekzitePermissionBridge = bridge;
+  }
+
+  try {
+    if (window.Notification && typeof window.Notification.requestPermission === "function") {
+      const nativeRequestPermission = window.Notification.requestPermission.bind(window.Notification);
+      replaceMethod(window.Notification, "requestPermission", function(callback) {
+        const result = request("notifications", ["notifications"]).then((allowed) => {
+          if (!allowed) return "denied";
+          return nativeRequestPermission();
+        });
+        if (typeof callback === "function") {
+          result.then((value) => { try { callback(value); } catch (_) {} });
+        }
+        return result;
+      });
+    }
+  } catch (_) {}
+
+  try {
+    const media = navigator.mediaDevices;
+    if (media && typeof media.getUserMedia === "function") {
+      const nativeGetUserMedia = media.getUserMedia.bind(media);
+      replaceMethod(media, "getUserMedia", function(constraints) {
+        const permissions = [];
+        try {
+          if (constraints && constraints.audio) permissions.push("microphone");
+          if (constraints && constraints.video) permissions.push("camera");
+        } catch (_) {}
+        if (!permissions.length) return nativeGetUserMedia(constraints);
+        const kind = permissions.slice().sort().join("+");
+        return request(kind, permissions).then((allowed) => {
+          if (!allowed) throw deniedError();
+          return nativeGetUserMedia(constraints);
+        });
+      });
+    }
+  } catch (_) {}
+
+  try {
+    const geo = navigator.geolocation;
+    if (geo) {
+      const nativeGet = typeof geo.getCurrentPosition === "function" ? geo.getCurrentPosition.bind(geo) : null;
+      const nativeWatch = typeof geo.watchPosition === "function" ? geo.watchPosition.bind(geo) : null;
+      const nativeClear = typeof geo.clearWatch === "function" ? geo.clearWatch.bind(geo) : null;
+
+      if (nativeGet) {
+        replaceMethod(geo, "getCurrentPosition", function(success, error, options) {
+          request("location", ["location"]).then((allowed) => {
+            if (allowed) nativeGet(success, error, options);
+            else if (typeof error === "function") {
+              try { error(geoDenied()); } catch (_) {}
+            }
+          });
+        });
+      }
+
+      if (nativeWatch && nativeClear) {
+        replaceMethod(geo, "watchPosition", function(success, error, options) {
+          const localId = state.nextWatchId--;
+          state.geoWatches.set(localId, {nativeId: null, cancelled: false});
+          request("location", ["location"]).then((allowed) => {
+            const row = state.geoWatches.get(localId);
+            if (!row || row.cancelled) return;
+            if (!allowed) {
+              if (typeof error === "function") {
+                try { error(geoDenied()); } catch (_) {}
+              }
+              state.geoWatches.delete(localId);
+              return;
+            }
+            try { row.nativeId = nativeWatch(success, error, options); }
+            catch (_) { state.geoWatches.delete(localId); }
+          });
+          return localId;
+        });
+
+        replaceMethod(geo, "clearWatch", function(id) {
+          const row = state.geoWatches.get(id);
+          if (row) {
+            row.cancelled = true;
+            if (row.nativeId !== null) {
+              try { nativeClear(row.nativeId); } catch (_) {}
+            }
+            state.geoWatches.delete(id);
+            return;
+          }
+          return nativeClear(id);
+        });
+      }
+    }
+  } catch (_) {}
+
+  try {
+    const clip = navigator.clipboard;
+    if (clip) {
+      for (const name of ["read", "readText", "write", "writeText"]) {
+        if (typeof clip[name] !== "function") continue;
+        const nativeMethod = clip[name].bind(clip);
+        replaceMethod(clip, name, function() {
+          const args = arguments;
+          return request("clipboard", ["clipboard"]).then((allowed) => {
+            if (!allowed) throw deniedError();
+            return nativeMethod.apply(null, args);
+          });
+        });
+      }
+    }
+  } catch (_) {}
+
+  try {
+    if (typeof navigator.requestMIDIAccess === "function") {
+      const nativeMidi = navigator.requestMIDIAccess.bind(navigator);
+      replaceMethod(navigator, "requestMIDIAccess", function(options) {
+        const permissions = ["midi"];
+        try { if (options && options.sysex) permissions.push("midiSysex"); } catch (_) {}
+        return request(permissions.join("+"), permissions).then((allowed) => {
+          if (!allowed) throw deniedError();
+          return nativeMidi(options);
+        });
+      });
+    }
+  } catch (_) {}
+
+  try {
+    for (const ctorName of ["DeviceMotionEvent", "DeviceOrientationEvent"]) {
+      const ctor = window[ctorName];
+      if (!ctor || typeof ctor.requestPermission !== "function") continue;
+      const nativeSensorPermission = ctor.requestPermission.bind(ctor);
+      replaceMethod(ctor, "requestPermission", function() {
+        return request("sensors", ["sensors"]).then((allowed) => {
+          if (!allowed) return "denied";
+          return nativeSensorPermission();
+        });
+      });
+    }
+  } catch (_) {}
+
+  return true;
+})()'''
+
+
+def install_embedded_chromium_permission_bridge(target_id: str, *, timeout: float = 2.0):
+    """Install Tekzite's page-side permission bridge on one Chromium target.
+
+    The bridge intercepts permission-sensitive Web APIs before Chromium can
+    surface an off-screen browser bubble. Requests stay pending until the Tk
+    shell explicitly resolves them.
+    """
+    target_id = str(target_id or '').strip()
+    if not target_id:
+        return False
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(float(timeout), 8.0))
+    installed = session.setdefault('permission_bridge_targets', {})
+    if target_id in installed:
+        return True
+
+    script_id = None
+    add_error = None
+    try:
+        result = _persistent_page_cdp_call(
+            session,
+            'Page.addScriptToEvaluateOnNewDocument',
+            {'source': _PERMISSION_BRIDGE_SOURCE},
+            target_id=target_id,
+            timeout=timeout,
+            purpose='permission',
+        )
+        script_id = str((result or {}).get('identifier') or '')
+    except Exception as exc:
+        add_error = exc
+
+    current_ok = False
+    try:
+        result = _persistent_page_cdp_call(
+            session,
+            'Runtime.evaluate',
+            {'expression': _PERMISSION_BRIDGE_SOURCE, 'returnByValue': True},
+            target_id=target_id,
+            timeout=timeout,
+            purpose='permission',
+            internal_source='permission-bridge/install',
+        )
+        current_ok = bool(((result or {}).get('result') or {}).get('value'))
+    except Exception:
+        current_ok = False
+
+    if script_id:
+        installed[target_id] = script_id
+    elif add_error is not None and not current_ok:
+        raise add_error
+    return bool(script_id or current_ok)
+
+
+def poll_embedded_chromium_permission_requests(target_id: str, *, timeout: float = 1.0):
+    """Take at most one pending page permission request for the Tk shell."""
+    target_id = str(target_id or '').strip()
+    if not target_id:
+        return []
+    session = _CHROMIUM_SESSION
+    if not session:
+        return []
+    expression = r'''(() => {
+      const bridge = window.__tekzitePermissionBridge;
+      if (!bridge || typeof bridge.take !== "function") return [];
+      return bridge.take(1);
+    })()'''
+    result = _persistent_page_cdp_call(
+        session,
+        'Runtime.evaluate',
+        {'expression': expression, 'returnByValue': True},
+        target_id=target_id,
+        timeout=timeout,
+        purpose='permission',
+        internal_source='permission-bridge/poll',
+    )
+    rows = ((result or {}).get('result') or {}).get('value')
+    if not isinstance(rows, list):
+        return []
+
+    allowed_permissions = {
+        'notifications', 'location', 'microphone', 'camera', 'clipboard',
+        'sensors', 'midi', 'midiSysex',
+    }
+    clean = []
+    for row in rows[:1]:
+        if not isinstance(row, dict):
+            continue
+        try:
+            request_id = int(row.get('id'))
+        except Exception:
+            continue
+        origin = str(row.get('origin') or '')[:MAX_ORIGIN_CHARS]
+        if not origin.startswith(('http://', 'https://')):
+            continue
+        permissions = []
+        for item in row.get('permissions') or []:
+            item = str(item)
+            if item in allowed_permissions and item not in permissions:
+                permissions.append(item)
+        if not permissions:
+            continue
+        clean.append({
+            'id': request_id,
+            'kind': str(row.get('kind') or '')[:96],
+            'origin': origin,
+            'permissions': permissions[:4],
+            'target_id': target_id,
+        })
+    return clean
+
+
+def resolve_embedded_chromium_permission_request(
+        target_id: str, request_id: int, allowed: bool, *, timeout: float = 1.0):
+    """Resolve one request previously returned by the page permission bridge."""
+    target_id = str(target_id or '').strip()
+    if not target_id:
+        return False
+    request_id = int(request_id)
+    session = _CHROMIUM_SESSION
+    if not session:
+        return False
+    expression = (
+        '(() => { const bridge = window.__tekzitePermissionBridge; '
+        'return !!(bridge && typeof bridge.resolve === "function" && '
+        f'bridge.resolve({request_id}, {"true" if allowed else "false"})); }})()'
+    )
+    result = _persistent_page_cdp_call(
+        session,
+        'Runtime.evaluate',
+        {'expression': expression, 'returnByValue': True},
+        target_id=target_id,
+        timeout=timeout,
+        purpose='permission',
+        internal_source='permission-bridge/resolve',
+    )
+    return bool(((result or {}).get('result') or {}).get('value'))
+
 
 
 def set_embedded_chromium_permission(origin: str, permission: str, setting: str, *, timeout: int = 4):
