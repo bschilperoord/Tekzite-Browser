@@ -12139,14 +12139,21 @@ def ensure_embedded_chromium_javascript_dialog_monitor(
     session = _CHROMIUM_SESSION or _start_persistent_chromium_session(
         timeout=min(max(float(timeout), 0.1), 8.0)
     )
-    monitors = session.setdefault('javascript_dialog_monitor_targets', set())
-    if target_id in monitors:
+    channel = _get_persistent_page_cdp_channel(
+        session, target_id=target_id, timeout=max(0.1, float(timeout)),
+        purpose='dialog',
+    )
+    if 'Page' in channel.get('enabled_domains', set()):
         return True
     _persistent_page_cdp_call(
         session, 'Page.enable', {}, target_id=target_id,
         timeout=max(0.1, float(timeout)), purpose='dialog',
     )
-    monitors.add(target_id)
+    channel = _get_persistent_page_cdp_channel(
+        session, target_id=target_id, timeout=max(0.1, float(timeout)),
+        purpose='dialog',
+    )
+    channel.setdefault('enabled_domains', set()).add('Page')
     return True
 
 
@@ -12182,6 +12189,9 @@ def poll_embedded_chromium_javascript_dialogs(
             except socket.timeout:
                 break
             except Exception:
+                tid = str(channel.get('target_id') or target_id)
+                _close_page_cdp_channel(channel)
+                (session.get('page_cdp_channels') or {}).pop(f'{tid}:dialog', None)
                 break
             try:
                 payload = json.loads(raw)
