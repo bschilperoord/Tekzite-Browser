@@ -1,4 +1,5 @@
 import inspect
+import json
 from pathlib import Path
 
 import main
@@ -119,3 +120,55 @@ def test_browser_target_session_filters_and_queues_matching_dialog_events():
     assert event["message"] == "Restart Kea DHCPv4?"
     assert channel["events"] == [event]
     assert channel["dialog_open"] is True
+
+
+class _DialogProtocolWs:
+    def __init__(self):
+        self.sent = []
+        self.responses = [
+            json.dumps({
+                "sessionId": "session-1",
+                "method": "Page.javascriptDialogOpening",
+                "params": {
+                    "type": "confirm",
+                    "message": "Restart service?",
+                    "url": "http://router.test/",
+                    "hasBrowserHandler": True,
+                },
+            }),
+            json.dumps({"id": 5000, "result": {}}),
+        ]
+
+    def settimeout(self, _timeout):
+        pass
+
+    def send(self, payload):
+        self.sent.append(json.loads(payload))
+
+    def recv(self):
+        return self.responses.pop(0)
+
+
+def test_browser_session_call_preserves_dialog_event_while_waiting_for_response():
+    ws = _DialogProtocolWs()
+    channel = {
+        "target_id": "tab-target",
+        "session_id": "session-1",
+        "ws": ws,
+        "lock": net.threading.RLock(),
+        "next_message_id": 5000,
+        "events": [],
+        "closed": False,
+    }
+    result = net._javascript_dialog_browser_call(
+        channel,
+        "Page.enable",
+        {},
+        session_id="session-1",
+        timeout=0.5,
+    )
+    assert result == {}
+    assert ws.sent[0]["sessionId"] == "session-1"
+    assert ws.sent[0]["method"] == "Page.enable"
+    assert channel["events"][0]["type"] == "confirm"
+    assert channel["events"][0]["message"] == "Restart service?"
