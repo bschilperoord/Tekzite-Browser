@@ -132,7 +132,14 @@ def _configured_user_extension_dirs():
         return []
     try:
         values = json.loads(raw)
-    except Exception:
+    except Exception as exc:
+        session['javascript_dialog_monitor_last_error'] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        session['javascript_dialog_monitor_last_error_at'] = time.monotonic()
+        session['javascript_dialog_monitor_failures'] = (
+            int(session.get('javascript_dialog_monitor_failures') or 0) + 1
+        )
         return []
     if not isinstance(values, list):
         return []
@@ -12255,6 +12262,7 @@ def _get_javascript_dialog_browser_channel(
         _close_javascript_dialog_browser_channel(cached)
         channels.pop(target_id, None)
 
+    session['javascript_dialog_monitor_stage'] = 'browser-ws-url'
     ws_url = str(session.get('browser_ws_url') or '')
     if not ws_url:
         version = _devtools_json(
@@ -12267,9 +12275,13 @@ def _get_javascript_dialog_browser_channel(
     if not ws_url:
         raise RuntimeError('Chromium browser DevTools websocket unavailable')
 
+    session['javascript_dialog_monitor_stage'] = 'browser-ws-connect'
+    dialog_ws = _open_devtools_websocket(
+        ws_url, timeout=max(0.1, float(timeout))
+    )
     channel = {
         'target_id': target_id,
-        'ws': _open_devtools_websocket(ws_url, timeout=max(0.1, float(timeout))),
+        'ws': dialog_ws,
         'lock': threading.RLock(),
         'next_message_id': 5000,
         'session_id': '',
@@ -12280,6 +12292,7 @@ def _get_javascript_dialog_browser_channel(
         'created_at': time.monotonic(),
     }
     try:
+        session['javascript_dialog_monitor_stage'] = 'target-attach'
         attached = _javascript_dialog_browser_call(
             channel,
             'Target.attachToTarget',
@@ -12290,14 +12303,25 @@ def _get_javascript_dialog_browser_channel(
         if not session_id:
             raise RuntimeError('Chromium did not attach a dialog Target session')
         channel['session_id'] = session_id
+        session['javascript_dialog_monitor_stage'] = 'page-enable'
         _javascript_dialog_browser_call(
             channel, 'Page.enable', {},
             session_id=session_id, timeout=max(0.1, float(timeout)),
         )
         channel['page_enabled'] = True
         channels[target_id] = channel
+        session['javascript_dialog_monitor_stage'] = 'ready'
+        session['javascript_dialog_monitor_last_error'] = None
+        session['javascript_dialog_monitor_last_error_at'] = None
         return channel
-    except Exception:
+    except Exception as exc:
+        session['javascript_dialog_monitor_last_error'] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        session['javascript_dialog_monitor_last_error_at'] = time.monotonic()
+        session['javascript_dialog_monitor_failures'] = (
+            int(session.get('javascript_dialog_monitor_failures') or 0) + 1
+        )
         _close_javascript_dialog_browser_channel(channel)
         raise
 
@@ -12358,7 +12382,15 @@ def poll_embedded_chromium_javascript_dialogs(
                     if queued and queued[0] is event:
                         queued.pop(0)
                     return [event]
-    except Exception:
+    except Exception as exc:
+        session['javascript_dialog_monitor_stage'] = 'event-read'
+        session['javascript_dialog_monitor_last_error'] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        session['javascript_dialog_monitor_last_error_at'] = time.monotonic()
+        session['javascript_dialog_monitor_failures'] = (
+            int(session.get('javascript_dialog_monitor_failures') or 0) + 1
+        )
         _close_javascript_dialog_browser_channel(channel)
         (session.get('javascript_dialog_browser_channels') or {}).pop(
             target_id, None
