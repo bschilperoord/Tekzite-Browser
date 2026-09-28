@@ -264,7 +264,7 @@ def _normalized_customization(value):
 DEFAULT_PREFERENCES = {
     "homepage": START_URL,
     "startup": "homepage",
-    "restore_tabs": False,
+    "restore_tabs": True,
     "quiet_mode": False,
     "adblock_sites": [],
     "new_tab": "blank",
@@ -280,14 +280,15 @@ DEFAULT_PREFERENCES = {
     # v4.56 privacy-first defaults.
     "network_diagnostics": "off",
     "strict_python_loopback": True,
-    # v10.4 Privacy Core. Lockdown deliberately keeps browsing history/session
-    # in memory only; bookmarks and explicit downloads remain user-owned data.
+    # Privacy Core controls browser/network protections. Data lifetime is
+    # independent: Private Window is ephemeral, while normal profiles persist
+    # unless the user explicitly enables clear_browsing_data_on_exit.
     "privacy_lockdown": True,
     "tracker_blocking_enabled": True,
     "strip_tracking_parameters": True,
     "strip_referrer": True,
     "https_first": True,
-    "clear_browsing_data_on_exit": True,
+    "clear_browsing_data_on_exit": False,
     "page_zoom_percent": 100,
     "adblock_enabled": True,
     # User-managed unpacked Chromium extensions. Tekzite's built-in local
@@ -2061,11 +2062,6 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_source_tab_id = None
         self._google_auth_refresh_pending_url = None
         self.preferences = load_preferences()
-        if not self._private_mode and self.preferences.get("privacy_lockdown", True):
-            # Privacy Lockdown never points Chromium at a persistent profile.
-            # Cookies/cache/storage live only in this process-owned temp tree.
-            self._privacy_profile_dir = tempfile.mkdtemp(prefix=f"Tekzite-Privacy-{os.getpid()}-")
-            os.environ["TEKZITE_CHROMIUM_PROFILE"] = self._privacy_profile_dir
         strict_python_loopback = bool(self.preferences.get("strict_python_loopback", True))
         os.environ["TEKZITE_STRICT_PYTHON_LOOPBACK"] = "1" if strict_python_loopback else "0"
         os.environ["TEKZITE_PRIVACY_LOCKDOWN"] = "1" if self.preferences.get("privacy_lockdown", True) else "0"
@@ -2168,12 +2164,6 @@ class BrowserApp(BrowserFeatures):
         user_extension_paths = [] if self.preferences.get("privacy_lockdown", True) else _enabled_extension_paths(self.preferences)
         os.environ["TEKZITE_USER_EXTENSIONS"] = json.dumps(user_extension_paths)
         self._state_directory = _preferences_path().parent
-        if self.preferences.get("privacy_lockdown", True) and not self._private_mode:
-            for sensitive_name in ("session.json", "history.json"):
-                try:
-                    (self._state_directory / sensitive_name).unlink(missing_ok=True)
-                except OSError:
-                    pass
         self.root.report_callback_exception = self._report_tk_callback_exception
         self.bookmarks = load_bookmarks(self._state_directory / "bookmarks.json")
         self._init_features()
@@ -2917,7 +2907,7 @@ class BrowserApp(BrowserFeatures):
             self.root.after_idle(lambda: self._feature_startup(lambda: self._restore_startup_tabs(startup_action)))
 
     def _restore_startup_tabs(self, fallback):
-        if getattr(self, "_private_mode", False) or self.preferences.get("privacy_lockdown", False):
+        if getattr(self, "_private_mode", False):
             fallback()
             return
         session = load_session(self._state_directory / "session.json") if self.preferences.get("restore_tabs", True) else {"tabs": []}
@@ -2954,7 +2944,7 @@ class BrowserApp(BrowserFeatures):
 
     def _save_session(self):
         path = self._state_directory / "session.json"
-        if getattr(self, "_private_mode", False) or self.preferences.get("privacy_lockdown", False):
+        if getattr(self, "_private_mode", False):
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -12363,9 +12353,12 @@ class BrowserApp(BrowserFeatures):
         section("Privacy")
         tk.Label(outer, text="Privacy Core active",
                  fg=self.ui["text"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=3)
-        tk.Checkbutton(outer, text="Privacy Lockdown (no history/session on disk)",
+        tk.Checkbutton(outer, text="Privacy Core protections",
                        variable=privacy_lockdown, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+        tk.Label(outer, text="Privacy protections stay active while normal browser data can still be saved.",
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)),
+                 wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
         tk.Checkbutton(outer, text="Block tracker/analytics hosts",
                        variable=tracker_blocking, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
@@ -12390,7 +12383,7 @@ class BrowserApp(BrowserFeatures):
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Block ad hosts; restart applies.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
-        tk.Checkbutton(outer, text="Clear Chromium cookies, storage, cache and history on exit",
+        tk.Checkbutton(outer, text="Clear cookies, storage, cache and history on exit",
                        variable=clear_on_exit, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Network diagnostics", fg=self.ui["muted"], bg=self.ui["bg"],
@@ -13754,8 +13747,7 @@ class BrowserApp(BrowserFeatures):
             close_embedded_chromium(
                 clear_profile=bool(
                     getattr(self, "_private_mode", False)
-                    or self.preferences.get("privacy_lockdown", True)
-                    or self.preferences.get("clear_browsing_data_on_exit", True)
+                    or self.preferences.get("clear_browsing_data_on_exit", False)
                 ),
                 # v10.5.69: let Chromium durably commit cookie/storage changes
                 # such as a fresh YouTube sign-out before Tekzite exits.
