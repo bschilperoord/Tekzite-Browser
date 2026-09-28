@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.98"
+    assert main.BROWSER_VERSION == "10.5.99"
 
 
 def test_outer_window_does_not_create_a_tk_round_rect_region():

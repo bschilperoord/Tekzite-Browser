@@ -1,3 +1,12 @@
+# v10.5.99 - Fast rich HTML + CSS coloring
+
+- Upgrades Inspect Chromium HTML with richer semantic markup colors for tag names, attributes, equals signs, quotes, values, entities, comments and declarations.
+- Adds real CSS-aware coloring inside both <style> blocks and inline style="" attributes.
+- Distinguishes CSS selectors, at-rules, properties, values, strings, numbers/units, hex colors, functions, custom properties, !important, punctuation and comments.
+- Skips HTML tokenization inside script/style bodies so embedded code containing markup-like text is not falsely colored as HTML.
+- Replaces one-Tk-call-per-token coloring with grouped multi-range Text.tag_add calls, coloring up to 64 equal-color ranges per interpreter crossing.
+- Retains the v10.5.98 ~3 ms UI budget, interaction yielding and dedicated single inspector worker.
+
 # v10.5.98 - Smooth HTML Inspector
 
 - Removes the remaining large Tk/UI bursts from **Inspect Chromium HTML**.
