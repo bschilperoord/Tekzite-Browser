@@ -12525,6 +12525,16 @@ class BrowserApp(BrowserFeatures):
         win.bind("<Button-5>", scroll_settings, add="+")
 
         homepage = tk.StringVar(value=getattr(self, "preferences", DEFAULT_PREFERENCES).get("homepage", START_URL))
+        search_template = tk.StringVar(
+            value=str(
+                getattr(self, "preferences", DEFAULT_PREFERENCES).get(
+                    "search_url_template", DEFAULT_SEARCH_URL_TEMPLATE
+                )
+            )
+        )
+        search_engine = tk.StringVar(
+            value=_search_engine_name_for_template(search_template.get())
+        )
         startup = tk.StringVar(value=getattr(self, "preferences", DEFAULT_PREFERENCES).get("startup", "homepage"))
         new_tab = tk.StringVar(value=getattr(self, "preferences", DEFAULT_PREFERENCES).get("new_tab", "blank"))
         renderer = tk.StringVar(value="chromium")
@@ -12567,6 +12577,62 @@ class BrowserApp(BrowserFeatures):
         tk.Label(outer, text="Local suggestions only.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)),
                  wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
+
+        section("Search engine")
+        tk.Label(
+            outer,
+            text="Search provider used when text in the address bar is not a URL.",
+            fg=self.ui["muted"],
+            bg=self.ui["bg"],
+            font=(self._ui_font_family, self._font_size(8)),
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 4))
+        search_engine_box = combo(
+            search_engine,
+            list(SEARCH_ENGINE_PRESETS) + [CUSTOM_SEARCH_ENGINE],
+        )
+        tk.Label(
+            outer,
+            text="Custom search URL template",
+            fg=self.ui["muted"],
+            bg=self.ui["bg"],
+            font=(self._ui_font_family, self._font_size(8)),
+        ).pack(anchor="w", pady=(4, 1))
+        search_template_entry = tk.Entry(
+            outer,
+            textvariable=search_template,
+            bg=self.ui["field"],
+            fg=self.ui["text"],
+            insertbackground=self.ui["text"],
+            relief="flat",
+            font=(self._ui_font_family, self._font_size(9)),
+        )
+        search_template_entry.pack(fill="x", ipady=6, pady=(0, 3))
+        tk.Label(
+            outer,
+            text="Use {query} for the URL-encoded terms. Local/self-hosted SearXNG works here.",
+            fg=self.ui["muted_dim"],
+            bg=self.ui["bg"],
+            font=(self._ui_font_family, self._font_size(8)),
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 4))
+
+        def select_settings_search_engine(_event=None):
+            template = SEARCH_ENGINE_PRESETS.get(search_engine.get())
+            if template:
+                search_template.set(template)
+
+        def sync_settings_search_engine(*_args):
+            search_engine.set(
+                _search_engine_name_for_template(search_template.get())
+            )
+
+        search_engine_box.bind(
+            "<<ComboboxSelected>>", select_settings_search_engine
+        )
+        search_template.trace_add("write", sync_settings_search_engine)
 
         quiet_mode = tk.BooleanVar(value=self.preferences.get("quiet_mode", False))
         restore_tabs = tk.BooleanVar(value=self.preferences.get("restore_tabs", True))
@@ -12748,8 +12814,23 @@ class BrowserApp(BrowserFeatures):
         scroll_host.pack(side="top", fill="both", expand=True)
         def save_and_close():
             selected_zoom = _normalized_zoom_percent(page_zoom.get(), original_zoom)
+            selected_search_template = SEARCH_ENGINE_PRESETS.get(
+                search_engine.get(), search_template.get().strip()
+            )
+            selected_search_template = str(
+                selected_search_template or ""
+            ).strip()[:500]
+            if "{query}" not in selected_search_template:
+                self._show_message(
+                    "error",
+                    "Tekzite Settings",
+                    "Search URL template must contain {query}.",
+                    parent=win,
+                )
+                return
             self.preferences.update({
                 "homepage": homepage.get().strip() or START_URL,
+                "search_url_template": selected_search_template,
                 "startup": startup.get(),
                 "restore_tabs": bool(restore_tabs.get()),
                 "quiet_mode": bool(quiet_mode.get()),
