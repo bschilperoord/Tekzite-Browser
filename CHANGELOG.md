@@ -1,3 +1,11 @@
+# v10.5.97 - DWM popup-menu dismissal
+
+- Makes clicks on the Chromium/DWM page close any open Tekzite top-bar, hamburger or context popup before the page click is forwarded.
+- Routes both normal Tk surface clicks and the Win32 DWM pointer fallback through the same popup-dismiss path.
+- Keeps the actual page click intact, so closing the menu does not swallow the user's intended Chromium interaction.
+- Resets the selected state of the menu-bar anchor through the existing popup dismiss lifecycle.
+- Adds regression coverage for posted/unposted popup behavior and the shared DWM/Tk press path.
+
 # v10.5.96 - Network ownership hardening + new-tab card spacing
 
 - Hardens **Tools -> Network Connections** so process ancestry alone can no longer pull unrelated applications into the Live Socket View.
