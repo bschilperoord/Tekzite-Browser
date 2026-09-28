@@ -58,6 +58,10 @@ def _dialog_debug(app):
         "dialog_after_id": getattr(app, "_javascript_dialog_after_id", None),
         "dialog_poll_busy": getattr(app, "_javascript_dialog_poll_busy", None),
         "dialog_window": bool(getattr(app, "_javascript_dialog_window", None)),
+        "confirm_eval_done": bool(
+            getattr(app, "_tekzite_smoke_arm_future", None)
+            and getattr(app, "_tekzite_smoke_arm_future").done()
+        ),
         "channel_session_id": channel.get("session_id"),
         "channel_closed": channel.get("closed"),
         "channel_dialog_open": channel.get("dialog_open"),
@@ -95,6 +99,7 @@ def main():
     app = None
     state = {
         "started": time.monotonic(),
+        "dialog_started_at": None,
         "armed": False,
         "arm_future": None,
         "clicked": False,
@@ -131,7 +136,8 @@ def main():
         def tick():
             if state["error"] is not None or state["result"] is True:
                 return
-            if time.monotonic() - state["started"] > 25.0:
+            if (state["dialog_started_at"] is not None
+                    and time.monotonic() - state["dialog_started_at"] > 12.0):
                 fail("Timed out waiting for Tekzite's Tk-native JavaScript dialog")
                 return
 
@@ -150,36 +156,23 @@ def main():
                             "Runtime.evaluate",
                             {
                                 "expression": """(() => {
-                                  window.__tekziteFullDialogSmoke = 'pending';
-                                  setTimeout(() => {
-                                    window.__tekziteFullDialogSmoke =
-                                      confirm('TEKZITE FULL BROWSER DIALOG SMOKE');
-                                  }, 350);
-                                  return 'armed';
+                                  window.__tekziteFullDialogSmoke =
+                                    confirm('TEKZITE FULL BROWSER DIALOG SMOKE');
+                                  return window.__tekziteFullDialogSmoke;
                                 })()""",
                                 "returnByValue": True,
                             },
                             target_id=target_id,
-                            timeout=2.0,
+                            timeout=20.0,
                             purpose="dialog-full-smoke",
                         )
                     state["arm_future"] = worker.submit(arm)
+                    app._tekzite_smoke_arm_future = state["arm_future"]
+                    state["dialog_started_at"] = time.monotonic()
+                    state["armed"] = True
+                    print("Synchronous confirm() started for target:", target_id)
                     app.root.after(40, tick)
                     return
-                if not state["arm_future"].done():
-                    app.root.after(40, tick)
-                    return
-                try:
-                    arm_result = state["arm_future"].result()
-                    value = (((arm_result or {}).get("result") or {}).get("value"))
-                    if value != "armed":
-                        fail(f"Could not arm full-browser confirm(): {value!r}")
-                        return
-                except Exception as exc:
-                    fail(f"Could not arm full-browser confirm(): {type(exc).__name__}: {exc}")
-                    return
-                state["armed"] = True
-                print("Confirm trigger armed for target:", target_id)
 
             win = getattr(app, "_javascript_dialog_window", None)
             if win is not None:
@@ -200,27 +193,12 @@ def main():
 
             if state["clicked"]:
                 if state["verify_future"] is None:
-                    current_target = target_id
                     def verify():
-                        deadline = time.monotonic() + 5.0
-                        last = None
-                        while time.monotonic() < deadline:
-                            result = net._persistent_page_cdp_call(
-                                session,
-                                "Runtime.evaluate",
-                                {
-                                    "expression": "window.__tekziteFullDialogSmoke",
-                                    "returnByValue": True,
-                                },
-                                target_id=current_target,
-                                timeout=1.0,
-                                purpose="dialog-full-smoke",
-                            )
-                            last = (((result or {}).get("result") or {}).get("value"))
-                            if last is True:
-                                return True
-                            time.sleep(0.05)
-                        return last
+                        try:
+                            result = state["arm_future"].result(timeout=5.0)
+                        except Exception as exc:
+                            return {"error": f"{type(exc).__name__}: {exc}"}
+                        return (((result or {}).get("result") or {}).get("value"))
                     state["verify_future"] = worker.submit(verify)
                     app.root.after(50, tick)
                     return
