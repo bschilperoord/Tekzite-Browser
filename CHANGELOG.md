@@ -1,3 +1,12 @@
+# v10.5.96 - Network ownership hardening + new-tab card spacing
+
+- Hardens **Tools -> Network Connections** so process ancestry alone can no longer pull unrelated applications into the Live Socket View.
+- Trusts the exact live Tekzite Network and Chromium subprocess roots, then follows only the expected helper/Chromium executable families beneath them.
+- Treats Google-auth handoff PIDs as eligible only when the Windows Toolhelp snapshot identifies them as Chromium-family processes.
+- Prevents foreign descendants such as Discord, Notepad, PowerShell or other launched applications from entering the owner-PID/ETW filter.
+- Adds regression coverage where an unrelated process is deliberately made a direct child of Tekzite and must still be excluded.
+- Gives Most visited cards extra vertical breathing room between wrapped bold site titles, the hostname and visit count.
+
 # v10.5.95 - Most visited new tab and fixed Settings footer
 
 - Adds a local Most visited panel to blank/new tabs with up to eight site cards.
