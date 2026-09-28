@@ -248,7 +248,7 @@ class BrowserFeatures:
         self._configure_feature_preferences()
 
     def _start_optional_services(self, session):
-        if self._closing or session is not features.net._EDGE_SESSION:
+        if self._closing or session is not features.net._CHROMIUM_SESSION:
             return
         if session.get('feature_services_scheduled'):
             return
@@ -291,7 +291,7 @@ class BrowserFeatures:
         # Do not start the proxy just because a blank browser window is open.
         # Once Chromium exists, however, its --proxy-server URL is fixed and the
         # helper must be recovered on the same port if it ever crashes.
-        if features.net._EDGE_SESSION is None:
+        if features.net._CHROMIUM_SESSION is None:
             self._schedule_network_health_watch(4000)
             return
 
@@ -1184,9 +1184,9 @@ class BrowserFeatures:
         state.append(f'Private window: {bool(getattr(self, "_private_mode", False))}')
         state.append(f'Open tabs: {len(getattr(self, "tabs", []))}')
         state.append(f'Sleeping tabs: {sum(1 for t in getattr(self, "tabs", []) if t.get("sleeping"))}')
-        state.append(f'Chromium session active: {bool(features.net._EDGE_SESSION)}')
-        if features.net._EDGE_SESSION:
-            session = features.net._EDGE_SESSION
+        state.append(f'Chromium session active: {bool(features.net._CHROMIUM_SESSION)}')
+        if features.net._CHROMIUM_SESSION:
+            session = features.net._CHROMIUM_SESSION
             state.append(f'Chromium DevTools port: {session.get("port")}')
             state.append(f'Chromium profile: {session.get("profile")}')
             state.append(f'Current target: {session.get("target_id")}')
@@ -2118,7 +2118,7 @@ class BrowserFeatures:
                 ))
                 if tab.get('chromium_target_id'):
                     tab_targets.append((iid, tab.get('chromium_target_id')))
-            if not features.net._EDGE_SESSION:
+            if not features.net._CHROMIUM_SESSION:
                 note.set('Chromium has not started yet.')
                 return
 

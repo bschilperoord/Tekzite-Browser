@@ -21,7 +21,7 @@ def test_dwm_input_metrics_prefer_visible_pixel_contract(monkeypatch):
         "dwm_thumbnail_pixel_contract": (1920, 900),
         "dwm_render_size_after_chrome_expand": (1200, 700),
     }
-    monkeypatch.setattr(net, "_EDGE_SESSION", session)
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", session)
     monkeypatch.setattr(
         net,
         "_persistent_page_cdp_call",

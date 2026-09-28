@@ -95,7 +95,7 @@ def test_wake_tab_marks_reload_route():
 def test_permission_helper_uses_browser_set_permission(monkeypatch):
     session = {'port': 1234}
     calls = []
-    monkeypatch.setattr(net, '_EDGE_SESSION', session)
+    monkeypatch.setattr(net, '_CHROMIUM_SESSION', session)
     monkeypatch.setattr(net, '_browser_cdp_call', lambda sess, method, params=None, **kw: calls.append((method, params)) or {})
     assert net.set_embedded_chromium_permission('https://example.test', 'geolocation', 'denied') is True
     assert calls == [('Browser.setPermission', {'permission': {'name': 'geolocation'}, 'setting': 'denied', 'origin': 'https://example.test'})]

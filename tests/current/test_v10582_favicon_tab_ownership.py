@@ -134,7 +134,7 @@ def test_stale_inflight_page_state_cannot_write_old_favicon_after_navigation():
 
 
 def test_network_favicon_bytes_are_discarded_if_target_navigates_during_fetch(monkeypatch):
-    monkeypatch.setattr(net, "_EDGE_SESSION", {"port": 9222})
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", {"port": 9222})
     calls = []
 
     def fake_cdp(session, method, params=None, **kwargs):
@@ -165,7 +165,7 @@ def test_network_favicon_bytes_are_discarded_if_target_navigates_during_fetch(mo
 
 
 def test_network_favicon_bytes_are_kept_when_page_owner_is_unchanged(monkeypatch):
-    monkeypatch.setattr(net, "_EDGE_SESSION", {"port": 9222})
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", {"port": 9222})
     responses = iter([
         {"result": {"value": {
             "title": "A",

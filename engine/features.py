@@ -21,7 +21,7 @@ def set_config(enabled, sites, *, tracker_blocking=True, strip_referrer=True, ht
 
 def call(action, payload=None, session=None):
     with _LOCK:
-        session = session or net._EDGE_SESSION
+        session = session or net._CHROMIUM_SESSION
         if not session:
             raise RuntimeError('Open a webpage first so Chromium can start.')
         channel = session.get('feature_channel')

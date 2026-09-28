@@ -18,7 +18,7 @@ def _shutdown_onefile_children() -> None:
     # Chromium loads Tekzite's bundled unpacked extension from the OneFile
     # extraction tree, so Chromium must be gone before the PyInstaller
     # bootloader tries to delete that tree.
-    session = getattr(net, "_EDGE_SESSION", None) or {}
+    session = getattr(net, "_CHROMIUM_SESSION", None) or {}
     profile = session.get("profile") if isinstance(session, dict) else None
 
     try:

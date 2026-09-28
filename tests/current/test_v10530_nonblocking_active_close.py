@@ -29,7 +29,7 @@ def test_handoff_has_interaction_grace_before_target_activation():
 
 def test_presentation_fast_path_has_no_cdp_io():
     block = NET[NET.index("def set_embedded_chromium_presentation"):NET.index("def _png_dimensions")]
-    fast = block[block.index("if defer_io:"):block.index("session = _EDGE_SESSION or _start_persistent_chromium_session()") ]
+    fast = block[block.index("if defer_io:"):block.index("session = _CHROMIUM_SESSION or _start_persistent_chromium_session()") ]
     assert "_start_persistent_chromium_session" not in fast
     assert "_clear_embedded_chromium_device_metrics" not in fast
     assert 'session["presentation_mode"] = mode' in fast

@@ -42,12 +42,12 @@ def test_versioned_release_executable_is_recognized_from_effective_shell_handler
 
 def test_non_tekzite_effective_handler_wins_over_unrelated_progid():
     reg = FakeWinreg({
-        _url_path("http"): "MSEdgeHTM",
-        _url_path("https"): "MSEdgeHTM",
+        _url_path("http"): "OtherBrowserHTML",
+        _url_path("https"): "OtherBrowserHTML",
     })
     status = main._tekzite_default_browser_status(
         winreg_module=reg,
-        executable_resolver=lambda _association: r"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+        executable_resolver=lambda _association: r"C:\\Program Files (x86)\\Other Browser\\other-browser.exe",
         executable=r"C:\\Program Files\\Tekzite Browser\\TekziteBrowser.exe",
     )
     assert status["is_default"] is False

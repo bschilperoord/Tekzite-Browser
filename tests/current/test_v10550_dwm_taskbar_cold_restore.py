@@ -41,7 +41,7 @@ def test_recovery_reregisters_before_mapping_destination():
 
 def test_engine_cold_reregister_unhooks_old_thumbnail_and_flushes():
     start = NET.index("def request_embedded_chromium_dwm_reregister(")
-    assert '_EDGE_SESSION["dwm_force_reregister"] = True' in NET[start:start+900]
+    assert '_CHROMIUM_SESSION["dwm_force_reregister"] = True' in NET[start:start+900]
     overlay = NET[NET.index("def _position_native_chromium_overlay("):NET.index("def _wait_for_live_embed_owner(")]
     assert 'force_reregister = bool(session.pop("dwm_force_reregister", False))' in overlay
     assert "and not force_reregister" in overlay

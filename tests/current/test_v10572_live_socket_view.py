@@ -73,7 +73,7 @@ def test_live_socket_snapshot_includes_all_owned_tcp_udp_and_marks_direct(monkey
     monkeypatch.setattr(net, "_windows_process_snapshot", lambda: processes)
     monkeypatch.setattr(net, "_windows_socket_rows", lambda: sockets)
     monkeypatch.setattr(net, "_NETWORK_ENGINE", {"process": Proc(200), "port": 17890})
-    monkeypatch.setattr(net, "_EDGE_SESSION", {"process": Proc(300), "port": 9222})
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", {"process": Proc(300), "port": 9222})
     monkeypatch.setattr(net, "ensure_udp_peer_monitor", lambda _owned: {"status": "running", "reason": "", "peers": []})
     monkeypatch.setattr(net, "connection_overview", lambda **_kwargs: {
         "active_upstreams": [{

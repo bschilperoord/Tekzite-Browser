@@ -109,7 +109,7 @@ def test_live_socket_snapshot_expands_udp_endpoint_into_remote_peer_rows(monkeyp
     monkeypatch.setattr(net, "_windows_process_snapshot", lambda: processes)
     monkeypatch.setattr(net, "_windows_socket_rows", lambda: sockets)
     monkeypatch.setattr(net, "_NETWORK_ENGINE", None)
-    monkeypatch.setattr(net, "_EDGE_SESSION", {"process": Proc(300), "port": 9222})
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", {"process": Proc(300), "port": 9222})
     monkeypatch.setattr(net, "connection_overview", lambda **_kwargs: {})
     monkeypatch.setattr(net, "ensure_udp_peer_monitor", lambda _owned: {
         "status": "running", "reason": "", "peers": peers,

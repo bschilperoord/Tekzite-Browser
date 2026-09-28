@@ -41,7 +41,7 @@ def test_extension_launcher_validates_manifest_dirs(tmp_path, monkeypatch):
 def test_private_profile_override(tmp_path, monkeypatch):
     profile = tmp_path / 'private-profile'
     monkeypatch.setenv('TEKZITE_CHROMIUM_PROFILE', str(profile))
-    assert Path(net._persistent_edge_profile_dir()) == profile.resolve()
+    assert Path(net._persistent_chromium_profile_dir()) == profile.resolve()
     assert profile.is_dir()
 
 

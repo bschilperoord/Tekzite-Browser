@@ -736,7 +736,7 @@ def _windows_owned_processes(processes=None, extra_roots=None):
     owned = {own_pid}
 
     network_pid = _tracked_process_pid(_NETWORK_ENGINE or {})
-    chromium_pid = _tracked_process_pid(_EDGE_SESSION or {})
+    chromium_pid = _tracked_process_pid(_CHROMIUM_SESSION or {})
     _add_filtered_process_tree(
         owned, processes, network_pid, _is_tekzite_network_process_name,
         trusted_root=True,
@@ -1076,9 +1076,9 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
     tcp_event_rows = list((udp_peer_state or {}).get("tcp_flows") or [])
 
     network_state = _NETWORK_ENGINE or {}
-    edge_state = _EDGE_SESSION or {}
+    chromium_state = _CHROMIUM_SESSION or {}
     network_proc = network_state.get("process") if isinstance(network_state, dict) else None
-    chromium_proc = edge_state.get("process") if isinstance(edge_state, dict) else None
+    chromium_proc = chromium_state.get("process") if isinstance(edge_state, dict) else None
     try:
         network_pid = int(getattr(network_proc, "pid", 0) or 0)
     except Exception:
@@ -1088,7 +1088,7 @@ def live_socket_snapshot(*, include_proxy_names=True, extra_pids=None):
     except Exception:
         chromium_pid = 0
     proxy_port = int(network_state.get("port") or 0) if isinstance(network_state, dict) else 0
-    devtools_port = int(edge_state.get("port") or 0) if isinstance(edge_state, dict) else 0
+    devtools_port = int(chromium_state.get("port") or 0) if isinstance(edge_state, dict) else 0
 
     # PyInstaller one-file executables may keep the launcher PID while the real
     # helper payload runs in a child process. Treat the full helper/browser
@@ -1614,8 +1614,8 @@ def _chromium_candidates():
                 yield path
 
 
-_EDGE_SESSION = None
-_EDGE_SESSION_LOCK = threading.RLock()
+_CHROMIUM_SESSION = None
+_CHROMIUM_SESSION_LOCK = threading.RLock()
 _CHROMIUM_LAUNCH_DEBUG = {
     "attempts": 0, "executable": None, "port": None, "profile": None,
     "recovered": False, "last_error": None, "errors": [],
@@ -1623,7 +1623,7 @@ _CHROMIUM_LAUNCH_DEBUG = {
 
 
 
-def _persistent_edge_profile_dir():
+def _persistent_chromium_profile_dir():
     """Return Tekzite's dedicated Chromium compatibility profile.
 
     Private windows set ``TEKZITE_CHROMIUM_PROFILE`` to a process-unique
@@ -4697,7 +4697,7 @@ def warm_embedded_chromium_io_channels(target_id: str = None, timeout: float = 2
     all three lanes removes both lock contention and the first-gesture connect
     penalty while the page is still hidden or otherwise idle.
     """
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(float(timeout), 8.0))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(float(timeout), 8.0))
     if not session or not session.get("port"):
         return False
     warmed = []
@@ -4881,7 +4881,7 @@ def warm_embedded_chromium_input_channel(target_id: str = None, timeout: float =
 
 def persistent_cdp_debug():
     """Return connection-reuse counters for Tekzite debug output/tests."""
-    session = _EDGE_SESSION or {}
+    session = _CHROMIUM_SESSION or {}
     channels = session.get("page_cdp_channels") or {}
     return {
         "channels": len(channels),
@@ -4957,7 +4957,7 @@ def _apply_privacy_profile_preferences(profile_dir):
 
 def _start_persistent_chromium_session(timeout=12, launch_geometry=None, launch_url=None):
     """Serialize Chromium bootstrap/recovery so only one helper can win."""
-    with _EDGE_SESSION_LOCK:
+    with _CHROMIUM_SESSION_LOCK:
         return _start_persistent_chromium_session_unlocked(
             timeout=timeout, launch_geometry=launch_geometry, launch_url=launch_url
         )
@@ -4972,26 +4972,26 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
     port on retry and removing only stale singleton lock files from Tekzite's
     dedicated compatibility profile.
     """
-    global _EDGE_SESSION, _CHROMIUM_LAUNCH_DEBUG
+    global _CHROMIUM_SESSION, _CHROMIUM_LAUNCH_DEBUG
 
-    if _EDGE_SESSION:
-        process = _EDGE_SESSION.get("process")
+    if _CHROMIUM_SESSION:
+        process = _CHROMIUM_SESSION.get("process")
         if process is not None and process.poll() is None:
             # A busy renderer can miss one short DevTools probe. Require two
             # misses before declaring the persistent browser session broken.
             for probe_timeout in (0.35, 0.75):
                 try:
-                    _devtools_json(_EDGE_SESSION["port"], "/json/version", timeout=probe_timeout)
-                    return _EDGE_SESSION
+                    _devtools_json(_CHROMIUM_SESSION["port"], "/json/version", timeout=probe_timeout)
+                    return _CHROMIUM_SESSION
                 except Exception:
                     if process.poll() is not None:
                         break
                     time.sleep(0.04)
-        stale_session = _EDGE_SESSION
+        stale_session = _CHROMIUM_SESSION
         try:
             close_embedded_chromium(clear_profile=False)
         except Exception:
-            _EDGE_SESSION = None
+            _CHROMIUM_SESSION = None
             try:
                 _close_persistent_page_cdp_channels(stale_session)
                 _close_persistent_browser_cdp_channel(stale_session)
@@ -5010,7 +5010,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
     last_error = None
     candidates = list(_chromium_candidates())
     for executable in candidates:
-        profile = _persistent_edge_profile_dir()
+        profile = _persistent_chromium_profile_dir()
         # Two attempts per executable. The second one is a deliberately clean
         # retry after terminating any partial process and clearing stale locks.
         for attempt in (1, 2):
@@ -5084,7 +5084,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     "--disable-default-apps",
                     "--disable-logging", "--metrics-recording-only", "--no-pings",
                     "--disable-hyperlink-auditing", "--disable-preconnect",
-                    "--disable-features=EdgeFirstRunExperience,msEdgeSidebarV2,AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion,BrowsingTopics,InterestCohortAPI,SharedStorageAPI,FencedFrames,AttributionReporting,PrivateAggregationApi,FedCm,WebBluetooth,WebUSB,WebSerial,WebHID,IdleDetection,WebNFC,Prerender2,SpeculationRulesPrefetchProxy",
+                    "--disable-features=AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion,BrowsingTopics,InterestCohortAPI,SharedStorageAPI,FencedFrames,AttributionReporting,PrivateAggregationApi,FedCm,WebBluetooth,WebUSB,WebSerial,WebHID,IdleDetection,WebNFC,Prerender2,SpeculationRulesPrefetchProxy",
                     "--disable-session-crashed-bubble", "--disable-background-mode",
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
@@ -5163,7 +5163,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                         )
                     process = _AdoptedProcessHandle(adopted_pid)
                 _write_profile_owner(profile, process.pid)
-                _EDGE_SESSION = {
+                _CHROMIUM_SESSION = {
                     "process": process, "port": port, "profile": profile,
                     "page_cdp_channels": {}, "executable": executable,
                     "browser_ws_url": str((wait_info.get("version") or {}).get("webSocketDebuggerUrl") or ""),
@@ -5185,16 +5185,16 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                 if os.name == "nt":
                     try:
                         window_find_started = time.monotonic()
-                        helper_hwnd = _find_chromium_window(_EDGE_SESSION, timeout=1.5)
+                        helper_hwnd = _find_chromium_window(_CHROMIUM_SESSION, timeout=1.5)
                         _CHROMIUM_LAUNCH_DEBUG["window_discovery_ms"] = round(
                             (time.monotonic() - window_find_started) * 1000.0, 2
                         )
-                        _EDGE_SESSION["outer_hwnd"] = _hwnd_int(helper_hwnd)
-                        _EDGE_SESSION["main_hwnd"] = _hwnd_int(helper_hwnd)
-                        _apply_tekzite_chromium_branding(_EDGE_SESSION)
+                        _CHROMIUM_SESSION["outer_hwnd"] = _hwnd_int(helper_hwnd)
+                        _CHROMIUM_SESSION["main_hwnd"] = _hwnd_int(helper_hwnd)
+                        _apply_tekzite_chromium_branding(_CHROMIUM_SESSION)
                     except Exception:
                         pass
-                return _EDGE_SESSION
+                return _CHROMIUM_SESSION
             except Exception as exc:
                 last_error = exc
                 msg = f"{type(exc).__name__}: {exc}"
@@ -5224,8 +5224,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
         ) from last_error
     raise RuntimeError(
         "No Chromium backend found. Install Chromium/Ungoogled Chromium "
-        "or place chromium.exe beside Tekzite. Microsoft Edge is intentionally "
-        "not used as Tekzite's browser backend."
+        "or place chromium.exe beside Tekzite."
     )
 
 
@@ -5947,7 +5946,7 @@ def _close_embedded_chromium_cleanly_for_auth_unlocked(timeout: float = 6.0):
     record a crash, which surfaced as a "restore pages" bubble in the auth
     window.  This handoff path therefore refuses to force-kill the profile.
     """
-    session = _EDGE_SESSION
+    session = _CHROMIUM_SESSION
     if not session:
         return True
 
@@ -6131,10 +6130,10 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
     if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
         raise ValueError("Authentication handoff requires a normal http/https URL")
 
-    with _EDGE_SESSION_LOCK:
-        session = _EDGE_SESSION or {}
+    with _CHROMIUM_SESSION_LOCK:
+        session = _CHROMIUM_SESSION or {}
         executable = str(session.get("executable") or "")
-        profile = str(session.get("profile") or _persistent_edge_profile_dir())
+        profile = str(session.get("profile") or _persistent_chromium_profile_dir())
         if not executable:
             executable = next(iter(_chromium_candidates()), "")
         if not executable or not os.path.isfile(executable):
@@ -6610,13 +6609,13 @@ def activate_embedded_chromium_target(target_id: str):
     path. The previous browser-WebSocket Target.activateTarget call could sit
     behind protocol traffic/locks while an active tab was being closed. Even in
     a Python worker that contention could make the entire app *feel* frozen.
-    This path is independent, bounded, and never acquires _EDGE_SESSION_LOCK in
+    This path is independent, bounded, and never acquires _CHROMIUM_SESSION_LOCK in
     the normal running-browser case.
     """
     if not target_id:
         return False
 
-    session = _EDGE_SESSION
+    session = _CHROMIUM_SESSION
     if not session:
         # Cold/recovery fallback only. Normal tab switching always has a live
         # session by the time a Chromium target exists.
@@ -6673,7 +6672,7 @@ def close_embedded_chromium_target(target_id: str):
     """Close one Chromium target without using Tekzite's shared CDP socket."""
     if not target_id:
         return False
-    session = _EDGE_SESSION
+    session = _CHROMIUM_SESSION
     if not session:
         return False
 
@@ -7814,7 +7813,7 @@ def _apply_tekzite_chromium_branding(session):
 
 def embedded_chromium_debug_report():
     """Human-readable native-window diagnostics for Copy Full Debug."""
-    session = _EDGE_SESSION or {}
+    session = _CHROMIUM_SESSION or {}
     lines = ["EMBEDDED CHROMIUM WINDOW DEBUG", "-" * 80]
     process = session.get("process")
     launch = _CHROMIUM_LAUNCH_DEBUG or {}
@@ -8849,7 +8848,7 @@ def _resize_existing_dwm_thumbnail_fast(session, width: int, height: int):
 
 def detach_embedded_chromium_dwm_thumbnail():
     """Synchronously unregister Tekzite's DWM thumbnail without killing Chromium."""
-    session = _EDGE_SESSION
+    session = _CHROMIUM_SESSION
     if not session or os.name != "nt":
         return False
     thumb = session.get("dwm_thumbnail_handle")
@@ -8874,9 +8873,9 @@ def detach_embedded_chromium_dwm_thumbnail():
 
 def request_embedded_chromium_dwm_recrop():
     """Force the next DWM resize through the full crop-discovery path."""
-    if not _EDGE_SESSION:
+    if not _CHROMIUM_SESSION:
         return False
-    _EDGE_SESSION["dwm_force_full_recrop"] = True
+    _CHROMIUM_SESSION["dwm_force_full_recrop"] = True
     return True
 
 def request_embedded_chromium_dwm_reregister():
@@ -8886,10 +8885,10 @@ def request_embedded_chromium_dwm_reregister():
     composition is no longer attached to the destination.  A cold registration
     plus DwmFlush is the reliable restore boundary.
     """
-    if not _EDGE_SESSION:
+    if not _CHROMIUM_SESSION:
         return False
-    _EDGE_SESSION["dwm_force_full_recrop"] = True
-    _EDGE_SESSION["dwm_force_reregister"] = True
+    _CHROMIUM_SESSION["dwm_force_full_recrop"] = True
+    _CHROMIUM_SESSION["dwm_force_reregister"] = True
     return True
 
 def _position_native_chromium_overlay(session, width: int, height: int):
@@ -9608,7 +9607,7 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
     # pay the first-start frame/input/reattach ceremony again. Page.navigate can
     # return as soon as Chromium accepts the navigation and the live DWM surface
     # will paint progressively, which materially improves perceived load time.
-    session_was_running = _EDGE_SESSION is not None
+    session_was_running = _CHROMIUM_SESSION is not None
     launch_geometry = _initial_chromium_launch_geometry(parent_hwnd, width, height) if attach_native else None
     first_native_bootstrap = bool(attach_native and not target_id and not create_new_target and not session_was_running)
     # v10.5.0: never launch the cold app window directly at an arbitrary site.
@@ -9793,16 +9792,16 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
 
 def record_embedded_native_recovery(attempted=True, viewport=None, succeeded=None):
     """Record v5.04 native-presentation retry diagnostics."""
-    if not _EDGE_SESSION:
+    if not _CHROMIUM_SESSION:
         return False
-    _EDGE_SESSION["native_resize_recovery_attempted"] = bool(attempted)
+    _CHROMIUM_SESSION["native_resize_recovery_attempted"] = bool(attempted)
     if viewport is not None:
         try:
-            _EDGE_SESSION["native_resize_recovery_viewport"] = (int(viewport[0]), int(viewport[1]))
+            _CHROMIUM_SESSION["native_resize_recovery_viewport"] = (int(viewport[0]), int(viewport[1]))
         except Exception:
-            _EDGE_SESSION["native_resize_recovery_viewport"] = viewport
+            _CHROMIUM_SESSION["native_resize_recovery_viewport"] = viewport
     if succeeded is not None:
-        _EDGE_SESSION["native_resize_recovery_succeeded"] = bool(succeeded)
+        _CHROMIUM_SESSION["native_resize_recovery_succeeded"] = bool(succeeded)
     return True
 
 
@@ -9815,7 +9814,7 @@ def sync_embedded_chromium_native_geometry(width: int, height: int):
     A stalled compositor can otherwise keep the child at the old pre-fullscreen
     size even though the Tekzite host has already grown.
     """
-    session = _EDGE_SESSION
+    session = _CHROMIUM_SESSION
     if os.name != "nt" or not session:
         return False
     owner = _hwnd_int(session.get("embedded_hwnd") or session.get("content_hwnd") or 0)
@@ -9910,32 +9909,32 @@ def sync_embedded_chromium_native_geometry(width: int, height: int):
         return False
 
 def resize_embedded_chromium(width: int, height: int):
-    if os.name != "nt" or not _EDGE_SESSION:
+    if os.name != "nt" or not _CHROMIUM_SESSION:
         return False
-    if _EDGE_SESSION.get("presentation_mode") == "software":
+    if _CHROMIUM_SESSION.get("presentation_mode") == "software":
         return False
-    hwnd = _EDGE_SESSION.get("embedded_hwnd")
+    hwnd = _CHROMIUM_SESSION.get("embedded_hwnd")
     if not hwnd:
         return False
     try:
         user32 = _typed_user32()
         if not user32.IsWindow(_as_hwnd(hwnd)):
             return False
-        parent_hwnd = _EDGE_SESSION.get("embedded_parent")
+        parent_hwnd = _CHROMIUM_SESSION.get("embedded_parent")
         width, height = _native_client_size(parent_hwnd, width, height)
-        _EDGE_SESSION["embedded_parent_client_size"] = (int(width), int(height))
-        if _EDGE_SESSION.get("native_embed_mode") in {"top-level-overlay", "detached-top-level-overlay", "detached-unclipped-top-level-overlay", "dwm-thumbnail"}:
-            force_full = bool(_EDGE_SESSION.pop("dwm_force_full_recrop", False))
-            if _EDGE_SESSION.get("native_embed_mode") == "dwm-thumbnail" and not force_full:
-                fast_result = _resize_existing_dwm_thumbnail_fast(_EDGE_SESSION, width, height)
+        _CHROMIUM_SESSION["embedded_parent_client_size"] = (int(width), int(height))
+        if _CHROMIUM_SESSION.get("native_embed_mode") in {"top-level-overlay", "detached-top-level-overlay", "detached-unclipped-top-level-overlay", "dwm-thumbnail"}:
+            force_full = bool(_CHROMIUM_SESSION.pop("dwm_force_full_recrop", False))
+            if _CHROMIUM_SESSION.get("native_embed_mode") == "dwm-thumbnail" and not force_full:
+                fast_result = _resize_existing_dwm_thumbnail_fast(_CHROMIUM_SESSION, width, height)
                 if fast_result is True:
                     return True
-            return _position_native_chromium_overlay(_EDGE_SESSION, width, height)
+            return _position_native_chromium_overlay(_CHROMIUM_SESSION, width, height)
         SWP_NOZORDER = 0x0004
         SWP_NOACTIVATE = 0x0010
         SWP_SHOWWINDOW = 0x0040
-        crop_left, crop_top, crop_right, crop_bottom = _embedded_chrome_crop(_EDGE_SESSION)
-        _EDGE_SESSION["chrome_crop"] = (crop_left, crop_top, crop_right, crop_bottom)
+        crop_left, crop_top, crop_right, crop_bottom = _embedded_chrome_crop(_CHROMIUM_SESSION)
+        _CHROMIUM_SESSION["chrome_crop"] = (crop_left, crop_top, crop_right, crop_bottom)
         user32.SetWindowPos(
             _as_hwnd(hwnd), _as_hwnd(0),
             -int(crop_left), -int(crop_top),
@@ -9946,17 +9945,17 @@ def resize_embedded_chromium(width: int, height: int):
 
         # v4.73: never swap Chrome_WidgetWin owners during resize. Refresh only
         # the live page RenderWidgetHost descendant of the already embedded owner.
-        _refresh_render_host_within_owner(_EDGE_SESSION, width, height)
+        _refresh_render_host_within_owner(_CHROMIUM_SESSION, width, height)
 
         # v4.69: re-measure after the owner has its provisional live size.
         # This catches Chromium switching from app chrome to a normal toolbar
         # during startup/activation without ever exposing that toolbar in
         # Tekzite.  A second pass converges on the RenderWidgetHost inset.
-        post_crop = _live_render_host_crop(_EDGE_SESSION)
+        post_crop = _live_render_host_crop(_CHROMIUM_SESSION)
         if post_crop is not None and tuple(post_crop) != (crop_left, crop_top, crop_right, crop_bottom):
             crop_left, crop_top, crop_right, crop_bottom = map(int, post_crop)
-            _EDGE_SESSION["chrome_crop"] = (crop_left, crop_top, crop_right, crop_bottom)
-            _EDGE_SESSION["post_resize_crop_corrected"] = True
+            _CHROMIUM_SESSION["chrome_crop"] = (crop_left, crop_top, crop_right, crop_bottom)
+            _CHROMIUM_SESSION["post_resize_crop_corrected"] = True
             user32.SetWindowPos(
                 _as_hwnd(hwnd), _as_hwnd(0),
                 -crop_left, -crop_top,
@@ -9965,10 +9964,10 @@ def resize_embedded_chromium(width: int, height: int):
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             )
         else:
-            _EDGE_SESSION["post_resize_crop_corrected"] = False
+            _CHROMIUM_SESSION["post_resize_crop_corrected"] = False
 
-        _EDGE_SESSION["embedded_size"] = (max(1, int(width)), max(1, int(height)))
-        _show_embedded_render_host(_EDGE_SESSION, width, height)
+        _CHROMIUM_SESSION["embedded_size"] = (max(1, int(width)), max(1, int(height)))
+        _show_embedded_render_host(_CHROMIUM_SESSION, width, height)
         return True
     except Exception:
         return False
@@ -9986,7 +9985,7 @@ def _pulse_tekzite_top_level_activation(session=None):
     activation state, force a frame/child redraw, wait for DWM to consume it,
     and leave the root active.  This never changes the root geometry.
     """
-    session = session or _EDGE_SESSION
+    session = session or _CHROMIUM_SESSION
     if os.name != "nt" or not session or session.get("presentation_mode") == "software":
         return False
     parent = _hwnd_int(session.get("embedded_parent") or 0)
@@ -10087,7 +10086,7 @@ def _reapply_native_content_crop_after_activation(session=None):
     locked, refresh only its live page RenderWidgetHost child, then position the
     owner so that the render-host rectangle maps exactly onto Tekzite's host.
     """
-    session = session or _EDGE_SESSION
+    session = session or _CHROMIUM_SESSION
     if os.name != "nt" or not session or session.get("presentation_mode") == "software":
         return False
     owner = _hwnd_int(session.get("embedded_hwnd") or 0)
@@ -10191,12 +10190,12 @@ def wake_embedded_chromium():
     without user interaction: activate Tekzite's root HWND, refresh the clipped
     Chromium geometry, invalidate both host and child, and then focus the page.
     """
-    if os.name != "nt" or not _EDGE_SESSION:
+    if os.name != "nt" or not _CHROMIUM_SESSION:
         return False
-    if _EDGE_SESSION.get("presentation_mode") == "software":
+    if _CHROMIUM_SESSION.get("presentation_mode") == "software":
         return False
-    hwnd = _EDGE_SESSION.get("embedded_hwnd")
-    parent = _EDGE_SESSION.get("embedded_parent")
+    hwnd = _CHROMIUM_SESSION.get("embedded_hwnd")
+    parent = _CHROMIUM_SESSION.get("embedded_parent")
     if not hwnd or not parent:
         return False
     try:
@@ -10204,7 +10203,7 @@ def wake_embedded_chromium():
         from ctypes import wintypes
 
         user32 = _typed_user32()
-        _apply_tekzite_chromium_branding(_EDGE_SESSION)
+        _apply_tekzite_chromium_branding(_CHROMIUM_SESSION)
         target = _as_hwnd(hwnd)
         host = _as_hwnd(parent)
         if not user32.IsWindow(target) or not user32.IsWindow(host):
@@ -10231,11 +10230,11 @@ def wake_embedded_chromium():
 
         # v4.74: reproduce the non-client activation transition that a manual
         # title-bar click was still required to generate on some systems.
-        _pulse_tekzite_top_level_activation(_EDGE_SESSION)
+        _pulse_tekzite_top_level_activation(_CHROMIUM_SESSION)
 
         # Re-applying the same size generates the native size/position work
         # Chromium normally receives after a title-bar activation.
-        size = _EDGE_SESSION.get("embedded_size") or (1, 1)
+        size = _CHROMIUM_SESSION.get("embedded_size") or (1, 1)
         try:
             resize_embedded_chromium(max(1, int(size[0])), max(1, int(size[1])))
         except Exception:
@@ -10244,7 +10243,7 @@ def wake_embedded_chromium():
         # v4.75: activation itself can make Chromium expose/re-size normal
         # browser chrome.  Re-measure and reapply the content crop *after* the
         # activation pulse so only page pixels remain visible.
-        _reapply_native_content_crop_after_activation(_EDGE_SESSION)
+        _reapply_native_content_crop_after_activation(_CHROMIUM_SESSION)
 
         user32.ShowWindow(target, SW_SHOW)
         user32.BringWindowToTop(target)
@@ -10263,13 +10262,13 @@ def wake_embedded_chromium():
         try:
             dwmapi = ctypes.windll.dwmapi
             dwmapi.DwmFlush()
-            _EDGE_SESSION["wake_dwm_flush"] = True
+            _CHROMIUM_SESSION["wake_dwm_flush"] = True
         except Exception:
-            _EDGE_SESSION["wake_dwm_flush"] = False
+            _CHROMIUM_SESSION["wake_dwm_flush"] = False
 
         # Finish with the existing cross-thread focus bridge.
         focus_embedded_chromium()
-        _EDGE_SESSION["last_wake_hwnd"] = _hwnd_int(hwnd)
+        _CHROMIUM_SESSION["last_wake_hwnd"] = _hwnd_int(hwnd)
         return True
     except Exception:
         return False
@@ -10285,20 +10284,20 @@ def focus_embedded_chromium():
     that sequence explicitly: activate the Tekzite root, temporarily join the
     Tk/root/render input queues, focus the render host, then detach again.
     """
-    if os.name != "nt" or not _EDGE_SESSION:
+    if os.name != "nt" or not _CHROMIUM_SESSION:
         return False
-    if _EDGE_SESSION.get("presentation_mode") == "software":
+    if _CHROMIUM_SESSION.get("presentation_mode") == "software":
         return False
-    owner_hwnd = _hwnd_int(_EDGE_SESSION.get("embedded_hwnd") or 0)
+    owner_hwnd = _hwnd_int(_CHROMIUM_SESSION.get("embedded_hwnd") or 0)
     # v4.89: navigation/login can replace Chrome_RenderWidgetHostHWND while
     # keeping the locked compositor owner. Refresh the descendant immediately
     # before every focus handoff so SetFocus never targets a stale/hidden RWH.
     try:
-        _refresh_render_host_within_owner(_EDGE_SESSION)
+        _refresh_render_host_within_owner(_CHROMIUM_SESSION)
     except Exception:
         pass
-    render_hwnd = _hwnd_int(_EDGE_SESSION.get("render_hwnd") or 0)
-    parent_hwnd = _hwnd_int(_EDGE_SESSION.get("embedded_parent") or 0)
+    render_hwnd = _hwnd_int(_CHROMIUM_SESSION.get("render_hwnd") or 0)
+    parent_hwnd = _hwnd_int(_CHROMIUM_SESSION.get("embedded_parent") or 0)
     # Prefer the actual page surface. Fall back to the owner only for older
     # Chromium layouts where a render host could not be discovered.
     focus_hwnd = render_hwnd or owner_hwnd
@@ -10369,18 +10368,18 @@ def focus_embedded_chromium():
             for tid in reversed(attached):
                 user32.AttachThreadInput(current_tid, tid, False)
 
-        _EDGE_SESSION["focus_hwnd"] = int(focus_hwnd)
-        _EDGE_SESSION["focus_target_class"] = "Chrome_RenderWidgetHostHWND" if render_hwnd else "owner-fallback"
-        _EDGE_SESSION["focus_root_activated"] = bool(root)
+        _CHROMIUM_SESSION["focus_hwnd"] = int(focus_hwnd)
+        _CHROMIUM_SESSION["focus_target_class"] = "Chrome_RenderWidgetHostHWND" if render_hwnd else "owner-fallback"
+        _CHROMIUM_SESSION["focus_root_activated"] = bool(root)
         return True
     except Exception as exc:
-        _EDGE_SESSION["focus_error"] = str(exc)
+        _CHROMIUM_SESSION["focus_error"] = str(exc)
         return False
 
 
 def _clear_embedded_chromium_device_metrics(session=None, target_id: str = None, timeout: int = 3):
     """Remove CDP viewport overrides before a tab returns to native HWND mode."""
-    session = session or _EDGE_SESSION
+    session = session or _CHROMIUM_SESSION
     if not session or not session.get("port"):
         return False
     try:
@@ -10411,7 +10410,7 @@ def set_embedded_chromium_presentation(mode: str, target_id: str = None, defer_i
     """
     mode = "software" if str(mode).lower() == "software" else "native"
     if defer_io:
-        session = _EDGE_SESSION
+        session = _CHROMIUM_SESSION
         if session is not None:
             session["presentation_mode"] = mode
             session["presentation_target_id"] = target_id
@@ -10419,7 +10418,7 @@ def set_embedded_chromium_presentation(mode: str, target_id: str = None, defer_i
                 session["device_metrics_clear_deferred"] = True
         return mode
 
-    session = _EDGE_SESSION or _start_persistent_chromium_session()
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session()
     session["presentation_mode"] = mode
     session["presentation_target_id"] = target_id
     if mode == "native":
@@ -10526,7 +10525,7 @@ def check_embedded_chromium_zoom(percent: int = 100, target_id: str = None, time
     v7.0 monitoring lives in the local extension itself. chrome.tabs.onZoomChange
     observes the real browser zoom and immediately restores the Preferences value.
     """
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     try:
         percent = max(50, min(300, int(percent)))
     except Exception:
@@ -10552,7 +10551,7 @@ def set_embedded_chromium_zoom(percent: int = 100, target_id: str = None, timeou
     extension applies chrome.tabs.setZoom() and continuously enforces the same
     value through Chromium's own tab lifecycle and zoom-change events.
     """
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
         return False
     try:
@@ -10664,7 +10663,7 @@ def capture_embedded_chromium_frame(timeout: int = 4, target_id: str = None, vie
     rebuilt and the contract reapplied before retrying, rather than displaying
     an oversized frame and making the page appear to zoom.
     """
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
         raise RuntimeError("Chromium helper is not running")
     session["presentation_mode"] = "software"
@@ -10722,7 +10721,7 @@ def capture_embedded_chromium_frame(timeout: int = 4, target_id: str = None, vie
 
 def record_embedded_surface_probe(blank, span=None, dominant=None, attempt=1, fallback=False, error=None):
     """Record final on-screen native presentation health for Full Debug."""
-    session = _EDGE_SESSION
+    session = _CHROMIUM_SESSION
     if not session:
         return False
     session["visible_surface_probe_attempt"] = int(attempt or 0)
@@ -10743,7 +10742,7 @@ def validate_and_recover_embedded_chromium_frame(target_id: str = None, timeout:
     the existing native wake/compositor-prime path instead of leaving Tekzite
     showing the dead surface. Normal dark pages and popup menus are untouched.
     """
-    session = _EDGE_SESSION
+    session = _CHROMIUM_SESSION
     if not session or session.get("presentation_mode") == "software":
         return False
     try:
@@ -10788,7 +10787,7 @@ def validate_and_recover_embedded_chromium_frame(target_id: str = None, timeout:
 
 def get_embedded_chromium_dwm_input_offset():
     """Return live correction from the visible DWM crop to CDP page origin."""
-    session = _EDGE_SESSION or {}
+    session = _CHROMIUM_SESSION or {}
     try:
         x, y = session.get("dwm_input_offset") or (0, 0)
         return float(x), float(y)
@@ -10907,7 +10906,7 @@ def _refresh_dwm_input_metrics(session, target_id=None, timeout: float = 1.0):
 
 def refresh_embedded_chromium_dwm_input_metrics(target_id=None, timeout: float = 0.8):
     """Refresh the DWM native-pixel -> CSS hit-test contract after a viewport jump."""
-    session = _EDGE_SESSION or {}
+    session = _CHROMIUM_SESSION or {}
     if not session or session.get("presentation_mode") == "software":
         return get_embedded_chromium_input_scale()
     try:
@@ -10922,7 +10921,7 @@ def refresh_embedded_chromium_dwm_input_metrics(target_id=None, timeout: float =
 
 def get_embedded_chromium_input_scale():
     """Return cached native-DWM-pixel -> CSS-pixel scale for pointer input."""
-    session = _EDGE_SESSION or {}
+    session = _CHROMIUM_SESSION or {}
     try:
         sx = float(session.get("dwm_input_css_scale_x") or 0.0)
         sy = float(session.get("dwm_input_css_scale_y") or 0.0)
@@ -10971,7 +10970,7 @@ def dispatch_embedded_chromium_mouse(event_type: str, x: float, y: float, *,
     clickCount=0, actual presses/releases provide their real single/double/triple
     count, and wheel modifier bits survive the DWM/Tk bridge.
     """
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
         return False
     params = {"type": str(event_type), "x": float(x), "y": float(y)}
@@ -10997,7 +10996,7 @@ def get_embedded_chromium_cursor(x: float, y: float, *, target_id: str = None, t
     cannot inherit Chromium's native cursor automatically. This tiny CDP probe
     mirrors the page cursor without activating or moving Chromium's HWND.
     """
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
         return "auto"
     expr = f"""(() => {{
@@ -11023,7 +11022,7 @@ def get_embedded_chromium_cursor(x: float, y: float, *, target_id: str = None, t
 
 def get_embedded_chromium_context(x: float, y: float, *, target_id: str = None, timeout: int = 3):
     """Return context-menu metadata using the persistent page CDP channel."""
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
         return {}
     expr = f"""(() => {{
@@ -11060,7 +11059,7 @@ def get_embedded_chromium_context(x: float, y: float, *, target_id: str = None, 
 
 def focus_embedded_chromium_point(x: float, y: float, *, target_id: str = None, timeout: int = 3):
     """Focus an editable element at page coordinates without activating Chromium's HWND."""
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
         return False
     expr = f"""(() => {{
@@ -11088,7 +11087,7 @@ def dispatch_embedded_chromium_key(key: str = "", *, text: str = "",
                                    windows_vk: int = 0, code: str = "",
                                    target_id: str = None, timeout: int = 3):
     """Forward keyboard input over the tab's persistent CDP channel."""
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
         return False
     if text and event_type == "insertText":
@@ -11121,7 +11120,7 @@ def get_embedded_chromium_site_info(*, target_id: str = None, timeout: int = 5):
     non-secret attributes only, together with origin-scoped storage usage when
     Chromium exposes it through CDP.
     """
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
         return {}
 
@@ -11230,7 +11229,7 @@ def get_embedded_chromium_site_info(*, target_id: str = None, timeout: int = 5):
 
 def clear_embedded_chromium_site_data(*, target_id: str = None, timeout: int = 5):
     """Clear Chromium data for only the current page origin."""
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get("port"):
         return False
     result = _persistent_page_cdp_call(
@@ -11251,7 +11250,7 @@ def clear_embedded_chromium_site_data(*, target_id: str = None, timeout: int = 5
 
 def get_embedded_chromium_page_state(*, target_id: str = None, include_favicon: bool = False, timeout: int = 3):
     """Return lightweight live page metadata for Tekzite's browser chrome."""
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get('port'):
         return {}
     expr = r'''(() => {
@@ -11300,7 +11299,7 @@ def get_embedded_chromium_page_state(*, target_id: str = None, include_favicon: 
 
 def find_embedded_chromium_text(query: str, *, target_id: str = None, backwards: bool = False, timeout: int = 3):
     """Find/select the next occurrence of text using Chromium's live DOM."""
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     if not session or not session.get('port'):
         return False
     import json as _json
@@ -11451,9 +11450,9 @@ def close_embedded_chromium(clear_profile=False, graceful=False, timeout=6.0):
     callers keep the historical force-close behavior unless they explicitly
     request ``graceful=True``.
     """
-    with _EDGE_SESSION_LOCK:
-        if graceful and _EDGE_SESSION:
-            session = _EDGE_SESSION
+    with _CHROMIUM_SESSION_LOCK:
+        if graceful and _CHROMIUM_SESSION:
+            session = _CHROMIUM_SESSION
             profile = str(session.get("profile") or "")
             if _close_embedded_chromium_cleanly_for_auth_unlocked(timeout=timeout):
                 if clear_profile and profile:
@@ -11474,9 +11473,9 @@ def close_embedded_chromium(clear_profile=False, graceful=False, timeout=6.0):
 
 def _close_embedded_chromium_unlocked(clear_profile=False):
     """Shut down Chromium; optionally erase all compatibility profile data."""
-    global _EDGE_SESSION
-    session = _EDGE_SESSION
-    _EDGE_SESSION = None
+    global _CHROMIUM_SESSION
+    session = _CHROMIUM_SESSION
+    _CHROMIUM_SESSION = None
     if session:
         session_loopback_port = session.get("port")
         thumb = session.get("dwm_thumbnail_handle")
@@ -11706,7 +11705,7 @@ def set_embedded_chromium_permission(origin: str, permission: str, setting: str,
     }
     if permission not in allowed:
         raise ValueError('Unsupported permission')
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     _browser_cdp_call(
         session, 'Browser.setPermission',
         {'permission': {'name': permission}, 'setting': setting, 'origin': origin},
@@ -11717,7 +11716,7 @@ def set_embedded_chromium_permission(origin: str, permission: str, setting: str,
 
 def get_embedded_chromium_process_info(*, timeout: int = 4):
     """Return Chromium process CPU metadata for Tekzite's Task Manager."""
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     result = _browser_cdp_call(session, 'SystemInfo.getProcessInfo', timeout=timeout)
     rows = result.get('processInfo', []) if isinstance(result, dict) else []
     return [row for row in rows if isinstance(row, dict)]
@@ -11727,7 +11726,7 @@ def get_embedded_chromium_target_metrics(target_id: str, *, timeout: int = 3):
     """Return lightweight renderer metrics for one live Tekzite tab target."""
     if not target_id:
         return {}
-    session = _EDGE_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(timeout=min(timeout, 8))
     try:
         _persistent_page_cdp_call(
             session, 'Performance.enable', {}, target_id=target_id,

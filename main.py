@@ -11758,7 +11758,7 @@ class BrowserApp(BrowserFeatures):
         if not self.preferences.get("omnibox_suggestions_enabled", True):
             self._hide_omnibox_suggestions()
         from engine import features
-        if features.net._EDGE_SESSION:
+        if features.net._CHROMIUM_SESSION:
             self._feature_async(features.configure, lambda _: None)
 
         if hasattr(self, "status_bar"):

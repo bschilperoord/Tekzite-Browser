@@ -30,7 +30,7 @@ def test_network_connections_ownership_rejects_foreign_descendants(monkeypatch):
 
     monkeypatch.setattr(net.os, "getpid", lambda: 100)
     monkeypatch.setattr(net, "_NETWORK_ENGINE", {"process": Proc(200)})
-    monkeypatch.setattr(net, "_EDGE_SESSION", {"process": Proc(300)})
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", {"process": Proc(300)})
 
     owned, _ = net._windows_owned_processes(processes, extra_roots=[500, 600])
 

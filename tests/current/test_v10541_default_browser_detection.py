@@ -57,7 +57,7 @@ def test_detects_tekzite_as_default_when_http_and_https_userchoice_match():
 def test_detects_partial_and_non_default_windows_associations():
     reg = FakeWinreg({
         _url_path("http"): "TekziteBrowserURL",
-        _url_path("https"): "MSEdgeHTM",
+        _url_path("https"): "OtherBrowserHTML",
     })
     status = main._tekzite_default_browser_status(winreg_module=reg)
     assert status["is_default"] is False

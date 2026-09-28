@@ -53,7 +53,7 @@ class EmbedOwnerRecoveryTests(unittest.TestCase):
         app._closing = False
         app._executor = Mock()
         session = {'process': Mock()}
-        with patch.object(net, '_EDGE_SESSION', session):
+        with patch.object(net, '_CHROMIUM_SESSION', session):
             app._start_optional_services({'process': Mock()})
             app._executor.submit.assert_not_called()
             app._start_optional_services(session)
@@ -65,7 +65,7 @@ class EmbedOwnerRecoveryTests(unittest.TestCase):
         app._closing = True
         app._executor = Mock()
         session = {'process': Mock()}
-        with patch.object(net, '_EDGE_SESSION', session):
+        with patch.object(net, '_CHROMIUM_SESSION', session):
             app._start_optional_services(session)
         app._executor.submit.assert_not_called()
 

@@ -13,8 +13,8 @@ def test_release_is_v1011():
 
 def test_chromium_bootstrap_is_serialized():
     source = Path(net.__file__).read_text(encoding='utf-8')
-    assert '_EDGE_SESSION_LOCK = threading.RLock()' in source
-    assert 'with _EDGE_SESSION_LOCK:' in source
+    assert '_CHROMIUM_SESSION_LOCK = threading.RLock()' in source
+    assert 'with _CHROMIUM_SESSION_LOCK:' in source
     with patch.object(net, '_start_persistent_chromium_session_unlocked', return_value={'ok': True}) as inner:
         result = net._start_persistent_chromium_session(timeout=3, launch_geometry=(1, 2, 3, 4), launch_url='https://example.test')
     assert result == {'ok': True}
