@@ -47,8 +47,10 @@ def test_private_profile_override(tmp_path, monkeypatch):
 
 def test_private_mode_does_not_checkpoint_history_or_session():
     assert "if self._closing or getattr(self, '_private_mode', False)" in FEATURES
-    assert "getattr(self, '_private_mode', False) or self.preferences.get('privacy_lockdown', False)" in FEATURES
-    assert 'getattr(self, "_private_mode", False) or self.preferences.get("privacy_lockdown", False)' in MAIN
+    assert "if getattr(self, '_private_mode', False):" in FEATURES
+    assert 'if getattr(self, "_private_mode", False):' in MAIN
+    checkpoint = FEATURES[FEATURES.index("def _checkpoint_features"):FEATURES.index("def _record_page_visit")]
+    assert "privacy_lockdown" not in checkpoint
 
 
 def test_site_privacy_cdp_is_origin_scoped():
