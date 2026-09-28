@@ -12130,107 +12130,245 @@ def _normalize_javascript_dialog_event(payload, target_id):
     }
 
 
+
+def _record_javascript_dialog_browser_event(channel, payload):
+    """Capture dialog events arriving on Tekzite's dedicated browser CDP socket."""
+    if not isinstance(channel, dict) or not isinstance(payload, dict):
+        return None
+    session_id = str(channel.get('session_id') or '')
+    event_session = str(payload.get('sessionId') or '')
+    if session_id and event_session and event_session != session_id:
+        return None
+
+    method = str(payload.get('method') or '')
+    if method == 'Page.javascriptDialogOpening':
+        event = _normalize_javascript_dialog_event(
+            payload, channel.get('target_id') or ''
+        )
+        if event is None:
+            return None
+        queue = channel.setdefault('events', [])
+        queue.append(event)
+        if len(queue) > 8:
+            del queue[:-8]
+        channel['dialog_open'] = True
+        channel['last_event_at'] = time.monotonic()
+        return event
+
+    if method == 'Page.javascriptDialogClosed':
+        channel['dialog_open'] = False
+        params = payload.get('params') or {}
+        channel['last_result'] = bool(params.get('result'))
+        channel['last_user_input'] = str(params.get('userInput') or '')[:4096]
+        channel['last_event_at'] = time.monotonic()
+    return None
+
+
+def _javascript_dialog_browser_call(
+        channel, method, params=None, *, session_id=None, timeout=1.0):
+    """Send one CDP command on the dedicated dialog browser socket.
+
+    Browser-level Target attachment is used here instead of another direct page
+    websocket. Chromium-owned JavaScript dialogs live in browser UI, so this
+    flattened Target session is the authoritative event path.
+    """
+    if not isinstance(channel, dict):
+        raise RuntimeError('JavaScript dialog channel unavailable')
+    ws = channel.get('ws')
+    if ws is None or channel.get('closed'):
+        raise RuntimeError('JavaScript dialog channel is closed')
+
+    with channel['lock']:
+        message_id = int(channel.get('next_message_id', 5000))
+        channel['next_message_id'] = message_id + 1
+        outbound = {
+            'id': message_id,
+            'method': str(method),
+            'params': dict(params or {}),
+        }
+        sid = str(session_id or '')
+        if sid:
+            outbound['sessionId'] = sid
+        ws.settimeout(max(0.05, float(timeout)))
+        ws.send(json.dumps(outbound))
+        deadline = time.monotonic() + max(0.05, float(timeout))
+        while time.monotonic() < deadline:
+            raw = ws.recv()
+            payload = json.loads(raw)
+            if payload.get('id') == message_id:
+                if 'error' in payload:
+                    raise RuntimeError(
+                        f"CDP {method} failed: {payload['error']}"
+                    )
+                channel['calls'] = int(channel.get('calls', 0)) + 1
+                return payload.get('result', {})
+            _record_javascript_dialog_browser_event(channel, payload)
+        raise RuntimeError(f'Timed out waiting for CDP {method}')
+
+
+def _close_javascript_dialog_browser_channel(channel):
+    if not isinstance(channel, dict):
+        return
+    channel['closed'] = True
+    try:
+        ws = channel.get('ws')
+        if ws is not None:
+            ws.close()
+    except Exception:
+        pass
+
+
+def _get_javascript_dialog_browser_channel(
+        session, target_id: str, *, timeout: float = 1.0):
+    """Return one browser-level flattened CDP session for a page target."""
+    target_id = str(target_id or '').strip()
+    if not session or not target_id:
+        raise RuntimeError('A live Chromium target is required')
+
+    channels = session.setdefault('javascript_dialog_browser_channels', {})
+    cached = channels.get(target_id)
+    if (isinstance(cached, dict) and cached.get('ws') is not None
+            and cached.get('session_id') and not cached.get('closed')):
+        return cached
+
+    if isinstance(cached, dict):
+        _close_javascript_dialog_browser_channel(cached)
+        channels.pop(target_id, None)
+
+    ws_url = str(session.get('browser_ws_url') or '')
+    if not ws_url:
+        version = _devtools_json(
+            session['port'], '/json/version',
+            timeout=min(0.5, max(0.1, float(timeout)))
+        )
+        ws_url = str(version.get('webSocketDebuggerUrl') or '')
+        if ws_url:
+            session['browser_ws_url'] = ws_url
+    if not ws_url:
+        raise RuntimeError('Chromium browser DevTools websocket unavailable')
+
+    channel = {
+        'target_id': target_id,
+        'ws': _open_devtools_websocket(ws_url, timeout=max(0.1, float(timeout))),
+        'lock': threading.RLock(),
+        'next_message_id': 5000,
+        'session_id': '',
+        'events': [],
+        'dialog_open': False,
+        'closed': False,
+        'calls': 0,
+        'created_at': time.monotonic(),
+    }
+    try:
+        attached = _javascript_dialog_browser_call(
+            channel,
+            'Target.attachToTarget',
+            {'targetId': target_id, 'flatten': True},
+            timeout=max(0.1, float(timeout)),
+        )
+        session_id = str((attached or {}).get('sessionId') or '')
+        if not session_id:
+            raise RuntimeError('Chromium did not attach a dialog Target session')
+        channel['session_id'] = session_id
+        _javascript_dialog_browser_call(
+            channel, 'Page.enable', {},
+            session_id=session_id, timeout=max(0.1, float(timeout)),
+        )
+        channel['page_enabled'] = True
+        channels[target_id] = channel
+        return channel
+    except Exception:
+        _close_javascript_dialog_browser_channel(channel)
+        raise
+
+
 def ensure_embedded_chromium_javascript_dialog_monitor(
         target_id: str, *, timeout: float = 1.0):
-    """Enable Page dialog events on a dedicated per-target CDP lane."""
+    """Arm browser-UI JavaScript dialog events for one Tekzite page target."""
     target_id = str(target_id or '').strip()
     if not target_id:
         return False
     session = _CHROMIUM_SESSION or _start_persistent_chromium_session(
         timeout=min(max(float(timeout), 0.1), 8.0)
     )
-    channel = _get_persistent_page_cdp_channel(
-        session, target_id=target_id, timeout=max(0.1, float(timeout)),
-        purpose='dialog',
+    channel = _get_javascript_dialog_browser_channel(
+        session, target_id, timeout=max(0.1, float(timeout))
     )
-    if 'Page' in channel.get('enabled_domains', set()):
-        return True
-    _persistent_page_cdp_call(
-        session, 'Page.enable', {}, target_id=target_id,
-        timeout=max(0.1, float(timeout)), purpose='dialog',
-    )
-    channel = _get_persistent_page_cdp_channel(
-        session, target_id=target_id, timeout=max(0.1, float(timeout)),
-        purpose='dialog',
-    )
-    channel.setdefault('enabled_domains', set()).add('Page')
-    return True
+    return bool(channel.get('session_id') and channel.get('page_enabled'))
 
 
 def poll_embedded_chromium_javascript_dialogs(
         target_id: str, *, timeout: float = 0.08):
-    """Return at most one pending JavaScript dialog without blocking Tk."""
+    """Return one Chromium-owned JavaScript dialog for Tekzite's Tk shell."""
     target_id = str(target_id or '').strip()
     if not target_id:
         return []
     session = _CHROMIUM_SESSION
     if not session:
         return []
-    ensure_embedded_chromium_javascript_dialog_monitor(
-        target_id, timeout=max(0.1, min(float(timeout) + 0.12, 0.5))
-    )
-    channel = _get_persistent_page_cdp_channel(
-        session, target_id=target_id, timeout=max(0.1, float(timeout)),
-        purpose='dialog',
-    )
-    queue = channel.setdefault('javascript_dialog_events', [])
+
+    try:
+        channel = _get_javascript_dialog_browser_channel(
+            session, target_id,
+            timeout=max(0.1, min(float(timeout) + 0.12, 0.5)),
+        )
+    except Exception:
+        return []
+
+    queue = channel.setdefault('events', [])
     if queue:
         return [queue.pop(0)]
 
     deadline = time.monotonic() + max(0.01, min(float(timeout), 0.25))
-    with channel['lock']:
-        ws = channel.get('ws')
-        if ws is None or channel.get('closed'):
-            return []
-        while time.monotonic() < deadline:
-            try:
-                ws.settimeout(max(0.005, deadline - time.monotonic()))
-                raw = ws.recv()
-            except socket.timeout:
-                break
-            except Exception:
-                tid = str(channel.get('target_id') or target_id)
-                _close_page_cdp_channel(channel)
-                (session.get('page_cdp_channels') or {}).pop(f'{tid}:dialog', None)
-                break
-            try:
+    try:
+        with channel['lock']:
+            ws = channel.get('ws')
+            if ws is None or channel.get('closed'):
+                return []
+            while time.monotonic() < deadline:
+                try:
+                    ws.settimeout(max(0.005, deadline - time.monotonic()))
+                    raw = ws.recv()
+                except socket.timeout:
+                    break
                 payload = json.loads(raw)
-            except Exception:
-                continue
-            event = _normalize_javascript_dialog_event(
-                payload, channel.get('target_id') or target_id
-            )
-            if event is not None:
-                channel['javascript_dialog_open'] = True
-                return [event]
-            if isinstance(payload, dict) and payload.get('method') == 'Page.javascriptDialogClosed':
-                channel['javascript_dialog_open'] = False
-                channel['javascript_dialog_last_result'] = bool(
-                    ((payload.get('params') or {}).get('result'))
-                )
+                event = _record_javascript_dialog_browser_event(channel, payload)
+                if event is not None:
+                    queued = channel.setdefault('events', [])
+                    if queued and queued[0] is event:
+                        queued.pop(0)
+                    return [event]
+    except Exception:
+        _close_javascript_dialog_browser_channel(channel)
+        (session.get('javascript_dialog_browser_channels') or {}).pop(
+            target_id, None
+        )
     return []
 
 
 def resolve_embedded_chromium_javascript_dialog(
         target_id: str, accept: bool, prompt_text: str = '', *, timeout: float = 1.0):
-    """Answer Chromium's currently open JavaScript dialog for one target."""
+    """Answer Chromium's browser-owned JavaScript dialog through its Target session."""
     target_id = str(target_id or '').strip()
     if not target_id:
         return False
     session = _CHROMIUM_SESSION
     if not session:
         return False
+
+    channel = _get_javascript_dialog_browser_channel(
+        session, target_id, timeout=max(0.1, float(timeout))
+    )
     params = {'accept': bool(accept)}
     if prompt_text is not None:
         params['promptText'] = str(prompt_text)[:4096]
-    _persistent_page_cdp_call(
-        session, 'Page.handleJavaScriptDialog', params,
-        target_id=target_id, timeout=max(0.1, float(timeout)), purpose='dialog',
+    _javascript_dialog_browser_call(
+        channel, 'Page.handleJavaScriptDialog', params,
+        session_id=str(channel.get('session_id') or ''),
+        timeout=max(0.1, float(timeout)),
     )
-    channel = (session.get('page_cdp_channels') or {}).get(f'{target_id}:dialog')
-    if isinstance(channel, dict):
-        channel['javascript_dialog_open'] = False
-        channel.setdefault('javascript_dialog_events', []).clear()
+    channel['dialog_open'] = False
+    channel.setdefault('events', []).clear()
     return True
 
 
