@@ -1,3 +1,12 @@
+# v10.5.101 - Remove Microsoft Edge backend remnants
+
+- Renames the old internal _EDGE_SESSION and _EDGE_SESSION_LOCK symbols to Chromium-specific names across the active browser code.
+- Renames the persistent profile helper from _persistent_edge_profile_dir to _persistent_chromium_profile_dir.
+- Removes EdgeFirstRunExperience and msEdgeSidebarV2 from Chromium launch flags.
+- Removes the Microsoft Edge-specific backend wording from Chromium startup errors.
+- Replaces Edge-specific default-browser test fixtures with generic non-Tekzite browser fixtures.
+- Adds regression coverage preventing Edge-specific session/profile identifiers and launch flags from returning.
+
 # v10.5.100 - Search engine picker
 
 - Adds a proper Search engine selector to Customize Tekzite -> Behavior.
