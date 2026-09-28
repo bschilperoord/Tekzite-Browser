@@ -1,0 +1,112 @@
+name: One-shot remove Edge legacy code
+
+on:
+  push:
+    branches: [dev/v10.5.101-remove-edge-code]
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Remove Edge-specific backend remnants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path(".")
+          code_files = [
+              Path("engine/net.py"),
+              Path("main.py"),
+              Path("engine/features.py"),
+              Path("browser_features.py"),
+              Path("ultraspeed_launcher.py"),
+          ]
+          test_files = list(Path("tests/current").glob("*.py"))
+
+          for path in code_files + test_files:
+              if not path.exists():
+                  continue
+              text = path.read_bytes().decode("utf-8")
+              text = text.replace("_EDGE_SESSION", "_CHROMIUM_SESSION")
+              text = text.replace("_persistent_edge_profile_dir", "_persistent_chromium_profile_dir")
+              if path == Path("engine/net.py"):
+                  text = text.replace("edge_state = _CHROMIUM_SESSION or {}", "chromium_state = _CHROMIUM_SESSION or {}")
+                  text = text.replace("edge_state.get(", "chromium_state.get(")
+                  text = text.replace(
+                      "--disable-features=EdgeFirstRunExperience,msEdgeSidebarV2,",
+                      "--disable-features=",
+                  )
+                  text = text.replace(
+                      '"or place chromium.exe beside Tekzite. Microsoft Edge is intentionally "\n'
+                      '        "not used as Tekzite\'s browser backend."',
+                      '"or place chromium.exe beside Tekzite."',
+                  )
+              if path.name in {
+                  "test_v10542_default_browser_effective_handler.py",
+                  "test_v10541_default_browser_detection.py",
+              }:
+                  text = text.replace("MSEdgeHTM", "OtherBrowserHTML")
+                  text = text.replace("msedge.exe", "other-browser.exe")
+                  text = text.replace(
+                      "Microsoft\\\\Edge\\\\Application\\\\other-browser.exe",
+                      "Other Browser\\\\other-browser.exe",
+                  )
+              path.write_bytes(text.encode("utf-8"))
+
+          regression = Path("tests/current/test_v105101_remove_edge_code.py")
+          regression.write_text(
+              '''from pathlib import Path
+
+          ROOT = Path(__file__).resolve().parents[2]
+          NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
+          MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
+          FEATURES = (ROOT / "engine" / "features.py").read_text(encoding="utf-8")
+          BROWSER_FEATURES = (ROOT / "browser_features.py").read_text(encoding="utf-8")
+          LAUNCHER = (ROOT / "ultraspeed_launcher.py").read_text(encoding="utf-8")
+
+
+          def test_chromium_session_names_have_no_legacy_edge_identity():
+              legacy_session = "_ED" + "GE_SESSION"
+              legacy_profile = "_persistent_" + "edge_profile_dir"
+              for source in (NET, MAIN, FEATURES, BROWSER_FEATURES, LAUNCHER):
+                  assert legacy_session not in source
+                  assert legacy_profile not in source
+
+
+          def test_chromium_launch_flags_have_no_edge_only_features():
+              edge_first_run = "EdgeFirstRun" + "Experience"
+              edge_sidebar = "ms" + "EdgeSidebarV2"
+              assert edge_first_run not in NET
+              assert edge_sidebar not in NET
+
+
+          def test_chromium_session_names_are_explicit():
+              assert "_CHROMIUM_SESSION = None" in NET
+              assert "_CHROMIUM_SESSION_LOCK = threading.RLock()" in NET
+              assert "def _persistent_chromium_profile_dir" in NET
+          '''.replace("\n          ", "\n").lstrip(),
+              encoding="utf-8",
+          )
+          PY
+          rm -f .github/workflows/remove-edge-v105101.yml
+
+      - name: Commit migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Remove Microsoft Edge-specific backend remnants"
+          git push origin HEAD:dev/v10.5.101-remove-edge-code
