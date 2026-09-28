@@ -4994,6 +4994,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
             _CHROMIUM_SESSION = None
             try:
                 _close_persistent_page_cdp_channels(stale_session)
+                _close_javascript_dialog_browser_channels(stale_session)
                 _close_persistent_browser_cdp_channel(stale_session)
             except Exception:
                 pass
@@ -6680,6 +6681,10 @@ def close_embedded_chromium_target(target_id: str):
     # prevents stale per-target lanes from being reused after Chromium closes it.
     try:
         _close_persistent_page_cdp_channels(session, target_id=target_id)
+    except Exception:
+        pass
+    try:
+        _close_javascript_dialog_browser_channels(session, target_id=target_id)
     except Exception:
         pass
 
@@ -11508,6 +11513,7 @@ def _close_embedded_chromium_unlocked(clear_profile=False):
             except Exception:
                 pass
         _close_persistent_page_cdp_channels(session)
+        _close_javascript_dialog_browser_channels(session)
         _close_persistent_browser_cdp_channel(session)
         process = session.get("process")
         if process is not None and process.poll() is None:
@@ -12216,6 +12222,20 @@ def _close_javascript_dialog_browser_channel(channel):
             ws.close()
     except Exception:
         pass
+
+
+def _close_javascript_dialog_browser_channels(session, target_id=None):
+    """Close dedicated browser-level dialog sessions, optionally for one target."""
+    if not session:
+        return
+    channels = session.get('javascript_dialog_browser_channels') or {}
+    if target_id is not None:
+        channel = channels.pop(str(target_id), None)
+        _close_javascript_dialog_browser_channel(channel)
+        return
+    for channel in list(channels.values()):
+        _close_javascript_dialog_browser_channel(channel)
+    channels.clear()
 
 
 def _get_javascript_dialog_browser_channel(
