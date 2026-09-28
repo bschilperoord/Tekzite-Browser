@@ -156,6 +156,23 @@ def main():
         }
         net._CHROMIUM_SESSION = session
 
+        # Full Tekzite already has independent page CDP sessions with Page
+        # enabled for presentation/state work. Reproduce that condition here;
+        # the dialog observer must still receive the browser-owned event.
+        net._persistent_page_cdp_call(
+            session,
+            "Page.enable",
+            {},
+            target_id=target_id,
+            timeout=2.0,
+            purpose="dialog-smoke-competing-page",
+        )
+        competing = (session.get("page_cdp_channels") or {}).get(
+            f"{target_id}:dialog-smoke-competing-page"
+        ) or {}
+        competing.setdefault("enabled_domains", set()).add("Page")
+        print("Competing Page-enabled session:", bool(competing.get("ws")))
+
         armed = net.ensure_embedded_chromium_javascript_dialog_monitor(
             target_id, timeout=2.0
         )
