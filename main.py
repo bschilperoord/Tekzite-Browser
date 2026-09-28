@@ -11534,14 +11534,6 @@ class BrowserApp(BrowserFeatures):
         os.environ["TEKZITE_STRIP_REFERRER"] = "1" if self.preferences.get("strip_referrer", True) else "0"
         os.environ["TEKZITE_HTTPS_FIRST"] = "1" if self.preferences.get("https_first", True) else "0"
         loopback_policy.set_enabled(strict_loopback)
-        if self.preferences.get("privacy_lockdown", False):
-            try:
-                (self._state_directory / "session.json").unlink(missing_ok=True)
-                write_json(self._state_directory / "history.json", [])
-                self.visits = []
-                self._history_dirty = False
-            except Exception:
-                pass
         self._configure_feature_preferences()
         self.customization = _normalized_customization(self.preferences.get("customization"))
         self._apply_customization_runtime()
@@ -12134,8 +12126,8 @@ class BrowserApp(BrowserFeatures):
                 "GPC + DNT ........... SENT",
                 "WebRTC / QUIC / DoH . BLOCKED",
                 f"Python loopback ..... {yes(prefs.get('strict_python_loopback', True))}",
-                f"Clear on exit ....... {yes(prefs.get('clear_browsing_data_on_exit', True) or prefs.get('privacy_lockdown', False))}",
-                f"Profile storage ..... {'TEMPORARY' if prefs.get('privacy_lockdown', False) else 'PERSISTENT'}",
+                f"Clear on exit ....... {yes(prefs.get('clear_browsing_data_on_exit', False))}",
+                f"Profile storage ..... {'TEMPORARY' if getattr(self, '_private_mode', False) else 'PERSISTENT'}",
                 "",
                 "NETWORK",
                 "=" * 46,
@@ -12766,7 +12758,7 @@ class BrowserApp(BrowserFeatures):
         tk.Frame(outer, bg=self.ui["border_soft"], height=1).pack(fill="x", pady=(20, 18))
 
         mode = "Private Window" if self._private_mode else (
-            "Privacy Lockdown" if self.preferences.get("privacy_lockdown", True) else "Standard profile"
+            "Privacy Core" if self.preferences.get("privacy_lockdown", True) else "Standard profile"
         )
         details = (
             "Chromium web rendering.\n\n"
