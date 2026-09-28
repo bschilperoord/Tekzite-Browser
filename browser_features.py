@@ -636,7 +636,7 @@ class BrowserFeatures:
             selected_paths = [row.get('path') for row in entries if row.get('enabled') and row.get('path')]
             os.environ['TEKZITE_USER_EXTENSIONS'] = json.dumps([] if self.preferences.get('privacy_lockdown', True) else selected_paths)
             note.set(
-                'Extension settings saved. Privacy Lockdown keeps user extensions disabled.'
+                'Extension settings saved. Privacy Core keeps user extensions disabled.'
                 if self.preferences.get('privacy_lockdown', True) else
                 'Extension settings saved. Restart Tekzite to apply the new extension set.'
             )
@@ -662,7 +662,7 @@ class BrowserFeatures:
                 try:
                     meta = self._extension_metadata(path)
                     if row.get('enabled') and self.preferences.get('privacy_lockdown', True):
-                        state_label = 'Blocked by Privacy Lockdown'
+                        state_label = 'Blocked by Privacy Core'
                     else:
                         state_label = 'Enabled' if row.get('enabled') else 'Disabled'
                 except Exception as exc:
