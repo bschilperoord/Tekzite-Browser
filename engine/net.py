@@ -654,6 +654,7 @@ _CHROMIUM_PROCESS_NAMES = {
 
 _TEKZITE_NETWORK_PROCESS_NAMES = {
     "tekzite-network.exe", "tekzite-network",
+    "tekzitenetwork.exe", "tekzitenetwork",
     "python.exe", "pythonw.exe", "python", "pythonw",
 }
 
