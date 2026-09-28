@@ -276,6 +276,7 @@ class BrowserFeatures:
             self._checkpoint_job = self.root.after(3500, self._checkpoint_features)
         self._schedule_network_health_watch(3000)
         self._schedule_permission_prompt_poll(450)
+        self._schedule_javascript_dialog_poll(140)
         scheduler = getattr(self, '_schedule_sleeping_tabs', None)
         if callable(scheduler):
             scheduler(15000)
@@ -1116,6 +1117,263 @@ class BrowserFeatures:
         except Exception as exc:
             self.status_var.set(f'Permission preference save failed: {exc}')
             return False
+
+
+    def _schedule_javascript_dialog_poll(self, delay_ms=140):
+        if self._closing:
+            return
+        try:
+            self._javascript_dialog_after_id = self.root.after(
+                max(70, int(delay_ms)), self._javascript_dialog_tick
+            )
+        except Exception:
+            self._javascript_dialog_after_id = None
+
+    def _javascript_dialog_tick(self):
+        self._javascript_dialog_after_id = None
+        if self._closing:
+            return
+        win = getattr(self, '_javascript_dialog_window', None)
+        if win is not None:
+            try:
+                if win.winfo_exists():
+                    self._schedule_javascript_dialog_poll(120)
+                    return
+            except Exception:
+                pass
+            self._javascript_dialog_window = None
+        if getattr(self, '_javascript_dialog_poll_busy', False):
+            self._schedule_javascript_dialog_poll(100)
+            return
+
+        tab = self._active_tab() or {}
+        target_id = str(tab.get('chromium_target_id') or '')
+        if not target_id:
+            self._schedule_javascript_dialog_poll(350)
+            return
+
+        self._javascript_dialog_poll_busy = True
+        future = self._executor.submit(
+            features.net.poll_embedded_chromium_javascript_dialogs,
+            target_id,
+            timeout=0.07,
+        )
+
+        def finish():
+            if self._closing:
+                return
+            if not future.done():
+                try:
+                    self.root.after(25, finish)
+                except Exception:
+                    pass
+                return
+            self._javascript_dialog_poll_busy = False
+            try:
+                rows = future.result() or []
+            except Exception:
+                rows = []
+            if rows:
+                self._show_native_javascript_dialog(rows[0])
+            self._schedule_javascript_dialog_poll(90 if rows else 140)
+
+        try:
+            self.root.after(25, finish)
+        except Exception:
+            self._javascript_dialog_poll_busy = False
+
+    def _show_native_javascript_dialog(self, dialog):
+        previous = getattr(self, '_javascript_dialog_window', None)
+        if previous is not None:
+            try:
+                if previous.winfo_exists():
+                    previous.lift()
+                    return
+            except Exception:
+                pass
+
+        dialog = dict(dialog or {})
+        target_id = str(dialog.get('target_id') or '')
+        kind = str(dialog.get('type') or '').strip().lower()
+        if not target_id or kind not in {'alert', 'confirm', 'prompt', 'beforeunload'}:
+            return
+
+        message = str(dialog.get('message') or '')
+        default_prompt = str(dialog.get('default_prompt') or '')
+        origin = str(dialog.get('origin') or '')
+        page_url = str(dialog.get('url') or '')
+        host = origin or page_url or 'Current page'
+        try:
+            host = urlsplit(origin or page_url).hostname or host
+        except Exception:
+            pass
+
+        win = self._new_animated_toplevel(
+            self.root, branded=False, auto_animate=False
+        )
+        self._javascript_dialog_window = win
+        win.title('Tekzite Page Dialog')
+        win.transient(self.root)
+        win.configure(bg=self.ui['bg'])
+        try:
+            win.attributes('-topmost', True)
+        except Exception:
+            pass
+
+        state = {'done': False}
+        prompt_var = tk.StringVar(value=default_prompt)
+
+        def decide(accept, prompt_text=None):
+            if state['done']:
+                return
+            state['done'] = True
+            if prompt_text is None:
+                prompt_text = prompt_var.get() if kind == 'prompt' else ''
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self._javascript_dialog_window = None
+
+            def work():
+                return features.net.resolve_embedded_chromium_javascript_dialog(
+                    target_id, bool(accept), str(prompt_text or ''), timeout=1.0
+                )
+            try:
+                future = self._executor.submit(work)
+            except Exception as exc:
+                self.status_var.set(f'Could not answer page dialog: {exc}')
+                return
+
+            def finish_answer():
+                if self._closing:
+                    return
+                if not future.done():
+                    try:
+                        self.root.after(30, finish_answer)
+                    except Exception:
+                        pass
+                    return
+                try:
+                    ok = bool(future.result())
+                except Exception as exc:
+                    self.status_var.set(f'Could not answer page dialog: {exc}')
+                    return
+                if ok:
+                    self.status_var.set(
+                        f'Page dialog {"accepted" if accept else "cancelled"}'
+                    )
+            try:
+                self.root.after(30, finish_answer)
+            except Exception:
+                pass
+
+        header = tk.Frame(win, bg=self.ui['bg'])
+        header.pack(fill='x', padx=18, pady=(16, 8))
+        logo = tk.Label(
+            header, text='T', bg=self.ui['accent'], fg='#ffffff',
+            font=(self._ui_display_font_family, self._font_size(12), 'bold'),
+            width=2, pady=4,
+        )
+        logo.pack(side='left', padx=(0, 10))
+        title_text = {
+            'alert': 'Message from page',
+            'confirm': 'Confirm action',
+            'prompt': 'Page input',
+            'beforeunload': 'Leave this page?',
+        }[kind]
+        title = tk.Label(
+            header, text=title_text, bg=self.ui['bg'], fg=self.ui['text'],
+            font=(self._ui_display_font_family, self._font_size(13), 'bold'),
+            anchor='w',
+        )
+        title.pack(side='left', fill='x', expand=True)
+        close_action = (lambda: decide(True)) if kind == 'alert' else (lambda: decide(False))
+        close_button = tk.Button(
+            header, text='×', command=close_action,
+            bg=self.ui['bg'], fg=self.ui['muted'],
+            activebackground=self.ui['chrome_hover'], activeforeground=self.ui['text'],
+            relief='flat', bd=0, highlightthickness=0, cursor='hand2',
+            font=(self._ui_display_font_family, self._font_size(14)),
+            padx=9, pady=2,
+        )
+        close_button.pack(side='right')
+
+        self._bind_frameless_dialog_drag(win, header, logo, title)
+
+        body = tk.Frame(win, bg=self.ui['bg'])
+        body.pack(fill='both', expand=True, padx=20, pady=(2, 10))
+        tk.Label(
+            body, text=str(host), bg=self.ui['bg'], fg=self.ui['accent'],
+            font=(self._ui_font_family, self._font_size(9), 'bold'),
+            anchor='w',
+        ).pack(fill='x', pady=(0, 9))
+
+        shown_message = message or (
+            'This page wants to continue.' if kind != 'beforeunload'
+            else 'Changes you made may not be saved.'
+        )
+        tk.Label(
+            body, text=shown_message, bg=self.ui['bg'], fg=self.ui['text'],
+            justify='left', anchor='w', wraplength=520,
+            font=(self._ui_font_family, self._font_size(10)),
+        ).pack(fill='x', pady=(0, 12))
+
+        entry = None
+        if kind == 'prompt':
+            entry = tk.Entry(
+                body, textvariable=prompt_var,
+                bg=self.ui['field'], fg=self.ui['text'],
+                insertbackground=self.ui['text'], relief='flat',
+                highlightthickness=1, highlightbackground=self.ui['border'],
+                highlightcolor=self.ui['accent'],
+                font=(self._ui_font_family, self._font_size(10)),
+            )
+            entry.pack(fill='x', ipady=7, pady=(0, 8))
+
+        controls = tk.Frame(win, bg=self.ui['bg'])
+        controls.pack(fill='x', padx=16, pady=(4, 16))
+
+        if kind == 'alert':
+            self._feature_button(controls, 'OK', lambda: decide(True))
+            win.bind('<Return>', lambda _event: decide(True))
+            win.bind('<Escape>', lambda _event: decide(True))
+        elif kind == 'beforeunload':
+            self._feature_button(controls, 'Stay', lambda: decide(False))
+            self._feature_button(controls, 'Leave', lambda: decide(True))
+            win.bind('<Return>', lambda _event: decide(True))
+            win.bind('<Escape>', lambda _event: decide(False))
+        else:
+            self._feature_button(controls, 'Cancel', lambda: decide(False))
+            self._feature_button(
+                controls, 'OK',
+                lambda: decide(True, prompt_var.get() if kind == 'prompt' else '')
+            )
+            win.bind(
+                '<Return>',
+                lambda _event: decide(True, prompt_var.get() if kind == 'prompt' else '')
+            )
+            win.bind('<Escape>', lambda _event: decide(False))
+
+        win.protocol('WM_DELETE_WINDOW', close_action)
+        dialog_h = 330 if kind == 'prompt' else 285
+        self._center_dialog_on_screen(win, 560, dialog_h, 18)
+        try:
+            win.deiconify()
+            win.lift()
+            win.grab_set()
+            self._raise_toplevel_above_dwm(win, hold_ms=520)
+            if entry is not None:
+                entry.focus_set()
+                entry.selection_range(0, 'end')
+            else:
+                win.focus_force()
+        except Exception:
+            pass
 
     def _schedule_permission_prompt_poll(self, delay_ms=450):
         if self._closing:
