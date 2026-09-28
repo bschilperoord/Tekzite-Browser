@@ -2551,11 +2551,9 @@ class BrowserApp(BrowserFeatures):
             if tab_above_toolbar
             else (self._ui_padding(2), self._ui_padding(6))
         )
-        self.tab_items.pack(
-            side="left", fill="both", expand=True,
-            padx=(self._ui_padding(12), self._ui_padding(8)),
-            pady=tab_items_pady,
-        )
+        self.tab_items.pack(side="left", fill="both", expand=True,
+                            padx=(self._ui_padding(12), self._ui_padding(8)),
+                            pady=tab_items_pady)
         # Keep + in the same row as the tabs so "right" means immediately
         # after the open tabs, not the far-right edge of the whole strip.
         self.new_tab_button = _RoundedChromeButton(
@@ -11614,11 +11612,9 @@ class BrowserApp(BrowserFeatures):
                 if tab_first
                 else (self._ui_padding(2), self._ui_padding(6))
             )
-            self.tab_items.pack(
-                side="left", fill="both", expand=True,
-                padx=(self._ui_padding(12), self._ui_padding(8)),
-                pady=tab_items_pady,
-            )
+            self.tab_items.pack(side="left", fill="both", expand=True,
+                                padx=(self._ui_padding(12), self._ui_padding(8)),
+                                pady=tab_items_pady)
             self._place_new_tab_button_inline()
         except Exception:
             pass
