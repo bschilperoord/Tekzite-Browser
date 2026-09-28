@@ -1,3 +1,13 @@
+# v10.5.103 - Lightweight adaptive idle work
+
+- Makes page-state polling adaptive: 550 ms while the active page is loading/being interacted with, 1.8 s when settled and 3 s when no Chromium tab is live.
+- Samples background tab metadata less frequently while the foreground page is idle.
+- Backs the Tk zoom watchdog off to 15 s while healthy because the local Chromium extension already handles zoom changes in real time; temporarily tightens to 2.5 s after errors/corrections.
+- Keeps existing drag-specific page-state and zoom safety timings unchanged.
+- Cuts idle browser-state checkpoint work from a fixed 2 s loop to adaptive 4 s after writes and 12 s while unchanged.
+- Makes the DWM pointer fallback sleep at 48 ms outside the page and skips GetAsyncKeyState/WindowFromPoint/IsChild hit-testing when no page drag is active and the cursor is outside the web surface.
+- Leaves active DWM pointer tracking at the existing 8 ms path.
+
 # v10.5.102 - Search engine controls in Settings
 
 - Adds the Search engine provider picker directly to Tools -> Settings.

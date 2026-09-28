@@ -899,7 +899,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.102"
+BROWSER_VERSION = "10.5.103"
 
 
 def _enable_per_monitor_dpi_awareness():
