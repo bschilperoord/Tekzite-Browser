@@ -1,3 +1,13 @@
+# v10.5.107 - Browser-level native JavaScript dialogs
+
+- Moves Chromium JavaScript dialog interception from a secondary page websocket to a dedicated browser-level DevTools connection with a flattened Target session attached to the Tekzite tab.
+- Catches browser-owned confirm/alert/prompt/before-unload events on the authoritative Chromium UI path before the hidden Chromium dialog becomes the only actionable surface.
+- Preserves JavaScript dialog events even when they arrive while Tekzite is waiting for another CDP response on the dialog session.
+- Sends Page.handleJavaScriptDialog through the same attached Target session so Tk OK/Cancel/Leave/Stay choices answer Chromium's real synchronous dialog.
+- Filters events by Target session so dialogs from other tabs cannot surface in the wrong Tekzite window.
+- Cleans up dedicated dialog Target sessions when a tab or Chromium closes.
+- Retains the centered startup placement and Tk-native dialog shell introduced in v10.5.106.
+
 # v10.5.106 - Native page dialogs and centered startup
 
 - Routes Chromium JavaScript alert, confirm, prompt and before-unload decisions into Tekzite-owned Tk dialogs instead of leaving the user with an unclickable Chromium surface.

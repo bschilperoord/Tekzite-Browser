@@ -918,7 +918,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.106"
+BROWSER_VERSION = "10.5.107"
 
 
 
