@@ -13,12 +13,12 @@ def test_html_inspector_defers_syntax_work_past_open_animation():
 
 def test_html_inspector_parses_syntax_off_tk_thread():
     assert "build_highlight_plan" in INSPECT_SOURCE
-    assert "self._executor.submit(" in INSPECT_SOURCE
+    assert "self._html_inspector_executor.submit(" in INSPECT_SOURCE
     assert "build_highlight_plan, html, generation" in INSPECT_SOURCE
 
 
 def test_html_inspector_applies_color_tags_in_small_batches():
-    assert "highlight_batch_size = 240" in INSPECT_SOURCE
+    assert "highlight_batch_size = 64" in INSPECT_SOURCE
     assert "apply_highlight_plan(plan, stop)" in INSPECT_SOURCE
     assert "window.after(" in INSPECT_SOURCE
 

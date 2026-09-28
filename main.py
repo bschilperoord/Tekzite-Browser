@@ -2241,6 +2241,12 @@ class BrowserApp(BrowserFeatures):
         # v6.0: Chromium is the only web engine.  Tekzite owns browser UI,
         # while all page parsing/layout/JS/media/storage live in Chromium.
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tekzite-chromium")
+        # v10.5.98: HTML inspection uses one serialized background worker. Large
+        # DOM syntax/search jobs therefore cannot fan out across the general
+        # Chromium pool and create CPU bursts that compete with Tk/DWM input.
+        self._html_inspector_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="tekzite-html-inspector"
+        )
         # v8.3: serialize tab activations away from Tk's UI thread. Chromium's
         # Target.activateTarget may briefly wait on the browser/compositor; doing
         # that work inline made Tekzite chrome advance before the DWM page did.
@@ -13475,13 +13481,39 @@ class BrowserApp(BrowserFeatures):
             padx=12, pady=6,
         ).pack(side="right")
 
-        source_state = {"html": "", "generation": 0}
-        search_state = {"query": "", "matches": [], "position": -1}
+        source_state = {
+            "html": "", "generation": 0, "insert_after": None,
+            "insert_offset": 0, "render_complete": False,
+        }
+        search_state = {
+            "query": "", "matches": [], "position": -1, "generation": 0,
+            "future": None, "poll_after": None, "apply_after": None,
+            "pending_direction": 0, "ready": True,
+        }
         highlight_state = {"future": None, "poll_after": None, "apply_after": None}
+        interaction_state = {"until": 0.0}
+
+        # v10.5.98: every Tk-heavy operation is deliberately sliced. One giant
+        # Text.insert() or a few hundred tag_add() calls in one callback was
+        # enough to produce a visible DWM/Tk hitch on large live DOMs.
+        source_insert_chunk_chars = 8192
+        source_insert_start_delay_ms = 24
+        source_insert_frame_ms = 1
+        ui_slice_budget_ms = 3.0
         highlight_limit = 750_000
-        highlight_batch_size = 240
+        highlight_batch_size = 64
         highlight_start_delay_ms = 210
         highlight_span_limit = 24000
+        search_match_limit = 20000
+        search_highlight_limit = 400
+        search_tag_batch_size = 48
+
+        def note_inspector_interaction(_event=None):
+            interaction_state["until"] = time.monotonic() + 0.12
+            return None
+
+        def inspector_interaction_active():
+            return time.monotonic() < float(interaction_state["until"] or 0.0)
 
         def tk_index(offset):
             return f"1.0+{max(0, int(offset))}c"
@@ -13495,6 +13527,16 @@ class BrowserApp(BrowserFeatures):
             """Parse HTML away from Tk; return bounded color spans plus stats."""
             sample = html[:highlight_limit]
             spans = []
+            worker_units = 0
+
+            def worker_yield():
+                nonlocal worker_units
+                worker_units += 1
+                if worker_units % 384 == 0:
+                    # Cooperatively return the GIL. The inspector worker is
+                    # intentionally low-concurrency, but regex/token loops still
+                    # need to leave room for the Tk/DWM thread.
+                    time.sleep(0)
 
             def span(tag_name, start_offset, end_offset):
                 if end_offset <= start_offset or len(spans) >= highlight_span_limit:
@@ -13503,10 +13545,12 @@ class BrowserApp(BrowserFeatures):
 
             for match in re.finditer(r"<!--.*?-->", sample, flags=re.DOTALL):
                 span("html_comment", match.start(), match.end())
+                worker_yield()
             for match in re.finditer(r"<![^>]*>", sample, flags=re.IGNORECASE | re.DOTALL):
                 if sample.startswith("<!--", match.start()):
                     continue
                 span("html_doctype", match.start(), match.end())
+                worker_yield()
 
             tag_pattern = re.compile(r"</?\s*[A-Za-z][^<>]*?>", flags=re.DOTALL)
             attr_pattern = re.compile(
@@ -13516,6 +13560,7 @@ class BrowserApp(BrowserFeatures):
             for match in tag_pattern.finditer(sample):
                 if len(spans) >= highlight_span_limit:
                     break
+                worker_yield()
                 token = match.group(0)
                 token_start = match.start()
 
@@ -13549,6 +13594,7 @@ class BrowserApp(BrowserFeatures):
                 for attr in attr_pattern.finditer(token, attr_start):
                     if len(spans) >= highlight_span_limit:
                         break
+                    worker_yield()
                     span(
                         "html_attr",
                         token_start + attr.start(1),
@@ -13566,6 +13612,7 @@ class BrowserApp(BrowserFeatures):
                     sample, flags=re.IGNORECASE,
                 ):
                     span("html_entity", match.start(), match.end())
+                    worker_yield()
                     if len(spans) >= highlight_span_limit:
                         break
 
@@ -13575,6 +13622,7 @@ class BrowserApp(BrowserFeatures):
                     sample, flags=re.IGNORECASE | re.DOTALL,
                 ):
                     span("html_script", match.start(1), match.end(1))
+                    worker_yield()
                     if len(spans) >= highlight_span_limit:
                         break
 
@@ -13584,15 +13632,28 @@ class BrowserApp(BrowserFeatures):
                     sample, flags=re.IGNORECASE | re.DOTALL,
                 ):
                     span("html_style", match.start(1), match.end(1))
+                    worker_yield()
                     if len(spans) >= highlight_span_limit:
                         break
 
-            lines = html.count("\n") + 1 if html else 0
-            elements = len(re.findall(
-                r"<(?![!/?])\s*[A-Za-z][\w:.-]*(?:\s|/?>)",
-                html,
-            ))
-            comments = html.count("<!--")
+            lines = 1 if html else 0
+            comments = 0
+            stats_chunk = 262_144
+            for chunk_start in range(0, len(html), stats_chunk):
+                chunk = html[chunk_start:chunk_start + stats_chunk]
+                lines += chunk.count("\n")
+                comments += chunk.count("<!--")
+                time.sleep(0)
+
+            elements = 0
+            element_pattern = re.compile(
+                r"<(?![!/?])\s*[A-Za-z][\w:.-]*(?:\s|/?>)"
+            )
+            for _element in element_pattern.finditer(html):
+                elements += 1
+                if elements % 512 == 0:
+                    time.sleep(0)
+
             return {
                 "generation": generation,
                 "spans": spans,
@@ -13605,30 +13666,39 @@ class BrowserApp(BrowserFeatures):
             }
 
         def apply_highlight_plan(plan, offset=0):
-            """Apply a small span batch so Tk keeps painting and accepting input."""
-            if (
-                not window.winfo_exists()
-                or plan.get("generation") != source_state["generation"]
-            ):
+            """Apply syntax tags in tiny, time-budgeted Tk slices."""
+            try:
+                alive = bool(window.winfo_exists())
+            except Exception:
+                alive = False
+            if not alive or plan.get("generation") != source_state["generation"]:
+                return
+
+            if inspector_interaction_active():
+                highlight_state["apply_after"] = window.after(
+                    18, lambda: apply_highlight_plan(plan, offset)
+                )
                 return
 
             spans = plan.get("spans") or []
-            stop = min(len(spans), offset + highlight_batch_size)
-
-            if offset == 0:
-                text.configure(state="normal")
-                for tag_name in syntax_tags:
-                    text.tag_remove(tag_name, "1.0", "end")
-                text.configure(state="disabled")
+            hard_stop = min(len(spans), offset + highlight_batch_size)
+            stop = offset
+            deadline = time.perf_counter() + (ui_slice_budget_ms / 1000.0)
 
             text.configure(state="normal")
-            for tag_name, start_offset, end_offset in spans[offset:stop]:
-                add_tag(tag_name, start_offset, end_offset)
-            text.configure(state="disabled")
+            try:
+                while stop < hard_stop:
+                    tag_name, start_offset, end_offset = spans[stop]
+                    add_tag(tag_name, start_offset, end_offset)
+                    stop += 1
+                    if (stop - offset) % 8 == 0 and time.perf_counter() >= deadline:
+                        break
+            finally:
+                text.configure(state="disabled")
 
             if stop < len(spans):
                 highlight_state["apply_after"] = window.after(
-                    1, lambda: apply_highlight_plan(plan, stop)
+                    2, lambda: apply_highlight_plan(plan, stop)
                 )
                 return
 
@@ -13677,7 +13747,7 @@ class BrowserApp(BrowserFeatures):
                     or generation != source_state["generation"]
                 ):
                     return
-                future = self._executor.submit(
+                future = self._html_inspector_executor.submit(
                     build_highlight_plan, html, generation
                 )
                 highlight_state["future"] = future
@@ -13689,42 +13759,165 @@ class BrowserApp(BrowserFeatures):
 
         def clear_search_highlights():
             text.configure(state="normal")
-            text.tag_remove("match_all", "1.0", "end")
-            text.tag_remove("match_current", "1.0", "end")
-            text.configure(state="disabled")
+            try:
+                text.tag_remove("match_all", "1.0", "end")
+                text.tag_remove("match_current", "1.0", "end")
+            finally:
+                text.configure(state="disabled")
+
+        def cancel_after(state, key):
+            after_id = state.get(key)
+            if after_id is None:
+                return
+            try:
+                window.after_cancel(after_id)
+            except Exception:
+                pass
+            state[key] = None
+
+        def build_search_plan(html, query, generation):
+            """Find matches off the Tk thread, yielding during dense documents."""
+            pattern = re.compile(re.escape(query), flags=re.IGNORECASE)
+            matches = []
+            total = 0
+            for match in pattern.finditer(html):
+                total += 1
+                if len(matches) < search_match_limit:
+                    matches.append((match.start(), match.end()))
+                if total % 512 == 0:
+                    time.sleep(0)
+            return {
+                "generation": generation,
+                "query": query,
+                "matches": matches,
+                "total": total,
+                "clipped": total > len(matches),
+            }
+
+        def apply_search_highlights(plan, offset=0):
+            if (
+                plan.get("generation") != search_state["generation"]
+                or plan.get("query") != search_state["query"]
+            ):
+                return
+            if inspector_interaction_active():
+                search_state["apply_after"] = window.after(
+                    18, lambda: apply_search_highlights(plan, offset)
+                )
+                return
+
+            matches = (plan.get("matches") or [])[:search_highlight_limit]
+            hard_stop = min(len(matches), offset + search_tag_batch_size)
+            stop = offset
+            deadline = time.perf_counter() + (ui_slice_budget_ms / 1000.0)
+            text.configure(state="normal")
+            try:
+                while stop < hard_stop:
+                    start_offset, end_offset = matches[stop]
+                    add_tag("match_all", start_offset, end_offset)
+                    stop += 1
+                    if (stop - offset) % 8 == 0 and time.perf_counter() >= deadline:
+                        break
+            finally:
+                text.configure(state="disabled")
+
+            if stop < len(matches):
+                search_state["apply_after"] = window.after(
+                    2, lambda: apply_search_highlights(plan, stop)
+                )
+                return
+            text.tag_raise("match_all")
+            text.tag_raise("match_current")
+            search_state["apply_after"] = None
+
+        def poll_search_plan(future, generation):
+            try:
+                alive = bool(window.winfo_exists())
+            except Exception:
+                alive = False
+            if not alive or generation != search_state["generation"]:
+                return
+            if not future.done():
+                search_state["poll_after"] = window.after(
+                    18, lambda: poll_search_plan(future, generation)
+                )
+                return
+            search_state["poll_after"] = None
+            try:
+                plan = future.result()
+            except Exception:
+                search_state["ready"] = True
+                search_state["matches"] = []
+                match_var.set("Search failed")
+                return
+            if (
+                plan.get("generation") != search_state["generation"]
+                or plan.get("query") != search_state["query"]
+            ):
+                return
+
+            matches = list(plan.get("matches") or [])
+            search_state["matches"] = matches
+            search_state["position"] = -1
+            search_state["ready"] = True
+            total = int(plan.get("total") or 0)
+            if not matches:
+                match_var.set("0 matches")
+            elif plan.get("clipped"):
+                match_var.set(f"0 / {total:,}  •  first {len(matches):,} navigable")
+            else:
+                match_var.set(f"0 / {len(matches):,}")
+            apply_search_highlights(plan)
+
+            pending = int(search_state.get("pending_direction") or 0)
+            search_state["pending_direction"] = 0
+            if pending and matches:
+                window.after(1, lambda direction=pending: move_search(direction))
 
         def rebuild_search_matches():
             query = find_var.get()
-            clear_search_highlights()
+            cancel_after(search_state, "poll_after")
+            cancel_after(search_state, "apply_after")
+            future = search_state.get("future")
+            if future is not None:
+                try:
+                    future.cancel()
+                except Exception:
+                    pass
+            search_state["future"] = None
+            search_state["generation"] += 1
+            generation = search_state["generation"]
             search_state["query"] = query
             search_state["matches"] = []
             search_state["position"] = -1
+            search_state["ready"] = not bool(query)
+            clear_search_highlights()
             match_var.set("")
+
             if not query:
+                search_state["pending_direction"] = 0
+                return []
+            if not source_state.get("render_complete"):
+                match_var.set("Loading…")
                 return []
 
-            html = source_state["html"]
-            matches = [
-                (match.start(), match.end())
-                for match in re.finditer(re.escape(query), html, flags=re.IGNORECASE)
-            ]
-            search_state["matches"] = matches
-            if not matches:
-                match_var.set("0 matches")
-                return []
-
-            text.configure(state="normal")
-            for start_offset, end_offset in matches[:2000]:
-                add_tag("match_all", start_offset, end_offset)
-            text.tag_raise("match_all")
-            text.configure(state="disabled")
-            match_var.set(f"0 / {len(matches):,}")
-            return matches
+            future = self._html_inspector_executor.submit(
+                build_search_plan, source_state["html"], query, generation
+            )
+            search_state["future"] = future
+            match_var.set("Searching…")
+            poll_search_plan(future, generation)
+            return []
 
         def move_search(direction):
             query = find_var.get()
             if query != search_state["query"]:
+                search_state["pending_direction"] = direction
                 rebuild_search_matches()
+                return "break"
+            if not search_state.get("ready"):
+                search_state["pending_direction"] = direction
+                return "break"
 
             matches = search_state["matches"]
             if not matches:
@@ -13739,10 +13932,12 @@ class BrowserApp(BrowserFeatures):
 
             start_offset, end_offset = matches[position]
             text.configure(state="normal")
-            text.tag_remove("match_current", "1.0", "end")
-            add_tag("match_current", start_offset, end_offset)
-            text.tag_raise("match_current")
-            text.configure(state="disabled")
+            try:
+                text.tag_remove("match_current", "1.0", "end")
+                add_tag("match_current", start_offset, end_offset)
+                text.tag_raise("match_current")
+            finally:
+                text.configure(state="disabled")
             text.see(tk_index(start_offset))
             match_var.set(f"{position + 1:,} / {len(matches):,}")
             return "break"
@@ -13753,26 +13948,101 @@ class BrowserApp(BrowserFeatures):
         def find_previous(event=None):
             return move_search(-1)
 
+        def finish_source_render(generation):
+            if generation != source_state["generation"]:
+                return
+            source_state["insert_after"] = None
+            source_state["render_complete"] = True
+            text.configure(state="disabled")
+            stats_var.set(
+                f"{len(source_state['html']):,} characters  •  Coloring queued"
+            )
+            schedule_syntax_highlighting(source_state["html"], generation)
+            if find_var.get():
+                rebuild_search_matches()
+
+        def pump_source_insert(generation):
+            """Append one small DOM slice per Tk turn; never insert the DOM whole."""
+            if generation != source_state["generation"]:
+                return
+            try:
+                alive = bool(window.winfo_exists())
+            except Exception:
+                alive = False
+            if not alive:
+                return
+
+            html = source_state["html"]
+            offset = int(source_state.get("insert_offset") or 0)
+            if offset >= len(html):
+                finish_source_render(generation)
+                return
+
+            end = min(len(html), offset + source_insert_chunk_chars)
+            text.configure(state="normal")
+            try:
+                text.insert("end", html[offset:end])
+            finally:
+                text.configure(state="disabled")
+            source_state["insert_offset"] = end
+
+            if end == len(html) or (end // 262_144) != (offset // 262_144):
+                stats_var.set(
+                    f"Rendering source… {end:,} / {len(html):,} characters"
+                )
+
+            if end >= len(html):
+                finish_source_render(generation)
+            else:
+                source_state["insert_after"] = window.after(
+                    source_insert_frame_ms,
+                    lambda: pump_source_insert(generation),
+                )
+
         def set_html(html):
             html = str(html or "")
+
+            cancel_after(source_state, "insert_after")
+            cancel_after(highlight_state, "poll_after")
+            cancel_after(highlight_state, "apply_after")
+            cancel_after(search_state, "poll_after")
+            cancel_after(search_state, "apply_after")
+            for state in (highlight_state, search_state):
+                future = state.get("future")
+                if future is not None:
+                    try:
+                        future.cancel()
+                    except Exception:
+                        pass
+                state["future"] = None
+
             source_state["html"] = html
             source_state["generation"] += 1
             generation = source_state["generation"]
+            source_state["insert_offset"] = 0
+            source_state["render_complete"] = False
 
             text.configure(state="normal")
-            text.delete("1.0", "end")
-            text.insert("1.0", html)
-            text.configure(state="disabled")
+            try:
+                text.delete("1.0", "end")
+            finally:
+                text.configure(state="disabled")
 
+            search_state["generation"] += 1
             search_state["query"] = ""
             search_state["matches"] = []
             search_state["position"] = -1
+            search_state["pending_direction"] = 0
+            search_state["ready"] = True
             match_var.set("")
-            # Keep the first frame cheap. Detailed stats and syntax parsing run
-            # after the opening motion, with parsing off-thread and Tk tag work
-            # split into tiny batches.
-            stats_var.set(f"{len(html):,} characters  •  Coloring queued")
-            schedule_syntax_highlighting(html, generation)
+
+            stats_var.set(
+                f"Rendering source… 0 / {len(html):,} characters"
+            )
+            source_state["insert_after"] = window.after(
+                source_insert_start_delay_ms,
+                lambda: pump_source_insert(generation),
+            )
 
         def copy_all():
             html = source_state["html"]
@@ -13783,6 +14053,12 @@ class BrowserApp(BrowserFeatures):
         find_entry.bind("<Return>", find_next)
         find_entry.bind("<Shift-Return>", find_previous)
         find_entry.bind("<Escape>", lambda event: (find_var.set(""), rebuild_search_matches(), "break")[-1])
+        find_entry.bind("<KeyPress>", note_inspector_interaction, add="+")
+        for widget in (text, yscroll, xscroll):
+            widget.bind("<ButtonPress-1>", note_inspector_interaction, add="+")
+            widget.bind("<B1-Motion>", note_inspector_interaction, add="+")
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            text.bind(sequence, note_inspector_interaction, add="+")
 
         toolbar_button("Previous", find_previous).pack(side="left", padx=2, pady=7)
         toolbar_button("Next", find_next).pack(side="left", padx=2, pady=7)
@@ -13960,6 +14236,10 @@ class BrowserApp(BrowserFeatures):
                 pass
             try:
                 self._tab_switch_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            try:
+                self._html_inspector_executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass
             self._executor.shutdown(wait=False, cancel_futures=True)
