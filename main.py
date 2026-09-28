@@ -5192,7 +5192,7 @@ class BrowserApp(BrowserFeatures):
         self._page_state_after_id = None
         if getattr(self, "_window_drag_active", False):
             try:
-                self._page_state_after_id = self.root.after(320, self._page_state_tick)
+                self._page_state_after_id = self.root.after(250, self._page_state_tick)
             except Exception:
                 self._page_state_after_id = None
             return
@@ -8198,7 +8198,7 @@ class BrowserApp(BrowserFeatures):
             # GetAsyncKeyState, WindowFromPoint and IsChild entirely.
             tracking_existing = bool(self._chromium_left_button_down)
             physical_left_down = False
-            inside = False
+            page_hit = False
             if inside_geometry or tracking_existing:
                 physical_left_down = bool(
                     user32.GetAsyncKeyState(0x01) & 0x8000
@@ -8216,7 +8216,7 @@ class BrowserApp(BrowserFeatures):
                             wintypes.HWND(parent), wintypes.HWND(child)
                         ),
                     )
-                    inside = bool(page_hit)
+            inside = bool(inside_geometry and page_hit)
 
             # Continue tracking a drag that genuinely started on the page even
             # if the pointer later leaves/gets covered, so Chromium still gets
@@ -11347,9 +11347,7 @@ class BrowserApp(BrowserFeatures):
         self._zoom_watchdog_after_id = None
         if getattr(self, "_window_drag_active", False):
             try:
-                self._zoom_watchdog_after_id = self.root.after(
-                    500, self._zoom_watchdog_tick
-                )
+                self._zoom_watchdog_after_id = self.root.after(300, self._zoom_watchdog_tick)
             except Exception:
                 self._zoom_watchdog_after_id = None
             return
