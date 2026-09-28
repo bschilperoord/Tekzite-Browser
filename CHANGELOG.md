@@ -1,3 +1,12 @@
+# v10.5.102 - Search engine controls in Settings
+
+- Adds the Search engine provider picker directly to Tools -> Settings.
+- Settings and Customize Tekzite now edit the same persistent search_url_template preference.
+- Includes the built-in Startpage, DuckDuckGo, Google, Bing, Brave Search, Ecosia and Qwant choices plus Custom.
+- Shows the custom {query} URL template in Settings for local/self-hosted engines such as SearXNG.
+- Selecting a built-in provider updates its template automatically; editing a non-preset template identifies it as Custom.
+- Validates the {query} placeholder before Settings can save.
+
 # v10.5.101 - Remove Microsoft Edge backend remnants
 
 - Renames the old internal _EDGE_SESSION and _EDGE_SESSION_LOCK symbols to Chromium-specific names across the active browser code.
