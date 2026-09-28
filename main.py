@@ -7885,10 +7885,29 @@ class BrowserApp(BrowserFeatures):
                 self._chromium_motion_interval_ms, self._flush_chromium_surface_motion
             )
 
+    def _dismiss_active_popup_menu_for_page_click(self):
+        """Close any Tekzite popup before a click is forwarded to the page.
+
+        The DWM page is presented in a separate native window, so Tk's global
+        ButtonPress binding does not always see clicks on that surface. Both
+        normal Tk page input and the Win32 DWM pointer fallback converge on
+        _dispatch_chromium_press_xy(), making this the single authoritative
+        place to dismiss top-bar, hamburger and context popup menus.
+        """
+        active = getattr(self, "_active_popup_menu", None)
+        if not isinstance(active, _AnimatedPopupMenu) or not active.is_posted():
+            return False
+        try:
+            active.dismiss(include_parent=False)
+            return True
+        except Exception:
+            return False
+
     def _dispatch_chromium_press_xy(self, x, y):
         """Send one left press in already-mapped Chromium page coordinates."""
         if not self._chromium_input_surface_active():
             return None
+        self._dismiss_active_popup_menu_for_page_click()
         # State matching also de-duplicates the native DWM fallback if the same
         # physical press reaches Tk a moment later.
         if self._chromium_left_button_down:
