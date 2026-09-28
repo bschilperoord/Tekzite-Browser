@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.104"
+    assert main.BROWSER_VERSION == "10.5.105"
 
 
 def test_comfortable_defaults_are_the_new_baseline():
