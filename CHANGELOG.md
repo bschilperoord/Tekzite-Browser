@@ -1,3 +1,14 @@
+# v10.5.94 - Persistent Privacy Core
+
+- Decouples Privacy Core protections from browser-data lifetime.
+- Privacy Core now works with the normal persistent Chromium profile, so cookies, logins, cache and site storage can survive restarts.
+- History recording, history loading, crash checkpoints and tab-session saving/restoration now continue to work while Privacy Core is enabled.
+- Private Window remains fully ephemeral and still uses its own temporary Chromium profile.
+- Clear browsing data on exit is now the explicit control for deleting normal-profile browser data on shutdown.
+- New profiles default to saving browser data and restoring tabs while retaining Privacy Core protections.
+- Privacy Shield and Settings now report persistent storage accurately instead of treating Privacy Core as temporary-profile mode.
+- User-installed unpacked extensions remain isolated while Privacy Core is active.
+
 # v10.5.93 - Fast HTML Inspector and clean shutdown
 
 - Makes Inspect Chromium HTML appear immediately instead of stalling during syntax coloring on large live DOMs.
