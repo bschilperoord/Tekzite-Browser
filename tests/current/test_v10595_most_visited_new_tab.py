@@ -8,6 +8,12 @@ ROOT = Path(__file__).resolve().parents[2]
 MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
+def _method_block(name):
+    start = MAIN.index(f"def {name}")
+    end = MAIN.find("\n    def ", start + 1)
+    return MAIN[start:] if end < 0 else MAIN[start:end]
+
+
 def test_record_visit_tracks_frequency_compatibly():
     rows = [{"url": "https://example.test/a", "title": "Old", "visited": 1.0}]
     rows = record_visit(rows, "https://example.test/a", "New", now=2.0)
@@ -51,14 +57,14 @@ def test_empty_tab_panel_is_local_and_bound_to_blank_paths():
     new_tab = MAIN[MAIN.index("def _new_tab(self"):MAIN.index("def _capture_active_tab_state")]
     assert "self._render_empty_tab_panel()" in new_tab
 
-    switch = MAIN[MAIN.index("def _switch_tab(self,"):MAIN.index("def _recover_failed_tab_activation", MAIN.index("def _switch_tab(self,"))]
+    switch = _method_block("_switch_tab(self,")
     assert "self._render_empty_tab_panel()" in switch
 
-    close = MAIN[MAIN.index("def _close_tab(self"):MAIN.index("def _close_active_tab")]
+    close = _method_block("_close_tab(self")
     assert "self._render_empty_tab_panel()" in close
 
 
 def test_empty_tab_redraws_on_resize_without_starting_chromium():
-    block = MAIN[MAIN.index("def _on_canvas_configure"):MAIN.index("def _on_mousewheel")]
+    block = _method_block("_on_canvas_configure")
     assert "self._empty_tab_is_active()" in block
     assert "self._render_empty_tab_panel" in block
