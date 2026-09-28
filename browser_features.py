@@ -25,11 +25,94 @@ def site_host(url):
 
 
 def record_visit(rows, url, title, now=None):
+    """Record one page visit while keeping the history row format compact.
+
+    History still keeps one row per URL, but visit_count makes frequency
+    available for local features such as the new-tab Most visited panel.
+    Existing history rows without a count are treated as one previous visit.
+    """
     url = str(url or '')[:32768]
     title = str(title or url)[:1024]
     if not valid_url(url):
         return rows
-    return [{'url': url, 'title': title, 'visited': now or time.time()}] + [r for r in rows if r.get('url') != url][:4999]
+    previous = next((r for r in rows if isinstance(r, dict) and r.get('url') == url), None)
+    try:
+        count = max(1, int((previous or {}).get('visit_count', 1))) + 1 if previous else 1
+    except Exception:
+        count = 2 if previous else 1
+    row = {
+        'url': url,
+        'title': title,
+        'visited': now or time.time(),
+        'visit_count': count,
+    }
+    return [row] + [r for r in rows if not isinstance(r, dict) or r.get('url') != url][:4999]
+
+
+def most_visited_sites(rows, limit=8):
+    """Return locally ranked site cards aggregated by hostname.
+
+    No network lookups are performed. Multiple URLs from the same site collapse
+    into one card; the representative URL/title comes from that site's strongest
+    URL record, with recency as the tie-breaker.
+    """
+    try:
+        limit = max(1, min(24, int(limit)))
+    except Exception:
+        limit = 8
+
+    sites = {}
+    for item in list(rows or []):
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get('url') or '').strip()
+        host = site_host(url)
+        if not host:
+            continue
+        try:
+            count = max(1, int(item.get('visit_count', 1) or 1))
+        except Exception:
+            count = 1
+        try:
+            visited = float(item.get('visited', 0) or 0)
+        except Exception:
+            visited = 0.0
+        title = str(item.get('title') or host).strip()[:1024] or host
+
+        current = sites.get(host)
+        candidate_strength = (count, visited)
+        if current is None:
+            sites[host] = {
+                'host': host,
+                'url': url,
+                'title': title,
+                'visit_count': count,
+                'visited': visited,
+                '_representative_strength': candidate_strength,
+            }
+            continue
+
+        current['visit_count'] += count
+        current['visited'] = max(float(current.get('visited', 0) or 0), visited)
+        if candidate_strength > tuple(current.get('_representative_strength') or (0, 0.0)):
+            current['url'] = url
+            current['title'] = title
+            current['_representative_strength'] = candidate_strength
+
+    ranked = sorted(
+        sites.values(),
+        key=lambda row: (
+            -int(row.get('visit_count', 0) or 0),
+            -float(row.get('visited', 0) or 0),
+            str(row.get('host') or ''),
+        ),
+    )
+    result = []
+    for row in ranked[:limit]:
+        clean = dict(row)
+        clean.pop('_representative_strength', None)
+        result.append(clean)
+    return result
 
 
 def omnibox_suggestions(query, *, visits=None, bookmarks=None, tabs=None, recent_inputs=None, limit=6):
