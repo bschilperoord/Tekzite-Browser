@@ -1153,7 +1153,8 @@ class BrowserFeatures:
             return
 
         self._javascript_dialog_poll_busy = True
-        future = self._executor.submit(
+        dialog_executor = getattr(self, '_javascript_dialog_executor', self._executor)
+        future = dialog_executor.submit(
             features.net.poll_embedded_chromium_javascript_dialogs,
             target_id,
             timeout=0.07,
@@ -1244,7 +1245,8 @@ class BrowserFeatures:
                     target_id, bool(accept), str(prompt_text or ''), timeout=1.0
                 )
             try:
-                future = self._executor.submit(work)
+                dialog_executor = getattr(self, '_javascript_dialog_executor', self._executor)
+                future = dialog_executor.submit(work)
             except Exception as exc:
                 self.status_var.set(f'Could not answer page dialog: {exc}')
                 return
