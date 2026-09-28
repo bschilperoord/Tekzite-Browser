@@ -3,7 +3,7 @@ import main
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.94"
+    assert main.BROWSER_VERSION == "10.5.95"
 
 
 def test_later_tab_never_reuses_first_bootstrap_target(monkeypatch):
