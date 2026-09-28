@@ -1,3 +1,14 @@
+# v10.5.95 - Most visited new tab and fixed Settings footer
+
+- Adds a local Most visited panel to blank/new tabs with up to eight site cards.
+- Tracks a compact per-URL visit count and aggregates ranking by hostname, so one site does not flood the panel with multiple URLs.
+- Keeps the panel local-only: no favicon or network request is made just to build the new-tab view.
+- Left-click opens a Most visited card in the current tab; middle-click opens it in a new tab.
+- Redraws the panel responsively when the empty tab is resized or revisited.
+- Keeps Privacy Core compatible with the panel by using Tekzite's saved local history.
+- Fixes the Settings action row so Save/Cancel reserve space before the scrollable body.
+- Renames the primary action to Save settings and keeps it permanently visible as the Settings page grows.
+
 # v10.5.94 - Persistent Privacy Core
 
 - Decouples Privacy Core protections from browser-data lifetime.
