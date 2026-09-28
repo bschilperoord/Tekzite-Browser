@@ -109,8 +109,8 @@ def omnibox_suggestions(query, *, visits=None, bookmarks=None, tabs=None, recent
             },
         ))
 
-    # Raw inputs are useful for repeated searches even in Privacy Lockdown,
-    # where browsing history is deliberately not persisted.
+    # Raw inputs remain useful for repeated searches. Privacy Core can run
+    # alongside persistent history; Private Window remains the ephemeral mode.
     for index, value in enumerate(list(recent_inputs or [])[:100]):
         add('recent', value, value, 2 + min(index, 18), secondary='Recent input')
 
@@ -153,7 +153,7 @@ def download_progress(item):
 
 class BrowserFeatures:
     def _init_features(self):
-        rows = [] if (getattr(self, '_private_mode', False) or self.preferences.get('privacy_lockdown', False)) else read_json(self._state_directory / 'history.json', [])
+        rows = [] if getattr(self, '_private_mode', False) else read_json(self._state_directory / 'history.json', [])
         self.visits = [r for r in rows if isinstance(r, dict) and valid_url(r.get('url')) and isinstance(r.get('visited'), (int, float))][:5000] if isinstance(rows, list) else []
         self._history_dirty = False
         self._session_encoded = None
@@ -185,7 +185,7 @@ class BrowserFeatures:
     def _feature_startup(self, action):
         action()
         self._apply_quiet_mode()
-        if not getattr(self, '_private_mode', False) and not self.preferences.get('privacy_lockdown', False):
+        if not getattr(self, '_private_mode', False):
             self._checkpoint_job = self.root.after(2000, self._checkpoint_features)
         self._schedule_network_health_watch(3000)
         scheduler = getattr(self, '_schedule_sleeping_tabs', None)
@@ -243,7 +243,7 @@ class BrowserFeatures:
         self._schedule_network_health_watch(2500 if self._network_health_failures else 4000)
 
     def _checkpoint_features(self):
-        if self._closing or getattr(self, '_private_mode', False) or self.preferences.get('privacy_lockdown', False):
+        if self._closing or getattr(self, '_private_mode', False):
             return
         try:
             if self.preferences.get('restore_tabs', True):
@@ -263,7 +263,7 @@ class BrowserFeatures:
         self._checkpoint_job = self.root.after(2000, self._checkpoint_features)
 
     def _record_page_visit(self, tab):
-        if getattr(self, '_private_mode', False) or self.preferences.get('privacy_lockdown', False):
+        if getattr(self, '_private_mode', False):
             return
         url = tab.get('url', '')
         if tab.get('ready_state') not in ('interactive', 'complete') or not valid_url(url):
@@ -619,7 +619,7 @@ class BrowserFeatures:
         win.geometry('940x520')
         lockdown = bool(self.preferences.get('privacy_lockdown', True))
         note = tk.StringVar(value=(
-            'Lockdown active: extensions are saved but not loaded.'
+            'Privacy Core active: extensions are saved but not loaded.'
             if lockdown else
             'Extensions load at startup; restart after changes.'
         ))
@@ -636,7 +636,7 @@ class BrowserFeatures:
             selected_paths = [row.get('path') for row in entries if row.get('enabled') and row.get('path')]
             os.environ['TEKZITE_USER_EXTENSIONS'] = json.dumps([] if self.preferences.get('privacy_lockdown', True) else selected_paths)
             note.set(
-                'Extension settings saved. Privacy Lockdown keeps user extensions disabled.'
+                'Extension settings saved. Privacy Core keeps user extensions disabled.'
                 if self.preferences.get('privacy_lockdown', True) else
                 'Extension settings saved. Restart Tekzite to apply the new extension set.'
             )
@@ -662,7 +662,7 @@ class BrowserFeatures:
                 try:
                     meta = self._extension_metadata(path)
                     if row.get('enabled') and self.preferences.get('privacy_lockdown', True):
-                        state_label = 'Blocked by Privacy Lockdown'
+                        state_label = 'Blocked by Privacy Core'
                     else:
                         state_label = 'Enabled' if row.get('enabled') else 'Disabled'
                 except Exception as exc:

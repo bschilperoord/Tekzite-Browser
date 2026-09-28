@@ -15,7 +15,7 @@ def _app(edge, origin=(100, 120, 1000, 700, 500, 400)):
 
 
 def test_release_version_is_10589():
-    assert main.BROWSER_VERSION == "10.5.93"
+    assert main.BROWSER_VERSION == "10.5.94"
 
 
 def test_frameless_root_is_explicitly_resizable_and_has_all_edge_grips():

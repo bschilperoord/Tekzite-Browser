@@ -13,14 +13,14 @@ HELPER = (ROOT / "tekzite_network.py").read_text(encoding="utf-8")
 
 
 def test_v104_defaults_are_privacy_lockdown():
-    assert main.BROWSER_VERSION == "10.5.93"
+    assert main.BROWSER_VERSION == "10.5.94"
     assert main.DEFAULT_PREFERENCES["privacy_lockdown"] is True
     assert main.DEFAULT_PREFERENCES["tracker_blocking_enabled"] is True
     assert main.DEFAULT_PREFERENCES["strip_tracking_parameters"] is True
     assert main.DEFAULT_PREFERENCES["strip_referrer"] is True
     assert main.DEFAULT_PREFERENCES["https_first"] is True
-    assert main.DEFAULT_PREFERENCES["clear_browsing_data_on_exit"] is True
-    assert main.DEFAULT_PREFERENCES["restore_tabs"] is False
+    assert main.DEFAULT_PREFERENCES["clear_browsing_data_on_exit"] is False
+    assert main.DEFAULT_PREFERENCES["restore_tabs"] is True
     assert "startpage.com" in main.DEFAULT_PREFERENCES["search_url_template"]
 
 
@@ -97,8 +97,9 @@ def test_privacy_shield_is_exposed():
     assert 'Sites still see your public IP' in MAIN
 
 
-def test_lockdown_uses_temporary_chromium_profile_and_disables_user_extensions():
-    assert 'tempfile.mkdtemp(prefix=f"Tekzite-Privacy-{os.getpid()}-")' in MAIN
+def test_privacy_core_keeps_persistent_profile_but_still_limits_user_extensions():
+    assert 'tempfile.mkdtemp(prefix=f"Tekzite-Privacy-{os.getpid()}-")' not in MAIN
     assert 'user_extension_paths = [] if self.preferences.get("privacy_lockdown", True)' in MAIN
-    assert 'or self.preferences.get("privacy_lockdown", True)' in MAIN
-
+    close = MAIN[MAIN.index("def on_close(self):"):MAIN.index("def run(self):")]
+    assert 'or self.preferences.get("privacy_lockdown", True)' not in close
+    assert 'or self.preferences.get("clear_browsing_data_on_exit", False)' in close

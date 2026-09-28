@@ -7,7 +7,7 @@ Tekzite no longer implements a web rendering engine. Chromium owns HTML parsing,
 
 ## Privacy boundary
 
-In Privacy Lockdown, Chromium is launched with a process-temporary profile and all ordinary HTTP/HTTPS browsing is routed through Tekzite's loopback proxy. The proxy blocks known vendor telemetry, advertising and dedicated analytics/tracker hosts and upgrades public HTTP requests to HTTPS. It never decrypts HTTPS CONNECT traffic. Built-in Chromium DoH and QUIC are disabled; DNS therefore follows the operating system/router path configured by the user.
+With Privacy Core enabled, ordinary HTTP/HTTPS browsing is routed through Tekzite's loopback proxy while the normal Chromium profile can remain persistent. The proxy blocks known vendor telemetry, advertising and dedicated analytics/tracker hosts and upgrades public HTTP requests to HTTPS. It never decrypts HTTPS CONNECT traffic. Built-in Chromium DoH and QUIC are disabled; DNS therefore follows the operating system/router path configured by the user. Browser-data lifetime is controlled separately: Private Window uses a temporary profile, while the Clear browsing data on exit preference decides whether a normal profile is erased on shutdown.
 
 This is browser privacy, not network anonymity: visited sites can still observe the public IP address unless an upstream VPN/proxy/Tor layer is used.
 
