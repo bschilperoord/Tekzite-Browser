@@ -12656,12 +12656,7 @@ class BrowserApp(BrowserFeatures):
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
                        activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
 
-        buttons = tk.Frame(
-            shell,
-            bg=self.ui["bg"],
-            highlightbackground=self.ui["border_soft"],
-            highlightthickness=1,
-        )
+        buttons = tk.Frame(shell, bg=self.ui["bg"])
         buttons.pack(side="bottom", fill="x", pady=(14, 0))
         scroll_host.pack(side="top", fill="both", expand=True)
         def save_and_close():
