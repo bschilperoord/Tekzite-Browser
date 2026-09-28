@@ -4613,7 +4613,7 @@ def _get_persistent_page_cdp_channel(session, target_id=None, timeout=5.0, purpo
     # configuration on general/control channels and make input/scroll/hover/
     # cursor sockets immediately usable after the websocket handshake.
     latency_only_purposes = {"input", "scroll", "hover", "cursor"}
-    if purpose in latency_only_purposes or purpose == "permission":
+    if purpose in latency_only_purposes or purpose in {"permission", "dialog"}:
         channel["privacy_headers"] = False
         channel["network_setup_skipped_for_latency"] = True
     else:
@@ -7244,6 +7244,10 @@ def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame
                     install_embedded_chromium_permission_bridge(known_target, timeout=1.2)
                 except Exception as exc:
                     session["permission_bridge_install_error"] = type(exc).__name__
+                try:
+                    ensure_embedded_chromium_javascript_dialog_monitor(known_target, timeout=0.8)
+                except Exception as exc:
+                    session["javascript_dialog_monitor_error"] = type(exc).__name__
             _persistent_page_cdp_call(
                 session, "Page.navigate", {"url": str(url)},
                 target_id=known_target, timeout=min(5.0, float(timeout)), purpose="control",
@@ -7268,6 +7272,10 @@ def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame
                     install_embedded_chromium_permission_bridge(resolved_target, timeout=1.2)
                 except Exception as exc:
                     session["permission_bridge_install_error"] = type(exc).__name__
+                try:
+                    ensure_embedded_chromium_javascript_dialog_monitor(resolved_target, timeout=0.8)
+                except Exception as exc:
+                    session["javascript_dialog_monitor_error"] = type(exc).__name__
             _persistent_page_cdp_call(
                 session, "Page.navigate", {"url": str(url)},
                 target_id=resolved_target, timeout=min(5.0, float(timeout)), purpose="control",
@@ -12090,6 +12098,130 @@ def resolve_embedded_chromium_permission_request(
     )
     return bool(((result or {}).get('result') or {}).get('value'))
 
+
+
+
+def _normalize_javascript_dialog_event(payload, target_id):
+    """Return a bounded Tekzite row for one Chromium JavaScript dialog event."""
+    if not isinstance(payload, dict) or payload.get('method') != 'Page.javascriptDialogOpening':
+        return None
+    params = payload.get('params') or {}
+    if not isinstance(params, dict):
+        return None
+    dialog_type = str(params.get('type') or '').strip().lower()
+    if dialog_type not in {'alert', 'confirm', 'prompt', 'beforeunload'}:
+        return None
+    page_url = str(params.get('url') or '')[:MAX_PAGE_URL_CHARS]
+    origin = ''
+    try:
+        parts = urlsplit(page_url)
+        if str(parts.scheme or '').lower() in {'http', 'https'} and parts.netloc:
+            origin = f'{parts.scheme.lower()}://{parts.netloc}'
+    except Exception:
+        origin = ''
+    return {
+        'target_id': str(target_id or ''),
+        'type': dialog_type,
+        'message': str(params.get('message') or '')[:8192],
+        'default_prompt': str(params.get('defaultPrompt') or '')[:4096],
+        'url': page_url,
+        'origin': origin[:MAX_ORIGIN_CHARS],
+        'has_browser_handler': bool(params.get('hasBrowserHandler')),
+    }
+
+
+def ensure_embedded_chromium_javascript_dialog_monitor(
+        target_id: str, *, timeout: float = 1.0):
+    """Enable Page dialog events on a dedicated per-target CDP lane."""
+    target_id = str(target_id or '').strip()
+    if not target_id:
+        return False
+    session = _CHROMIUM_SESSION or _start_persistent_chromium_session(
+        timeout=min(max(float(timeout), 0.1), 8.0)
+    )
+    monitors = session.setdefault('javascript_dialog_monitor_targets', set())
+    if target_id in monitors:
+        return True
+    _persistent_page_cdp_call(
+        session, 'Page.enable', {}, target_id=target_id,
+        timeout=max(0.1, float(timeout)), purpose='dialog',
+    )
+    monitors.add(target_id)
+    return True
+
+
+def poll_embedded_chromium_javascript_dialogs(
+        target_id: str, *, timeout: float = 0.08):
+    """Return at most one pending JavaScript dialog without blocking Tk."""
+    target_id = str(target_id or '').strip()
+    if not target_id:
+        return []
+    session = _CHROMIUM_SESSION
+    if not session:
+        return []
+    ensure_embedded_chromium_javascript_dialog_monitor(
+        target_id, timeout=max(0.1, min(float(timeout) + 0.12, 0.5))
+    )
+    channel = _get_persistent_page_cdp_channel(
+        session, target_id=target_id, timeout=max(0.1, float(timeout)),
+        purpose='dialog',
+    )
+    queue = channel.setdefault('javascript_dialog_events', [])
+    if queue:
+        return [queue.pop(0)]
+
+    deadline = time.monotonic() + max(0.01, min(float(timeout), 0.25))
+    with channel['lock']:
+        ws = channel.get('ws')
+        if ws is None or channel.get('closed'):
+            return []
+        while time.monotonic() < deadline:
+            try:
+                ws.settimeout(max(0.005, deadline - time.monotonic()))
+                raw = ws.recv()
+            except socket.timeout:
+                break
+            except Exception:
+                break
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+            event = _normalize_javascript_dialog_event(
+                payload, channel.get('target_id') or target_id
+            )
+            if event is not None:
+                channel['javascript_dialog_open'] = True
+                return [event]
+            if isinstance(payload, dict) and payload.get('method') == 'Page.javascriptDialogClosed':
+                channel['javascript_dialog_open'] = False
+                channel['javascript_dialog_last_result'] = bool(
+                    ((payload.get('params') or {}).get('result'))
+                )
+    return []
+
+
+def resolve_embedded_chromium_javascript_dialog(
+        target_id: str, accept: bool, prompt_text: str = '', *, timeout: float = 1.0):
+    """Answer Chromium's currently open JavaScript dialog for one target."""
+    target_id = str(target_id or '').strip()
+    if not target_id:
+        return False
+    session = _CHROMIUM_SESSION
+    if not session:
+        return False
+    params = {'accept': bool(accept)}
+    if prompt_text is not None:
+        params['promptText'] = str(prompt_text)[:4096]
+    _persistent_page_cdp_call(
+        session, 'Page.handleJavaScriptDialog', params,
+        target_id=target_id, timeout=max(0.1, float(timeout)), purpose='dialog',
+    )
+    channel = (session.get('page_cdp_channels') or {}).get(f'{target_id}:dialog')
+    if isinstance(channel, dict):
+        channel['javascript_dialog_open'] = False
+        channel.setdefault('javascript_dialog_events', []).clear()
+    return True
 
 
 def set_embedded_chromium_permission(origin: str, permission: str, setting: str, *, timeout: int = 4):
