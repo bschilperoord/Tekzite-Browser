@@ -41,7 +41,7 @@ class BrowserFeatureTests(unittest.TestCase):
     def test_checkpoint_error_keeps_timer_alive(self):
         with patch('browser_features.write_json', side_effect=OSError('disk full')):
             self.app._checkpoint_features()
-        self.app.root.after.assert_called_with(2000, self.app._checkpoint_features)
+        self.app.root.after.assert_called_with(self.app._checkpoint_dirty_ms, self.app._checkpoint_features)
         self.app.status_var.set.assert_called()
 
     def test_history_records_page_once_and_updates_title(self):
