@@ -1,3 +1,12 @@
+# v10.5.106 - Native page dialogs and centered startup
+
+- Routes Chromium JavaScript alert, confirm, prompt and before-unload decisions into Tekzite-owned Tk dialogs instead of leaving the user with an unclickable Chromium surface.
+- Adds native Tekzite OK / Cancel controls, prompt text input and Leave / Stay choices, with Enter/Escape behavior and a close action that always resolves the blocked webpage.
+- Arms a dedicated low-overhead Page CDP dialog lane before real HTTP(S) navigation and answers the original synchronous page dialog through Page.handleJavaScriptDialog.
+- Keeps dialog traffic isolated from click, scroll, permission and control lanes and automatically re-enables Page events after a CDP reconnect.
+- Raises Tk page dialogs above the DWM webpage presenter and uses a modal grab so the visible choices remain directly clickable.
+- Centers normal Tekzite launches on the active Windows monitor work area (or Tk screen fallback), including private/link/file launches, while preserving deliberate tab-tearoff drop positioning.
+
 # v10.5.105 - Native Tekzite permission prompts
 
 - Moves common website permission decisions into Tekzite's Tk interface instead of relying on Chromium permission bubbles that can be hidden behind the DWM-hosted browser surface.
