@@ -149,8 +149,8 @@ DEFAULT_CUSTOMIZATION = {
     "tab_font_size": 10,
     "toolbar_font_size": 11,
     "ui_scale": 1.0,
-    "density": "spacious",
-    "spacing_generation": 2,
+    "density": "comfortable",
+    "spacing_generation": 3,
     "animations": True,
     "window_control_style": "traffic_lights",
     "tab_style": "soft",
@@ -169,8 +169,8 @@ DEFAULT_CUSTOMIZATION = {
     "show_tab_group_chips": True,
     "show_tab_active_indicator": True,
     "tab_title_chars": 28,
-    "tab_min_width": 175,
-    "tab_max_width": 330,
+    "tab_min_width": 160,
+    "tab_max_width": 300,
     "window_corner_radius": 24,
     "content_corner_radius": 18,
     "control_corner_radius": 16,
@@ -184,11 +184,11 @@ DEFAULT_CUSTOMIZATION = {
     "show_chrome_separator": True,
     "show_status_activity_dot": True,
     "show_status_version": True,
-    "app_bar_height": 44,
-    "tab_bar_height": 52,
-    "toolbar_height": 72,
-    "status_bar_height": 30,
-    "find_bar_height": 46,
+    "app_bar_height": 40,
+    "tab_bar_height": 46,
+    "toolbar_height": 62,
+    "status_bar_height": 26,
+    "find_bar_height": 40,
     "window_width": 1440,
     "window_height": 900,
     "window_min_width": 960,
@@ -202,8 +202,8 @@ def _valid_hex_color(value, fallback):
 
 def _normalized_customization(value):
     src = value if isinstance(value, dict) else {}
-    # v10.5.15: migrate only an untouched v10.5.14 layout to the new spacious
-    # defaults. Any user-adjusted spacing/size value opts out automatically.
+    # v10.5.104: migrate only untouched historical spacing baselines to
+    # the tighter shell. Any user-adjusted size/density keeps its values.
     legacy_layout = {
         "font_size": 10, "tab_font_size": 9, "toolbar_font_size": 10,
         "ui_scale": 1.0, "density": "comfortable", "tab_title_chars": 24,
@@ -214,13 +214,32 @@ def _normalized_customization(value):
         "window_width": 1360, "window_height": 860,
         "window_min_width": 900, "window_min_height": 600,
     }
-    if src and int(src.get("spacing_generation", 1) or 1) < 2:
-        untouched = all(src.get(key, expected) == expected for key, expected in legacy_layout.items())
-        if untouched:
+    spacious_layout = {
+        "font_size": 11, "tab_font_size": 10, "toolbar_font_size": 11,
+        "ui_scale": 1.0, "density": "spacious", "tab_title_chars": 28,
+        "tab_min_width": 175, "tab_max_width": 330,
+        "window_corner_radius": 24, "content_corner_radius": 18, "control_corner_radius": 16,
+        "app_bar_height": 44, "tab_bar_height": 52, "toolbar_height": 72,
+        "status_bar_height": 30, "find_bar_height": 46,
+        "window_width": 1440, "window_height": 900,
+        "window_min_width": 960, "window_min_height": 640,
+    }
+    if src:
+        try:
+            spacing_generation = int(src.get("spacing_generation", 1) or 1)
+        except Exception:
+            spacing_generation = 1
+        if spacing_generation < 3:
+            expected_layout = legacy_layout if spacing_generation < 2 else spacious_layout
+            untouched = all(
+                src.get(key, expected) == expected
+                for key, expected in expected_layout.items()
+            )
             src = dict(src)
-            for key in legacy_layout:
-                src[key] = DEFAULT_CUSTOMIZATION[key]
-            src["spacing_generation"] = 2
+            if untouched:
+                for key in expected_layout:
+                    src[key] = DEFAULT_CUSTOMIZATION[key]
+            src["spacing_generation"] = 3
     out = dict(DEFAULT_CUSTOMIZATION)
     default_colors = dict(DEFAULT_CUSTOMIZATION.get("colors") or UI_COLOR_DEFAULTS)
     raw_colors = src.get("colors") if isinstance(src.get("colors"), dict) else {}
@@ -255,8 +274,8 @@ def _normalized_customization(value):
         out["ui_scale"] = max(0.70, min(1.60, float(out.get("ui_scale", 1.0))))
     except Exception:
         out["ui_scale"] = 1.0
-    out["density"] = str(out.get("density") or "spacious") if str(out.get("density") or "spacious") in ("compact", "comfortable", "spacious") else "spacious"
-    out["spacing_generation"] = 2
+    out["density"] = str(out.get("density") or "comfortable") if str(out.get("density") or "comfortable") in ("compact", "comfortable", "spacious") else "comfortable"
+    out["spacing_generation"] = 3
     out["window_control_style"] = str(out.get("window_control_style") or "traffic_lights") if str(out.get("window_control_style") or "traffic_lights") in ("tekzite", "traffic_lights") else "traffic_lights"
     out["tab_style"] = str(out.get("tab_style") or "soft") if str(out.get("tab_style") or "soft") in ("soft", "classic") else "soft"
     out["toolbar_label_style"] = str(out.get("toolbar_label_style") or "icons") if str(out.get("toolbar_label_style") or "icons") in ("icons", "text", "both") else "icons"
@@ -1185,9 +1204,9 @@ class _AnimatedPopupMenu:
         self._border = app.ui.get("border_soft", app.ui["border"])
         self._width = 240
         self._height = 1
-        self._outer_pad = max(6, app._ui_padding(7))
-        self._row_h = max(34, app._ui_padding(36))
-        self._separator_h = max(8, app._ui_padding(9))
+        self._outer_pad = max(5, app._ui_padding(6))
+        self._row_h = max(30, app._ui_padding(32))
+        self._separator_h = max(6, app._ui_padding(7))
 
     def add_command(self, *, label="", command=None, accelerator="", state="normal", **_kwargs):
         self.items.append({"type": "command", "label": str(label), "command": command,
@@ -2462,7 +2481,7 @@ class BrowserApp(BrowserFeatures):
 
         # ── Frameless application bar + full browser menus ───────────────────
         self.app_bar = tk.Frame(
-            self.root, bg=self.ui["bg"], height=self._ui_metric("app_bar_height", 44), highlightthickness=0,
+            self.root, bg=self.ui["bg"], height=self._ui_metric("app_bar_height", 40), highlightthickness=0,
         )
         self.app_bar.pack(fill="x")
         self.app_bar.pack_propagate(False)
@@ -2472,7 +2491,7 @@ class BrowserApp(BrowserFeatures):
         self.app_bar.bind("<Double-Button-1>", lambda event: self._toggle_maximize())
 
         self.app_brand = tk.Frame(self.app_bar, bg=self.ui["bg"])
-        self.app_brand.pack(side="left", padx=(self._ui_padding(16), self._ui_padding(14)), fill="y")
+        self.app_brand.pack(side="left", padx=(self._ui_padding(12), self._ui_padding(10)), fill="y")
         self.app_brand.bind("<ButtonPress-1>", self._start_window_drag)
         self.app_brand.bind("<B1-Motion>", self._drag_window)
         self.app_brand.bind("<ButtonRelease-1>", self._end_window_drag)
@@ -2481,14 +2500,14 @@ class BrowserApp(BrowserFeatures):
             font=(self._ui_font_family, max(7, int(self._custom("menu_font_size", 9))), "bold"),
             width=2, padx=1, pady=2,
         )
-        self.brand_badge.pack(side="left", pady=self._ui_padding(5))
+        self.brand_badge.pack(side="left", pady=self._ui_padding(3))
         title_version = f"  v{BROWSER_VERSION}" if self._custom("show_version_in_title", True) else ""
         self.title_label = tk.Label(
             self.app_brand, text=f"Tekzite{' • Private' if self._private_mode else ''}{title_version}",
             fg=self.ui["text"], bg=self.ui["bg"],
             font=(self._ui_font_family, max(7, int(self._custom("menu_font_size", 9))), "bold"),
         )
-        self.title_label.pack(side="left", padx=(self._ui_padding(7), 0))
+        self.title_label.pack(side="left", padx=(self._ui_padding(5), 0))
         self.title_label.bind("<ButtonPress-1>", self._start_window_drag)
         self.title_label.bind("<B1-Motion>", self._drag_window)
         self.title_label.bind("<ButtonRelease-1>", self._end_window_drag)
@@ -2500,7 +2519,7 @@ class BrowserApp(BrowserFeatures):
         self._build_browser_menus(self.menu_strip)
 
         self.window_controls = tk.Frame(self.app_bar, bg=self.ui["bg"])
-        self.window_controls.pack(side="right", fill="y", padx=(self._ui_padding(8), self._ui_padding(14)), pady=self._ui_padding(7))
+        self.window_controls.pack(side="right", fill="y", padx=(self._ui_padding(6), self._ui_padding(10)), pady=self._ui_padding(4))
         self.window_control_buttons = [
             self._make_window_control(self.window_controls, "minimize", self._minimize_window),
             self._make_window_control(self.window_controls, "maximize", self._toggle_maximize),
@@ -2517,16 +2536,26 @@ class BrowserApp(BrowserFeatures):
         if self._custom("window_control_style", "traffic_lights") == "traffic_lights":
             try:
                 self.window_controls.pack_forget()
-                self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(14), self._ui_padding(6)), pady=self._ui_padding(7), before=self.app_brand)
+                self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(10), self._ui_padding(5)), pady=self._ui_padding(4), before=self.app_brand)
             except Exception:
                 pass
 
         # ── Browser tab strip ───────────────────────────────────────────────
-        self.tab_bar = tk.Frame(self.root, bg=self.ui["chrome"], height=self._ui_metric("tab_bar_height", 52), highlightthickness=0)
+        self.tab_bar = tk.Frame(self.root, bg=self.ui["chrome"], height=self._ui_metric("tab_bar_height", 46), highlightthickness=0)
         self.tab_bar.pack(fill="x")
         self.tab_bar.pack_propagate(False)
         self.tab_items = tk.Frame(self.tab_bar, bg=self.ui["chrome"])
-        self.tab_items.pack(side="left", fill="both", expand=True, padx=(self._ui_padding(16), self._ui_padding(10)), pady=(self._ui_padding(8), self._ui_padding(7)))
+        tab_above_toolbar = self._custom("tab_position", "above_toolbar") == "above_toolbar"
+        tab_items_pady = (
+            (self._ui_padding(6), self._ui_padding(2))
+            if tab_above_toolbar
+            else (self._ui_padding(2), self._ui_padding(6))
+        )
+        self.tab_items.pack(
+            side="left", fill="both", expand=True,
+            padx=(self._ui_padding(12), self._ui_padding(8)),
+            pady=tab_items_pady,
+        )
         # Keep + in the same row as the tabs so "right" means immediately
         # after the open tabs, not the far-right edge of the whole strip.
         self.new_tab_button = _RoundedChromeButton(
@@ -2535,13 +2564,13 @@ class BrowserApp(BrowserFeatures):
             border=self.ui["border_soft"], hover_border=self.ui["border_focus"],
             canvas_bg=self.ui["chrome"],
             font=(self._ui_font_family, max(10, int(self._custom("tab_font_size", 9)) + 4)),
-            padx=self._ui_padding(12), pady=self._ui_padding(6), width=None,
+            padx=self._ui_padding(10), pady=self._ui_padding(5), width=None,
             radius=self._ui_metric("control_corner_radius", 16), disabled_fg=self.ui["muted_dim"],
         )
 
         # ── Tekzite browser chrome ──────────────────────────────────────────
         self.toolbar = tk.Frame(
-            self.root, bg=self.ui["chrome"], height=self._ui_metric("toolbar_height", 72), highlightthickness=0,
+            self.root, bg=self.ui["chrome"], height=self._ui_metric("toolbar_height", 62), highlightthickness=0,
         )
         self.toolbar.pack(fill="x")
         self.toolbar.pack_propagate(False)
@@ -2556,7 +2585,7 @@ class BrowserApp(BrowserFeatures):
                 hover_border=self.ui["accent_hover"] if accent else self.ui["border_focus"],
                 canvas_bg=self.ui["chrome"],
                 font=(self._ui_font_family, max(7, int(self._custom("toolbar_font_size", 10))), "bold" if accent else "normal"),
-                padx=self._ui_padding(14), pady=self._ui_padding(9), width=width,
+                padx=self._ui_padding(10), pady=self._ui_padding(6), width=width,
                 radius=self._ui_metric("control_corner_radius", 16),
                 disabled_fg=self.ui["muted_dim"],
             )
@@ -2575,7 +2604,7 @@ class BrowserApp(BrowserFeatures):
         )
         self.address_backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.address_inner = tk.Frame(self.address_shell, bg=self.ui["field"], bd=0, highlightthickness=0)
-        self.address_inner.pack(fill="both", expand=True, padx=self._ui_padding(9), pady=self._ui_padding(6))
+        self.address_inner.pack(fill="both", expand=True, padx=self._ui_padding(7), pady=self._ui_padding(4))
         self.address_inner.lift()
         self.address_shell.bind("<Configure>", lambda _e: self._redraw_address_shell(), add="+")
         self.site_info_button = tk.Button(
@@ -2584,7 +2613,7 @@ class BrowserApp(BrowserFeatures):
             highlightthickness=0, cursor="hand2", font=("Segoe UI Symbol", max(8, int(self._custom("toolbar_font_size", 10)) + 1)),
             padx=self._ui_padding(5), pady=1,
         )
-        self.site_info_button.pack(side="left", padx=(self._ui_padding(8), self._ui_padding(2)))
+        self.site_info_button.pack(side="left", padx=(self._ui_padding(6), self._ui_padding(2)))
 
         # Keep the editable Entry for real keyboard/caret/selection behavior, but
         # cover it with a Pillow-rendered preview while unfocused.  Tk's Win32
@@ -2660,15 +2689,15 @@ class BrowserApp(BrowserFeatures):
             relief="flat", bd=0, highlightthickness=1, highlightbackground=self.ui["border"],
             font=(self._ui_font_family, self._font_size(9)),
         )
-        self.find_entry.pack(side="left", fill="x", expand=True, padx=(16, 8), pady=8)
+        self.find_entry.pack(side="left", fill="x", expand=True, padx=(12, 6), pady=5)
         self.find_entry.bind("<Return>", lambda event: self._find_in_page(False))
         self.find_entry.bind("<Shift-Return>", lambda event: self._find_in_page(True))
         self.find_entry.bind("<Escape>", lambda event: self._hide_find_bar())
         for text, cmd in (("↑", lambda: self._find_in_page(True)), ("↓", lambda: self._find_in_page(False)), ("×", self._hide_find_bar)):
             b = tk.Button(self.find_bar, text=text, command=cmd, bg=self.ui["chrome_2"], fg=self.ui["text"],
                           activebackground=self.ui["field_focus"], activeforeground="#ffffff", relief="flat", bd=0,
-                          highlightthickness=0, cursor="hand2", padx=10, pady=3, font=(self._ui_font_family, self._font_size(9)))
-            b.pack(side="left", padx=(0, 5), pady=5)
+                          highlightthickness=0, cursor="hand2", padx=8, pady=2, font=(self._ui_font_family, self._font_size(9)))
+            b.pack(side="left", padx=(0, 4), pady=3)
 
         self.chrome_separator = tk.Frame(self.root, bg=self.ui["border_soft"], height=1)
         self.chrome_separator.pack(fill="x")
@@ -2843,7 +2872,7 @@ class BrowserApp(BrowserFeatures):
 
         self.status_var = tk.StringVar(value="Ready")
         self.status_bar = tk.Frame(
-            self.root, bg=self.ui["chrome"], height=self._ui_metric("status_bar_height", 30),
+            self.root, bg=self.ui["chrome"], height=self._ui_metric("status_bar_height", 26),
             highlightbackground=self.ui["border"], highlightthickness=1,
         )
         self.status_bar.pack(fill="x")
@@ -2854,7 +2883,7 @@ class BrowserApp(BrowserFeatures):
             self.status_bar, text="●", fg=self.ui.get("success", "#45d483"), bg=self.ui["chrome"],
             font=(self._ui_font_family, self._font_size(7)),
         )
-        self.status_activity_dot.pack(side="left", padx=(self._ui_padding(16), self._ui_padding(8)))
+        self.status_activity_dot.pack(side="left", padx=(self._ui_padding(10), self._ui_padding(6)))
         self.status_text_label = tk.Label(
             self.status_bar, textvariable=self.status_var, anchor="w", fg=self.ui["muted"], bg=self.ui["chrome"],
             font=(self._ui_font_family, max(7, int(self._custom("menu_font_size", 9)))),
@@ -2865,7 +2894,7 @@ class BrowserApp(BrowserFeatures):
             fg=self.ui["muted"], bg=self.ui["chrome"],
             font=(self._ui_font_family, max(7, int(self._custom("menu_font_size", 9)) - 1)),
         )
-        self.status_version_label.pack(side="right", padx=(self._ui_padding(10), self._ui_padding(16)))
+        self.status_version_label.pack(side="right", padx=(self._ui_padding(8), self._ui_padding(12)))
 
         # Frameless roots have no OS resize frame. Install thin invisible hit
         # zones last so they sit above chrome/page content only at the perimeter.
@@ -4411,7 +4440,7 @@ class BrowserApp(BrowserFeatures):
         title = str(tab.get("title") or "New Tab")
         width = self._tab_pixel_width(title, pinned=bool(tab.get("pinned")))
         initial_width, _opening_done = self._tab_open_width(tab.get("id"), width)
-        height = max(30, self._ui_metric("tab_bar_height", 52) - self._ui_padding(12))
+        height = max(30, self._ui_metric("tab_bar_height", 46) - self._ui_padding(12))
         canvas = tk.Canvas(self.tab_items, width=initial_width, height=height, bg=self.ui["chrome"], highlightthickness=0, bd=0, cursor="hand2")
         canvas.pack(side="left", padx=(0, self._ui_padding(5)), pady=(self._ui_padding(1), self._ui_padding(1)))
         self._draw_soft_tab(canvas, tab, active, hovered=False)
@@ -5292,7 +5321,7 @@ class BrowserApp(BrowserFeatures):
             self.find_bar.configure(height=0)
             self._find_bar_visible = True
             self._repack_browser_chrome()
-            self._animate_widget_height(self.find_bar, 0, self._ui_metric("find_bar_height", 46), duration=155)
+            self._animate_widget_height(self.find_bar, 0, self._ui_metric("find_bar_height", 40), duration=155)
         self.find_entry.focus_set()
         self.find_entry.selection_range(0, "end")
         return "break"
@@ -5310,7 +5339,7 @@ class BrowserApp(BrowserFeatures):
             try:
                 current = max(1, int(self.find_bar.winfo_height()))
             except Exception:
-                current = self._ui_metric("find_bar_height", 46)
+                current = self._ui_metric("find_bar_height", 40)
             self._animate_widget_height(self.find_bar, current, 0, duration=130, on_done=finish)
         try:
             self.root.focus_set()
@@ -5377,7 +5406,7 @@ class BrowserApp(BrowserFeatures):
             if isinstance(active, _AnimatedPopupMenu) and active is not menu:
                 active.dismiss(include_parent=False)
             x = int(button.winfo_rootx()) + int(min_width_offset or 0)
-            y = int(button.winfo_rooty()) + int(button.winfo_height()) + self._ui_padding(3)
+            y = int(button.winfo_rooty()) + int(button.winfo_height()) + self._ui_padding(2)
             if hasattr(button, "set_selected"):
                 button.set_selected(True)
             if isinstance(menu, _AnimatedPopupMenu):
@@ -10032,7 +10061,7 @@ class BrowserApp(BrowserFeatures):
         self._schedule_taskbar_presence_guard(1200)
 
     def _make_window_control(self, parent, role, command, close=False):
-        size = max(26, self._ui_metric("app_bar_height", 44) - self._ui_padding(10))
+        size = max(26, self._ui_metric("app_bar_height", 40) - self._ui_padding(10))
         button = tk.Canvas(
             parent,
             width=size,
@@ -10095,7 +10124,7 @@ class BrowserApp(BrowserFeatures):
 
     def _redraw_window_control(self, button):
         try:
-            size = max(26, self._ui_metric("app_bar_height", 44) - self._ui_padding(10))
+            size = max(26, self._ui_metric("app_bar_height", 40) - self._ui_padding(10))
             button.configure(width=size, height=size, bg=self.ui["bg"])
             button.delete("all")
             role = getattr(button, "_tekzite_role", "")
@@ -11449,7 +11478,7 @@ class BrowserApp(BrowserFeatures):
         return custom.get(key, default)
 
     def _density_factor(self):
-        return {"compact": 0.84, "comfortable": 1.0, "spacious": 1.18}.get(str(self._custom("density", "spacious")), 1.0)
+        return {"compact": 0.84, "comfortable": 1.0, "spacious": 1.18}.get(str(self._custom("density", "comfortable")), 1.0)
 
     def _ui_metric(self, key, default):
         try:
@@ -11500,20 +11529,32 @@ class BrowserApp(BrowserFeatures):
                 pass
         visible = self._custom("toolbar_visible", {})
         order = self._custom("toolbar_order", TOOLBAR_ITEM_IDS)
-        gap = self._ui_padding(7)
-        outer = self._ui_padding(12)
+        gap = self._ui_padding(5)
+        outer = self._ui_padding(9)
+        tab_above_toolbar = self._custom("tab_position", "above_toolbar") == "above_toolbar"
+        adjacent_pad = self._ui_padding(3)
+        far_pad = self._ui_padding(8)
+        toolbar_pady = (
+            (adjacent_pad, far_pad)
+            if tab_above_toolbar
+            else (far_pad, adjacent_pad)
+        )
         for item in order:
             widget = widgets.get(item)
             if widget is None or not bool(visible.get(item, True)):
                 continue
             if item == "address":
-                widget.pack(side="left", fill="x", expand=True, padx=(self._ui_padding(12), outer), pady=outer)
+                widget.pack(
+                    side="left", fill="x", expand=True,
+                    padx=(self._ui_padding(9), outer),
+                    pady=toolbar_pady,
+                )
             else:
-                widget.pack(side="left", padx=(0, gap), pady=self._ui_padding(10))
+                widget.pack(side="left", padx=(0, gap), pady=toolbar_pady)
         try:
             self.site_info_button.pack_forget()
             if self._custom("show_site_info_button", True):
-                self.site_info_button.pack(side="left", padx=(self._ui_padding(8), self._ui_padding(2)))
+                self.site_info_button.pack(side="left", padx=(self._ui_padding(6), self._ui_padding(2)))
         except Exception:
             pass
         try:
@@ -11568,35 +11609,44 @@ class BrowserApp(BrowserFeatures):
             status.pack(fill="x")
         try:
             self.tab_items.pack_forget()
-            self.tab_items.pack(side="left", fill="both", expand=True, padx=(self._ui_padding(16), self._ui_padding(10)), pady=(self._ui_padding(8), self._ui_padding(7)))
+            tab_items_pady = (
+                (self._ui_padding(6), self._ui_padding(2))
+                if tab_first
+                else (self._ui_padding(2), self._ui_padding(6))
+            )
+            self.tab_items.pack(
+                side="left", fill="both", expand=True,
+                padx=(self._ui_padding(12), self._ui_padding(8)),
+                pady=tab_items_pady,
+            )
             self._place_new_tab_button_inline()
         except Exception:
             pass
         try:
             self.app_brand.pack_forget()
             if self._custom("show_brand_badge", True) or self._custom("show_title_text", True):
-                self.app_brand.pack(side="left", padx=(self._ui_padding(18), self._ui_padding(16)), fill="y")
+                self.app_brand.pack(side="left", padx=(self._ui_padding(12), self._ui_padding(10)), fill="y")
             self.brand_badge.pack_forget()
             if self._custom("show_brand_badge", True):
-                self.brand_badge.pack(side="left", pady=self._ui_padding(5))
+                self.brand_badge.pack(side="left", pady=self._ui_padding(3))
             self.title_label.pack_forget()
             if self._custom("show_title_text", True):
-                self.title_label.pack(side="left", padx=(self._ui_padding(7), 0))
+                self.title_label.pack(side="left", padx=(self._ui_padding(5), 0))
         except Exception:
             pass
         try:
             self.menu_strip.pack_forget()
             if self._custom("show_menu_bar", True):
-                self.menu_strip.pack(side="left", fill="y", padx=(0, self._ui_padding(10)))
+                self.menu_strip.pack(side="left", fill="y", padx=(0, self._ui_padding(6)))
         except Exception:
             pass
         try:
             self.window_controls.pack_forget()
             if self._custom("show_window_controls", True):
                 if self._custom("window_control_style", "traffic_lights") == "traffic_lights":
-                    self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(14), self._ui_padding(6)), pady=self._ui_padding(7), before=self.app_brand)
+                    self.window_controls.pack(side="left", fill="y", padx=(self._ui_padding(10), self._ui_padding(5)), pady=self._ui_padding(4), before=self.app_brand)
                 else:
-                    self.window_controls.pack(side="right", fill="y", padx=(self._ui_padding(8), self._ui_padding(14)), pady=self._ui_padding(7))
+                    self.window_controls.pack(side="right", fill="y", padx=(self._ui_padding(6), self._ui_padding(10)), pady=self._ui_padding(4))
         except Exception:
             pass
         try:
@@ -11610,10 +11660,10 @@ class BrowserApp(BrowserFeatures):
             self.status_text_label.pack_forget()
             self.status_version_label.pack_forget()
             if self._custom("show_status_activity_dot", True):
-                self.status_activity_dot.pack(side="left", padx=(self._ui_padding(16), self._ui_padding(8)))
+                self.status_activity_dot.pack(side="left", padx=(self._ui_padding(10), self._ui_padding(6)))
             self.status_text_label.pack(side="left", fill="x", expand=True)
             if self._custom("show_status_version", True):
-                self.status_version_label.pack(side="right", padx=(self._ui_padding(10), self._ui_padding(16)))
+                self.status_version_label.pack(side="right", padx=(self._ui_padding(8), self._ui_padding(12)))
         except Exception:
             pass
 
@@ -11650,10 +11700,10 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             pass
         try:
-            self.app_bar.configure(height=self._ui_metric("app_bar_height", 44), bg=self.ui["bg"])
-            self.tab_bar.configure(height=self._ui_metric("tab_bar_height", 52), bg=self.ui["chrome"])
-            self.toolbar.configure(height=self._ui_metric("toolbar_height", 72), bg=self.ui["chrome"])
-            self.status_bar.configure(height=self._ui_metric("status_bar_height", 30), bg=self.ui["chrome"], highlightbackground=self.ui["border"])
+            self.app_bar.configure(height=self._ui_metric("app_bar_height", 40), bg=self.ui["bg"])
+            self.tab_bar.configure(height=self._ui_metric("tab_bar_height", 46), bg=self.ui["chrome"])
+            self.toolbar.configure(height=self._ui_metric("toolbar_height", 62), bg=self.ui["chrome"])
+            self.status_bar.configure(height=self._ui_metric("status_bar_height", 26), bg=self.ui["chrome"], highlightbackground=self.ui["border"])
             self.chrome_separator.configure(bg=self.ui["border_soft"])
             self.brand_badge.configure(bg=self.ui["accent"])
             self.status_activity_dot.configure(fg=self.ui.get("success", "#45d483"), bg=self.ui["chrome"])
@@ -11839,7 +11889,7 @@ class BrowserApp(BrowserFeatures):
         original_custom = json.loads(json.dumps(_normalized_customization(self.preferences.get("customization"))))
         draft = json.loads(json.dumps(original_custom))
 
-        header = tk.Frame(win, bg=self.ui["bg"], padx=18, pady=4)
+        header = tk.Frame(win, bg=self.ui["bg"], padx=14, pady=3)
         header.pack(fill="x")
         tk.Label(header, text="Appearance and behavior for this profile.",
                  bg=self.ui["bg"], fg=self.ui["muted"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w")
@@ -11855,7 +11905,7 @@ class BrowserApp(BrowserFeatures):
                 "Tekzite.TNotebook.Tab",
                 background=self.ui["chrome_2"],
                 foreground=self.ui["text"],
-                padding=(10, 6),
+                padding=(8, 4),
             )
             customize_style.map(
                 "Tekzite.TNotebook.Tab",
@@ -11866,7 +11916,7 @@ class BrowserApp(BrowserFeatures):
             pass
 
         notebook = ttk.Notebook(win, style="Tekzite.TNotebook")
-        notebook.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        notebook.pack(fill="both", expand=True, padx=12, pady=(0, 8))
         customize_page_hosts = {}
         customize_page_canvases = {}
 
@@ -11890,7 +11940,7 @@ class BrowserApp(BrowserFeatures):
             scrollbar.pack(side="right", fill="y")
             canvas.pack(side="left", fill="both", expand=True)
 
-            frame = tk.Frame(canvas, bg=self.ui["bg"], padx=18, pady=16)
+            frame = tk.Frame(canvas, bg=self.ui["bg"], padx=14, pady=10)
             window_item = canvas.create_window((0, 0), window=frame, anchor="nw")
 
             def sync_scrollregion(_event=None, c=canvas):
@@ -12085,11 +12135,13 @@ class BrowserApp(BrowserFeatures):
         tk.Button(order_buttons, text="↓ Move down", command=lambda: move_order(1), bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat", padx=10, pady=5).pack(side="left")
         refresh_order()
 
-        right = tk.Frame(toolbar_page, bg=self.ui["bg"], padx=24); right.pack(side="left", fill="both", expand=True, pady=8)
-        label(right, "Visible items", bold=True).pack(anchor="w", pady=(0, 5))
+        right = tk.Frame(toolbar_page, bg=self.ui["bg"], padx=18); right.pack(side="left", fill="both", expand=True, pady=6)
+        visible_header = tk.Frame(right, bg=self.ui["bg"])
+        visible_header.pack(fill="x", pady=(0, 5))
+        label(visible_header, "Visible items", bold=True).pack(side="left")
+        label(visible_header, "Ctrl+L reveals a hidden address bar.", muted=True).pack(side="right")
         for item in TOOLBAR_ITEM_IDS:
-            check(right, TOOLBAR_ITEM_NAMES[item], visible_vars[item]).pack(anchor="w", pady=2)
-        label(right, "Tip: hiding the address bar is safe. Ctrl+L reveals it whenever you need it.", muted=True).pack(anchor="w", pady=(12, 0))
+            check(right, TOOLBAR_ITEM_NAMES[item], visible_vars[item]).pack(anchor="w", pady=1)
 
         # Tabs & layout ------------------------------------------------------
         bool_vars = {}
@@ -12156,11 +12208,13 @@ class BrowserApp(BrowserFeatures):
         zoom_var = tk.StringVar(value=f"{self._page_zoom_percent()}%")
         statusbar_var = tk.BooleanVar(value=bool(self.preferences.get("show_status_bar", True)))
 
-        label(behavior_page, "Homepage", bold=True).pack(anchor="w", pady=(5, 2))
-        entry(behavior_page, homepage_var).pack(fill="x", ipady=5, pady=(0, 10))
+        homepage_row = tk.Frame(behavior_page, bg=self.ui["bg"])
+        homepage_row.pack(fill="x", pady=(4, 5))
+        label(homepage_row, "Homepage", bold=True, width=18).pack(side="left")
+        entry(homepage_row, homepage_var).pack(side="left", fill="x", expand=True, ipady=4)
 
         search_row = tk.Frame(behavior_page, bg=self.ui["bg"])
-        search_row.pack(fill="x", pady=(2, 7))
+        search_row.pack(fill="x", pady=5)
         label(search_row, "Search engine", bold=True, width=18).pack(side="left")
         search_engine_box = ttk.Combobox(
             search_row,
@@ -12171,14 +12225,14 @@ class BrowserApp(BrowserFeatures):
         )
         search_engine_box.pack(side="left")
 
-        label(behavior_page, "Search URL template", bold=True).pack(anchor="w", pady=(7, 2))
-        search_template_entry = entry(behavior_page, search_var)
-        search_template_entry.pack(fill="x", ipady=5, pady=(0, 5))
-        label(
-            behavior_page,
-            "Choose a provider above, or use Custom with {query}. Local SearXNG URLs work here too.",
-            muted=True,
-        ).pack(anchor="w", pady=(0, 10))
+        search_template_row = tk.Frame(behavior_page, bg=self.ui["bg"])
+        search_template_row.pack(fill="x", pady=5)
+        label(search_template_row, "Search URL template", bold=True, width=18).pack(side="left")
+        search_template_entry = entry(search_template_row, search_var)
+        search_template_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        label(search_template_row, "Use {query} • local SearXNG supported", muted=True).pack(
+            side="left", padx=(10, 0)
+        )
 
         def select_search_engine(_event=None):
             template = SEARCH_ENGINE_PRESETS.get(search_engine_var.get())
@@ -12213,8 +12267,12 @@ class BrowserApp(BrowserFeatures):
         for text, var in (("Width", window_width_var), ("Height", window_height_var), ("Minimum width", min_width_var), ("Minimum height", min_height_var)):
             label(row, text).pack(side="left", padx=(0, 4)); entry(row, var, width=6).pack(side="left", padx=(0, 12), ipady=3)
         check(advanced_page, "Start maximized", start_max_var).pack(anchor="w", pady=8)
-        label(advanced_page, "Recovery", bold=True).pack(anchor="w", pady=(18, 5))
-        label(advanced_page, "Ctrl+Shift+Alt+R resets the interface only.", muted=True).pack(anchor="w")
+        recovery_row = tk.Frame(advanced_page, bg=self.ui["bg"])
+        recovery_row.pack(fill="x", pady=(12, 4))
+        label(recovery_row, "Recovery", bold=True).pack(side="left")
+        label(recovery_row, "Ctrl+Shift+Alt+R resets the interface only.", muted=True).pack(
+            side="left", padx=(12, 0)
+        )
 
         def int_value(var, default):
             try:
@@ -12518,10 +12576,10 @@ class BrowserApp(BrowserFeatures):
         # v10.5.38: Settings uses a fixed shell with a scrollable body. The
         # options can grow without forcing the whole dialog off-screen, while
         # Save/Cancel remain visible at the bottom at all times.
-        shell = tk.Frame(win, bg=self.ui["bg"], padx=22, pady=18)
+        shell = tk.Frame(win, bg=self.ui["bg"], padx=18, pady=14)
         shell.pack(fill="both", expand=True)
         tk.Label(shell, text="Browser settings.", fg=self.ui["muted"],
-                 bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(0, 12))
+                 bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(9))).pack(anchor="w", pady=(0, 8))
 
         scroll_host = tk.Frame(shell, bg=self.ui["bg"])
         # Pack the fixed action footer before this scroll host. If the expanding
@@ -12618,16 +12676,16 @@ class BrowserApp(BrowserFeatures):
 
         def section(title):
             tk.Label(outer, text=title, fg=self.ui["accent_hover"], bg=self.ui["bg"],
-                     font=(self._ui_font_family, self._font_size(10), "bold")).pack(anchor="w", pady=(12, 6))
+                     font=(self._ui_font_family, self._font_size(10), "bold")).pack(anchor="w", pady=(9, 4))
         def combo(var, values):
             box = ttk.Combobox(outer, textvariable=var, values=values, state="readonly")
-            box.pack(fill="x", pady=(0, 6))
+            box.pack(fill="x", pady=(0, 4))
             return box
 
         section("Homepage")
         entry = tk.Entry(outer, textvariable=homepage, bg=self.ui["field"], fg=self.ui["text"],
                          insertbackground=self.ui["text"], relief="flat", font=(self._ui_font_family, self._font_size(10)))
-        entry.pack(fill="x", ipady=7)
+        entry.pack(fill="x", ipady=5)
         tk.Checkbutton(outer, text="Show local address-bar suggestions and autocomplete",
                        variable=omnibox_suggestions_enabled, bg=self.ui["bg"], fg=self.ui["text"],
                        selectcolor=self.ui["field"], activebackground=self.ui["bg"],
