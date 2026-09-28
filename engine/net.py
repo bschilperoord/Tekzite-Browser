@@ -6512,11 +6512,6 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
                 _browser_cdp_call(
                     session, "Target.activateTarget", {"targetId": target_id}, message_id=102
                 )
-                try:
-                    install_embedded_chromium_permission_bridge(target_id, timeout=1.5)
-                    session["permission_bridge_bootstrap_installed"] = True
-                except Exception as exc:
-                    session["permission_bridge_install_error"] = type(exc).__name__
                 requested_url = str(url or "about:blank")
                 requested_lower = requested_url.strip().lower()
                 neutral_equivalent = requested_lower in neutral_urls and actual_lower in neutral_urls
@@ -6559,11 +6554,6 @@ def create_embedded_chromium_target(url: str = "about:blank", *, require_bootstr
         )
         session["native_app_target_reused"] = False
     session["target_id"] = target_id
-    try:
-        install_embedded_chromium_permission_bridge(target_id, timeout=1.5)
-        session["permission_bridge_target_installed"] = target_id
-    except Exception as exc:
-        session["permission_bridge_install_error"] = type(exc).__name__
     # v9.4: 100% is Chromium's native zoom. Calling the extension for the
     # default value on every newly claimed target adds synchronous CDP/extension
     # work before first paint for no visual benefit. Non-default preferences are
@@ -7249,6 +7239,11 @@ def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame
         if direct_app_target:
             session["native_direct_app_navigation_skipped"] = True
         else:
+            if str(url or '').startswith(('http://', 'https://')):
+                try:
+                    install_embedded_chromium_permission_bridge(known_target, timeout=1.2)
+                except Exception as exc:
+                    session["permission_bridge_install_error"] = type(exc).__name__
             _persistent_page_cdp_call(
                 session, "Page.navigate", {"url": str(url)},
                 target_id=known_target, timeout=min(5.0, float(timeout)), purpose="control",
@@ -7268,6 +7263,11 @@ def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame
         if direct_app_target:
             session["native_direct_app_navigation_skipped"] = True
         else:
+            if str(url or '').startswith(('http://', 'https://')):
+                try:
+                    install_embedded_chromium_permission_bridge(resolved_target, timeout=1.2)
+                except Exception as exc:
+                    session["permission_bridge_install_error"] = type(exc).__name__
             _persistent_page_cdp_call(
                 session, "Page.navigate", {"url": str(url)},
                 target_id=resolved_target, timeout=min(5.0, float(timeout)), purpose="control",
