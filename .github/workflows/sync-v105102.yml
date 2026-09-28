@@ -1,0 +1,91 @@
+name: One-shot v10.5.102 sync
+
+on:
+  push:
+    branches: [dev/v10.5.102-search-engine-settings]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+
+      - name: Synchronize v10.5.102 and preserve line endings
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          python tools/sync_version.py 10.5.102
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          changelog = Path("CHANGELOG.md")
+          text = changelog.read_text(encoding="utf-8")
+          section = """# v10.5.102 - Search engine controls in Settings
+
+          - Adds the Search engine provider picker directly to Tools -> Settings.
+          - Settings and Customize Tekzite now edit the same persistent search_url_template preference.
+          - Includes the built-in Startpage, DuckDuckGo, Google, Bing, Brave Search, Ecosia and Qwant choices plus Custom.
+          - Shows the custom {query} URL template in Settings for local/self-hosted engines such as SearXNG.
+          - Selecting a built-in provider updates its template automatically; editing a non-preset template identifies it as Custom.
+          - Validates the {query} placeholder before Settings can save.
+
+          """
+          section = "\n".join(line[10:] if line.startswith("          ") else line for line in section.splitlines()) + "\n"
+          if not text.startswith("# v10.5.102"):
+              changelog.write_text(section + text, encoding="utf-8")
+
+          changed = subprocess.check_output(
+              ["git", "diff", "--name-only", "origin/main...HEAD"],
+              text=True,
+          ).splitlines()
+          changed += subprocess.check_output(
+              ["git", "diff", "--name-only"],
+              text=True,
+          ).splitlines()
+
+          for name in dict.fromkeys(changed):
+              path = Path(name)
+              if not path.is_file():
+                  continue
+              try:
+                  original = subprocess.check_output(["git", "show", f"origin/main:{name}"])
+              except subprocess.CalledProcessError:
+                  continue
+              current = path.read_bytes()
+              if b"\0" in current or b"\0" in original:
+                  continue
+              original_crlf = b"\r\n" in original
+              normalized = current.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+              desired = normalized.replace(b"\n", b"\r\n") if original_crlf else normalized
+              if desired != current:
+                  path.write_bytes(desired)
+          PY
+          rm -f .github/workflows/sync-v105102.yml
+
+      - name: Commit synchronized release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to synchronize."
+            exit 0
+          fi
+          git commit -m "Prepare Tekzite Browser v10.5.102"
+          git push origin HEAD:dev/v10.5.102-search-engine-settings
