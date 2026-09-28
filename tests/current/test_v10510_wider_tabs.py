@@ -11,8 +11,8 @@ def test_release_version():
 
 
 def test_wider_tab_defaults():
-    assert main.DEFAULT_CUSTOMIZATION["tab_min_width"] == 175
-    assert main.DEFAULT_CUSTOMIZATION["tab_max_width"] == 330
+    assert main.DEFAULT_CUSTOMIZATION["tab_min_width"] == 160
+    assert main.DEFAULT_CUSTOMIZATION["tab_max_width"] == 300
 
 
 def test_soft_and_classic_tabs_share_width_contract():
