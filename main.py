@@ -921,6 +921,71 @@ def save_preferences(prefs):
 BROWSER_VERSION = "10.5.105"
 
 
+
+def _centered_startup_geometry(root, width, height, margin=24):
+    """Return a centered initial browser geometry for the active desktop screen.
+
+    On Windows, center on the monitor containing the pointer and respect its
+    work area so the taskbar is never covered by initial placement. Other
+    platforms use Tk's screen dimensions. Explicit tab-tearoff coordinates are
+    handled separately by BrowserApp and intentionally bypass this helper.
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+    margin = max(0, int(margin))
+    left = top = 0
+    try:
+        screen_w = max(1, int(root.winfo_screenwidth()))
+        screen_h = max(1, int(root.winfo_screenheight()))
+    except Exception:
+        screen_w, screen_h = width, height
+
+    right, bottom = screen_w, screen_h
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD),
+                ]
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            point = POINT()
+            if user32.GetCursorPos(ctypes.byref(point)):
+                MONITOR_DEFAULTTONEAREST = 2
+                user32.MonitorFromPoint.argtypes = [POINT, wintypes.DWORD]
+                user32.MonitorFromPoint.restype = wintypes.HANDLE
+                monitor = user32.MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST)
+                info = MONITORINFO()
+                info.cbSize = ctypes.sizeof(MONITORINFO)
+                user32.GetMonitorInfoW.argtypes = [
+                    wintypes.HANDLE, ctypes.POINTER(MONITORINFO)
+                ]
+                user32.GetMonitorInfoW.restype = wintypes.BOOL
+                if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                    work = info.rcWork
+                    left, top = int(work.left), int(work.top)
+                    right, bottom = int(work.right), int(work.bottom)
+        except Exception:
+            pass
+
+    work_w = max(1, right - left)
+    work_h = max(1, bottom - top)
+    width = min(width, max(1, work_w - margin * 2))
+    height = min(height, max(1, work_h - margin * 2))
+    x = left + max(margin, (work_w - width) // 2)
+    y = top + max(margin, (work_h - height) // 2)
+    return f"{width}x{height}{x:+d}{y:+d}"
+
+
 def _enable_per_monitor_dpi_awareness():
     """Put Tk and native Chromium embedding in the same pixel coordinate space.
 
@@ -2159,10 +2224,15 @@ class BrowserApp(BrowserFeatures):
         self.root.title(f"Tekzite Browser{' — Private' if self._private_mode else ''}{' — ' + self._profile_name if self._profile_name != 'Default' else ''}{title_version}")
         requested_position = getattr(self, "_requested_window_position", None)
         if requested_position:
+            # A detached tab deliberately requests the drop position.
             px, py = requested_position
             self.root.geometry(f"{self.customization['window_width']}x{self.customization['window_height']}{int(px):+d}{int(py):+d}")
         else:
-            self.root.geometry(f"{self.customization['window_width']}x{self.customization['window_height']}")
+            self.root.geometry(_centered_startup_geometry(
+                self.root,
+                self.customization['window_width'],
+                self.customization['window_height'],
+            ))
         self.root.minsize(self.customization["window_min_width"], self.customization["window_min_height"])
         # v10.5.89: the shell is frameless, so Tk/Windows do not expose normal
         # resize borders. Keep geometry itself resizable and provide Tekzite-owned
