@@ -109,8 +109,8 @@ def omnibox_suggestions(query, *, visits=None, bookmarks=None, tabs=None, recent
             },
         ))
 
-    # Raw inputs are useful for repeated searches even in Privacy Lockdown,
-    # where browsing history is deliberately not persisted.
+    # Raw inputs remain useful for repeated searches. Privacy Core can run
+    # alongside persistent history; Private Window remains the ephemeral mode.
     for index, value in enumerate(list(recent_inputs or [])[:100]):
         add('recent', value, value, 2 + min(index, 18), secondary='Recent input')
 
@@ -619,7 +619,7 @@ class BrowserFeatures:
         win.geometry('940x520')
         lockdown = bool(self.preferences.get('privacy_lockdown', True))
         note = tk.StringVar(value=(
-            'Lockdown active: extensions are saved but not loaded.'
+            'Privacy Core active: extensions are saved but not loaded.'
             if lockdown else
             'Extensions load at startup; restart after changes.'
         ))
