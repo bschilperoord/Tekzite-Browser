@@ -13439,19 +13439,43 @@ class BrowserApp(BrowserFeatures):
         yscroll.configure(command=text.yview)
         xscroll.configure(command=text.xview)
 
-        # Syntax palette inspired by modern code editors, with enough contrast to
-        # distinguish structure at a glance without turning the DOM into confetti.
+        # v10.5.99: richer HTML + CSS semantics using a compact editor palette.
+        # CSS overlays sit above the neutral <style>/style="" base, so selectors,
+        # properties, values and literals remain visually distinct without adding
+        # extra widgets or repaint layers.
         syntax_tags = {
             "html_comment": {"foreground": "#6a9955"},
             "html_doctype": {"foreground": "#c586c0"},
-            "html_bracket": {"foreground": "#808fa8"},
+            "html_bracket": {"foreground": "#7d8590"},
             "html_tag": {"foreground": "#ff7ab2"},
-            "html_attr": {"foreground": "#7ee787"},
+            "html_attr": {"foreground": "#79c0ff"},
+            "html_equals": {"foreground": "#8b949e"},
+            "html_quote": {"foreground": "#8b949e"},
             "html_value": {"foreground": "#f2cc60"},
-            "html_entity": {"foreground": "#79c0ff"},
-            "html_script": {"foreground": "#dcdcaa"},
-            "html_style": {"foreground": "#ce9178"},
+            "html_entity": {"foreground": "#d2a8ff"},
+            "html_script": {"foreground": "#c9d1d9"},
+            "html_style": {"foreground": "#c9d1d9"},
+            "css_selector": {"foreground": "#7ee787"},
+            "css_at_rule": {"foreground": "#d2a8ff"},
+            "css_property": {"foreground": "#79c0ff"},
+            "css_value": {"foreground": "#ffa657"},
+            "css_string": {"foreground": "#a5d6ff"},
+            "css_number": {"foreground": "#f2cc60"},
+            "css_color": {"foreground": "#ff7ab2"},
+            "css_function": {"foreground": "#dcdcaa"},
+            "css_variable": {"foreground": "#56d4dd"},
+            "css_important": {"foreground": "#ff7b72"},
+            "css_punctuation": {"foreground": "#8b949e"},
+            "css_comment": {"foreground": "#6a9955"},
         }
+        syntax_priority = (
+            "html_script", "html_style", "html_value", "html_attr",
+            "html_tag", "html_bracket", "html_equals", "html_quote",
+            "html_entity", "html_doctype", "html_comment",
+            "css_value", "css_selector", "css_at_rule", "css_property",
+            "css_variable", "css_function", "css_number", "css_color",
+            "css_string", "css_important", "css_punctuation", "css_comment",
+        )
         for tag_name, options in syntax_tags.items():
             text.tag_configure(tag_name, **options)
 
@@ -13501,9 +13525,13 @@ class BrowserApp(BrowserFeatures):
         source_insert_frame_ms = 1
         ui_slice_budget_ms = 3.0
         highlight_limit = 750_000
+        # One Tcl/Tk tag_add call can accept many ranges. Grouping equal-color
+        # ranges cuts the cross-language call count by roughly an order of
+        # magnitude while retaining the v10.5.98 3 ms UI time budget.
         highlight_batch_size = 64
+        highlight_calls_per_slice = 3
         highlight_start_delay_ms = 210
-        highlight_span_limit = 24000
+        highlight_span_limit = 28000
         search_match_limit = 20000
         search_highlight_limit = 400
         search_tag_batch_size = 48
@@ -13524,117 +13552,456 @@ class BrowserApp(BrowserFeatures):
             text.tag_add(tag_name, tk_index(start_offset), tk_index(end_offset))
 
         def build_highlight_plan(html, generation):
-            """Parse HTML away from Tk; return bounded color spans plus stats."""
+            """Build grouped HTML/CSS color ranges off-thread in near-linear time."""
             sample = html[:highlight_limit]
-            spans = []
+            groups = {tag_name: [] for tag_name in syntax_tags}
+            span_count = 0
             worker_units = 0
+            css_regions = []
 
-            def worker_yield():
+            def worker_yield(force=False):
                 nonlocal worker_units
                 worker_units += 1
-                if worker_units % 384 == 0:
-                    # Cooperatively return the GIL. The inspector worker is
-                    # intentionally low-concurrency, but regex/token loops still
-                    # need to leave room for the Tk/DWM thread.
+                if force or worker_units % 512 == 0:
                     time.sleep(0)
 
             def span(tag_name, start_offset, end_offset):
-                if end_offset <= start_offset or len(spans) >= highlight_span_limit:
+                nonlocal span_count
+                if (
+                    end_offset <= start_offset
+                    or span_count >= highlight_span_limit
+                    or tag_name not in groups
+                ):
+                    return False
+                groups[tag_name].append((int(start_offset), int(end_offset)))
+                span_count += 1
+                return True
+
+            def trimmed_bounds(value, start_offset, end_offset):
+                while start_offset < end_offset and value[start_offset].isspace():
+                    start_offset += 1
+                while end_offset > start_offset and value[end_offset - 1].isspace():
+                    end_offset -= 1
+                return start_offset, end_offset
+
+            css_property_pattern = re.compile(
+                r"(?:--[A-Za-z_][\w-]*|-?[A-Za-z_][\w-]*)$"
+            )
+            css_at_keyword_pattern = re.compile(r"@[A-Za-z_-][\w-]*")
+            css_value_token_pattern = re.compile(
+                r"(?P<important>!important\b)"
+                r"|(?P<color>#[0-9a-f]{3,8}\b)"
+                r"|(?P<number>-?(?:\d+(?:\.\d*)?|\.\d+)(?:%|[A-Za-z]+)?)"
+                r"|(?P<variable>--[A-Za-z_][\w-]*)"
+                r"|(?P<function>[A-Za-z_-][\w-]*(?=\s*\())"
+                r"|(?P<punct>[(),/\[\]])",
+                flags=re.IGNORECASE,
+            )
+            nested_rule_at_rules = {
+                "media", "supports", "container", "layer", "scope",
+                "keyframes", "-webkit-keyframes", "document", "starting-style",
+            }
+
+            def color_css_value(css, base_offset, start_offset, end_offset):
+                start_offset, end_offset = trimmed_bounds(
+                    css, start_offset, end_offset
+                )
+                if end_offset <= start_offset:
                     return
-                spans.append((tag_name, int(start_offset), int(end_offset)))
+                span(
+                    "css_value",
+                    base_offset + start_offset,
+                    base_offset + end_offset,
+                )
+                for token in css_value_token_pattern.finditer(
+                    css, start_offset, end_offset
+                ):
+                    kind = token.lastgroup
+                    tag_name = {
+                        "important": "css_important",
+                        "color": "css_color",
+                        "number": "css_number",
+                        "variable": "css_variable",
+                        "function": "css_function",
+                        "punct": "css_punctuation",
+                    }.get(kind)
+                    if tag_name:
+                        span(
+                            tag_name,
+                            base_offset + token.start(),
+                            base_offset + token.end(),
+                        )
+                    worker_yield()
 
-            for match in re.finditer(r"<!--.*?-->", sample, flags=re.DOTALL):
-                span("html_comment", match.start(), match.end())
-                worker_yield()
-            for match in re.finditer(r"<![^>]*>", sample, flags=re.IGNORECASE | re.DOTALL):
-                if sample.startswith("<!--", match.start()):
-                    continue
-                span("html_doctype", match.start(), match.end())
+            def color_css_prelude(css, base_offset, start_offset, end_offset):
+                start_offset, end_offset = trimmed_bounds(
+                    css, start_offset, end_offset
+                )
+                if end_offset <= start_offset:
+                    return None
+                piece = css[start_offset:end_offset]
+                if piece.startswith("@"):
+                    keyword_match = css_at_keyword_pattern.match(piece)
+                    if keyword_match:
+                        span(
+                            "css_at_rule",
+                            base_offset + start_offset + keyword_match.start(),
+                            base_offset + start_offset + keyword_match.end(),
+                        )
+                        keyword = keyword_match.group(0)[1:].lower()
+                        rest_start = start_offset + keyword_match.end()
+                        rest_start, rest_end = trimmed_bounds(
+                            css, rest_start, end_offset
+                        )
+                        if rest_end > rest_start:
+                            span(
+                                "css_value",
+                                base_offset + rest_start,
+                                base_offset + rest_end,
+                            )
+                        return keyword
+                    span(
+                        "css_at_rule",
+                        base_offset + start_offset,
+                        base_offset + end_offset,
+                    )
+                    return ""
+                span(
+                    "css_selector",
+                    base_offset + start_offset,
+                    base_offset + end_offset,
+                )
+                return None
+
+            def tokenize_css_region(css, base_offset, declarations_only=False):
+                """Lightweight CSS structural scanner for <style> and style="..."."""
+                if not css or span_count >= highlight_span_limit:
+                    return
+
+                stack = ["decls" if declarations_only else "rules"]
+                statement_start = 0
+                value_start = None
+                paren_depth = 0
+                bracket_depth = 0
+                i = 0
+                n = len(css)
+
+                while i < n and span_count < highlight_span_limit:
+                    # Comments and strings are skipped structurally so braces,
+                    # semicolons and colons inside them never confuse the scanner.
+                    if css.startswith("/*", i):
+                        end = css.find("*/", i + 2)
+                        end = n if end < 0 else end + 2
+                        span(
+                            "css_comment",
+                            base_offset + i,
+                            base_offset + end,
+                        )
+                        i = end
+                        worker_yield()
+                        continue
+
+                    ch = css[i]
+                    if ch in {'"', "'"}:
+                        quote = ch
+                        j = i + 1
+                        while j < n:
+                            if css[j] == "\\":
+                                j += 2
+                                continue
+                            if css[j] == quote:
+                                j += 1
+                                break
+                            j += 1
+                        span(
+                            "css_string",
+                            base_offset + i,
+                            base_offset + min(j, n),
+                        )
+                        i = min(j, n)
+                        worker_yield()
+                        continue
+
+                    context = stack[-1]
+
+                    if context == "rules":
+                        if ch == "{":
+                            keyword = color_css_prelude(
+                                css, base_offset, statement_start, i
+                            )
+                            span(
+                                "css_punctuation",
+                                base_offset + i,
+                                base_offset + i + 1,
+                            )
+                            stack.append(
+                                "rules" if keyword in nested_rule_at_rules else "decls"
+                            )
+                            statement_start = i + 1
+                        elif ch == "}":
+                            span(
+                                "css_punctuation",
+                                base_offset + i,
+                                base_offset + i + 1,
+                            )
+                            if len(stack) > 1:
+                                stack.pop()
+                            statement_start = i + 1
+                        elif ch == ";":
+                            color_css_prelude(
+                                css, base_offset, statement_start, i
+                            )
+                            span(
+                                "css_punctuation",
+                                base_offset + i,
+                                base_offset + i + 1,
+                            )
+                            statement_start = i + 1
+                        i += 1
+                        worker_yield()
+                        continue
+
+                    # Declaration context.
+                    if value_start is not None:
+                        if ch == "(":
+                            paren_depth += 1
+                        elif ch == ")" and paren_depth:
+                            paren_depth -= 1
+                        elif ch == "[":
+                            bracket_depth += 1
+                        elif ch == "]" and bracket_depth:
+                            bracket_depth -= 1
+                        elif ch == ";" and paren_depth == 0 and bracket_depth == 0:
+                            color_css_value(
+                                css, base_offset, value_start, i
+                            )
+                            span(
+                                "css_punctuation",
+                                base_offset + i,
+                                base_offset + i + 1,
+                            )
+                            value_start = None
+                            statement_start = i + 1
+                        elif ch == "}" and paren_depth == 0 and bracket_depth == 0:
+                            color_css_value(
+                                css, base_offset, value_start, i
+                            )
+                            span(
+                                "css_punctuation",
+                                base_offset + i,
+                                base_offset + i + 1,
+                            )
+                            value_start = None
+                            if len(stack) > 1:
+                                stack.pop()
+                            statement_start = i + 1
+                        i += 1
+                        worker_yield()
+                        continue
+
+                    if ch == ":":
+                        prop_start, prop_end = trimmed_bounds(
+                            css, statement_start, i
+                        )
+                        prop = css[prop_start:prop_end]
+                        if css_property_pattern.fullmatch(prop):
+                            span(
+                                "css_property",
+                                base_offset + prop_start,
+                                base_offset + prop_end,
+                            )
+                            span(
+                                "css_punctuation",
+                                base_offset + i,
+                                base_offset + i + 1,
+                            )
+                            value_start = i + 1
+                            paren_depth = 0
+                            bracket_depth = 0
+                    elif ch == "{":
+                        keyword = color_css_prelude(
+                            css, base_offset, statement_start, i
+                        )
+                        span(
+                            "css_punctuation",
+                            base_offset + i,
+                            base_offset + i + 1,
+                        )
+                        stack.append(
+                            "rules" if keyword in nested_rule_at_rules else "decls"
+                        )
+                        statement_start = i + 1
+                    elif ch == ";":
+                        color_css_prelude(
+                            css, base_offset, statement_start, i
+                        )
+                        span(
+                            "css_punctuation",
+                            base_offset + i,
+                            base_offset + i + 1,
+                        )
+                        statement_start = i + 1
+                    elif ch == "}":
+                        span(
+                            "css_punctuation",
+                            base_offset + i,
+                            base_offset + i + 1,
+                        )
+                        if len(stack) > 1:
+                            stack.pop()
+                        statement_start = i + 1
+
+                    i += 1
+                    worker_yield()
+
+                if value_start is not None and value_start < n:
+                    color_css_value(css, base_offset, value_start, n)
+                elif stack and stack[-1] == "rules" and statement_start < n:
+                    color_css_prelude(css, base_offset, statement_start, n)
+
+            # Pre-mark embedded script/style bodies. The HTML token pass then
+            # skips those regions, preventing JS/CSS text containing "<tag>"
+            # from being falsely treated as markup.
+            embedded_regions = []
+            block_pattern = re.compile(
+                r"<(script|style)\b[^>]*>(.*?)</\1\s*>",
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            for block in block_pattern.finditer(sample):
+                kind = block.group(1).lower()
+                body_start, body_end = block.start(2), block.end(2)
+                embedded_regions.append((body_start, body_end))
+                if kind == "style":
+                    span("html_style", body_start, body_end)
+                    css_regions.append((body_start, body_end, False))
+                else:
+                    span("html_script", body_start, body_end)
                 worker_yield()
 
-            tag_pattern = re.compile(r"</?\s*[A-Za-z][^<>]*?>", flags=re.DOTALL)
+            html_token_pattern = re.compile(
+                r"<!--.*?-->"
+                r"|<![^>]*>"
+                r"|</?\s*[A-Za-z][^<>]*?>"
+                r"|&(?:#[0-9]+|#x[0-9a-f]+|[A-Za-z][A-Za-z0-9]+);",
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            tag_name_pattern = re.compile(
+                r"</?\s*([A-Za-z][\w:.-]*)"
+            )
             attr_pattern = re.compile(
-                r"([A-Za-z_:][\w:.-]*)(\s*=\s*)(\"[^\"]*\"|'[^']*'|[^\s>]+)",
+                r"([A-Za-z_:][\w:.-]*)(\s*=\s*)?"
+                r"(\"[^\"]*\"|'[^']*'|[^\s>]+)?",
                 flags=re.DOTALL,
             )
-            for match in tag_pattern.finditer(sample):
-                if len(spans) >= highlight_span_limit:
-                    break
-                worker_yield()
+
+            region_index = 0
+            for match in html_token_pattern.finditer(sample):
+                start = match.start()
+                while (
+                    region_index < len(embedded_regions)
+                    and start >= embedded_regions[region_index][1]
+                ):
+                    region_index += 1
+                if (
+                    region_index < len(embedded_regions)
+                    and embedded_regions[region_index][0] <= start
+                    < embedded_regions[region_index][1]
+                ):
+                    continue
+
                 token = match.group(0)
                 token_start = match.start()
 
-                opening = re.match(r"</?\s*", token)
-                if opening:
-                    span(
-                        "html_bracket",
-                        token_start + opening.start(),
-                        token_start + opening.end(),
-                    )
+                if token.startswith("<!--"):
+                    span("html_comment", match.start(), match.end())
+                    worker_yield()
+                    continue
+                if token.startswith("<!"):
+                    span("html_doctype", match.start(), match.end())
+                    worker_yield()
+                    continue
+                if token.startswith("&"):
+                    span("html_entity", match.start(), match.end())
+                    worker_yield()
+                    continue
 
-                tag_name_match = re.match(r"</?\s*([A-Za-z][\w:.-]*)", token)
-                if tag_name_match:
-                    span(
-                        "html_tag",
-                        token_start + tag_name_match.start(1),
-                        token_start + tag_name_match.end(1),
-                    )
-                    attr_start = tag_name_match.end(1)
-                else:
-                    attr_start = 0
+                name_match = tag_name_pattern.match(token)
+                if not name_match:
+                    continue
 
-                closing_start = max(token.rfind("/>"), token.rfind(">"))
+                span(
+                    "html_bracket",
+                    token_start,
+                    token_start + name_match.start(1),
+                )
+                span(
+                    "html_tag",
+                    token_start + name_match.start(1),
+                    token_start + name_match.end(1),
+                )
+
+                closing_start = token.rfind(">")
                 if closing_start >= 0:
+                    prefix_start = closing_start - 1 if (
+                        closing_start > 0 and token[closing_start - 1] == "/"
+                    ) else closing_start
                     span(
                         "html_bracket",
-                        token_start + closing_start,
+                        token_start + prefix_start,
                         token_start + len(token),
                     )
 
+                attr_start = name_match.end(1)
                 for attr in attr_pattern.finditer(token, attr_start):
-                    if len(spans) >= highlight_span_limit:
-                        break
-                    worker_yield()
-                    span(
-                        "html_attr",
-                        token_start + attr.start(1),
-                        token_start + attr.end(1),
-                    )
-                    span(
-                        "html_value",
-                        token_start + attr.start(3),
-                        token_start + attr.end(3),
-                    )
+                    attr_name = attr.group(1)
+                    if not attr_name:
+                        continue
+                    name_start = token_start + attr.start(1)
+                    name_end = token_start + attr.end(1)
+                    span("html_attr", name_start, name_end)
 
-            if len(spans) < highlight_span_limit:
-                for match in re.finditer(
-                    r"&(?:#[0-9]+|#x[0-9a-f]+|[A-Za-z][A-Za-z0-9]+);",
-                    sample, flags=re.IGNORECASE,
-                ):
-                    span("html_entity", match.start(), match.end())
-                    worker_yield()
-                    if len(spans) >= highlight_span_limit:
-                        break
+                    equals = attr.group(2)
+                    if equals:
+                        equals_local = attr.start(2) + equals.find("=")
+                        span(
+                            "html_equals",
+                            token_start + equals_local,
+                            token_start + equals_local + 1,
+                        )
 
-            if len(spans) < highlight_span_limit:
-                for match in re.finditer(
-                    r"<script\b[^>]*>(.*?)</script\s*>",
-                    sample, flags=re.IGNORECASE | re.DOTALL,
-                ):
-                    span("html_script", match.start(1), match.end(1))
-                    worker_yield()
-                    if len(spans) >= highlight_span_limit:
-                        break
+                    raw_value = attr.group(3)
+                    if raw_value:
+                        value_start = token_start + attr.start(3)
+                        value_end = token_start + attr.end(3)
+                        quoted = (
+                            len(raw_value) >= 2
+                            and raw_value[0] in {'"', "'"}
+                            and raw_value[-1] == raw_value[0]
+                        )
+                        if quoted:
+                            span("html_quote", value_start, value_start + 1)
+                            span("html_quote", value_end - 1, value_end)
+                            inner_start, inner_end = value_start + 1, value_end - 1
+                        else:
+                            inner_start, inner_end = value_start, value_end
+                        span("html_value", inner_start, inner_end)
 
-            if len(spans) < highlight_span_limit:
-                for match in re.finditer(
-                    r"<style\b[^>]*>(.*?)</style\s*>",
-                    sample, flags=re.IGNORECASE | re.DOTALL,
-                ):
-                    span("html_style", match.start(1), match.end(1))
+                        if attr_name.lower() == "style" and inner_end > inner_start:
+                            css_regions.append((inner_start, inner_end, True))
                     worker_yield()
-                    if len(spans) >= highlight_span_limit:
-                        break
+
+            # CSS is parsed only in actual style contexts. This is both faster
+            # and more accurate than running CSS regexes over the whole DOM.
+            css_regions.sort(key=lambda item: item[0])
+            for css_start, css_end, declarations_only in css_regions:
+                if span_count >= highlight_span_limit:
+                    break
+                tokenize_css_region(
+                    sample[css_start:css_end],
+                    css_start,
+                    declarations_only=declarations_only,
+                )
+                worker_yield(force=True)
 
             lines = 1 if html else 0
             comments = 0
@@ -13654,19 +14021,25 @@ class BrowserApp(BrowserFeatures):
                 if elements % 512 == 0:
                     time.sleep(0)
 
+            tag_order = [
+                tag_name for tag_name in syntax_priority
+                if groups.get(tag_name)
+            ]
             return {
                 "generation": generation,
-                "spans": spans,
+                "groups": groups,
+                "tag_order": tag_order,
+                "span_count": span_count,
                 "lines": lines,
                 "elements": elements,
                 "comments": comments,
                 "characters": len(html),
                 "syntax_clipped": len(html) > highlight_limit,
-                "span_clipped": len(spans) >= highlight_span_limit,
+                "span_clipped": span_count >= highlight_span_limit,
             }
 
-        def apply_highlight_plan(plan, offset=0):
-            """Apply syntax tags in tiny, time-budgeted Tk slices."""
+        def apply_highlight_plan(plan, tag_index=0, range_index=0):
+            """Apply grouped ranges with very few Tcl/Tk calls per UI slice."""
             try:
                 alive = bool(window.winfo_exists())
             except Exception:
@@ -13676,36 +14049,71 @@ class BrowserApp(BrowserFeatures):
 
             if inspector_interaction_active():
                 highlight_state["apply_after"] = window.after(
-                    18, lambda: apply_highlight_plan(plan, offset)
+                    18,
+                    lambda: apply_highlight_plan(
+                        plan, tag_index, range_index
+                    ),
                 )
                 return
 
-            spans = plan.get("spans") or []
-            hard_stop = min(len(spans), offset + highlight_batch_size)
-            stop = offset
+            groups = plan.get("groups") or {}
+            tag_order = plan.get("tag_order") or []
             deadline = time.perf_counter() + (ui_slice_budget_ms / 1000.0)
+            calls = 0
+
+            if tag_index == 0 and range_index == 0:
+                text.configure(state="normal")
+                try:
+                    for tag_name in syntax_tags:
+                        text.tag_remove(tag_name, "1.0", "end")
+                finally:
+                    text.configure(state="disabled")
 
             text.configure(state="normal")
             try:
-                while stop < hard_stop:
-                    tag_name, start_offset, end_offset = spans[stop]
-                    add_tag(tag_name, start_offset, end_offset)
-                    stop += 1
-                    if (stop - offset) % 8 == 0 and time.perf_counter() >= deadline:
+                while tag_index < len(tag_order):
+                    tag_name = tag_order[tag_index]
+                    ranges = groups.get(tag_name) or []
+                    if range_index >= len(ranges):
+                        tag_index += 1
+                        range_index = 0
+                        continue
+
+                    stop = min(
+                        len(ranges),
+                        range_index + highlight_batch_size,
+                    )
+                    args = []
+                    for start_offset, end_offset in ranges[range_index:stop]:
+                        args.extend((
+                            tk_index(start_offset),
+                            tk_index(end_offset),
+                        ))
+                    if args:
+                        # Tk Text.tag_add accepts multiple index pairs. One
+                        # interpreter crossing now colors up to 64 ranges.
+                        text.tag_add(tag_name, *args)
+
+                    range_index = stop
+                    calls += 1
+                    if (
+                        calls >= highlight_calls_per_slice
+                        or time.perf_counter() >= deadline
+                    ):
                         break
             finally:
                 text.configure(state="disabled")
 
-            if stop < len(spans):
+            if tag_index < len(tag_order):
                 highlight_state["apply_after"] = window.after(
-                    2, lambda: apply_highlight_plan(plan, stop)
+                    2,
+                    lambda: apply_highlight_plan(
+                        plan, tag_index, range_index
+                    ),
                 )
                 return
 
-            for tag_name in (
-                "html_script", "html_style", "html_comment", "html_doctype",
-                "html_bracket", "html_tag", "html_attr", "html_value", "html_entity",
-            ):
+            for tag_name in syntax_priority:
                 text.tag_raise(tag_name)
             text.tag_raise("match_all")
             text.tag_raise("match_current")

@@ -19,7 +19,9 @@ def test_html_inspector_parses_syntax_off_tk_thread():
 
 def test_html_inspector_applies_color_tags_in_small_batches():
     assert "highlight_batch_size = 64" in INSPECT_SOURCE
-    assert "apply_highlight_plan(plan, stop)" in INSPECT_SOURCE
+    assert "highlight_calls_per_slice = 3" in INSPECT_SOURCE
+    assert "text.tag_add(tag_name, *args)" in INSPECT_SOURCE
+    assert "apply_highlight_plan(" in INSPECT_SOURCE
     assert "window.after(" in INSPECT_SOURCE
 
 
