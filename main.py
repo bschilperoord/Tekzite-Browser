@@ -48,6 +48,27 @@ from engine.net import (
 
 START_URL = "https://www.startpage.com/"
 
+DEFAULT_SEARCH_URL_TEMPLATE = "https://www.startpage.com/sp/search?query={query}"
+SEARCH_ENGINE_PRESETS = {
+    "Startpage": DEFAULT_SEARCH_URL_TEMPLATE,
+    "DuckDuckGo": "https://duckduckgo.com/?q={query}",
+    "Google": "https://www.google.com/search?q={query}",
+    "Bing": "https://www.bing.com/search?q={query}",
+    "Brave Search": "https://search.brave.com/search?q={query}",
+    "Ecosia": "https://www.ecosia.org/search?q={query}",
+    "Qwant": "https://www.qwant.com/?q={query}",
+}
+CUSTOM_SEARCH_ENGINE = "Custom"
+
+
+def _search_engine_name_for_template(template):
+    """Return the built-in provider name for an exact template, else Custom."""
+    candidate = str(template or "").strip()
+    for name, preset_template in SEARCH_ENGINE_PRESETS.items():
+        if candidate == preset_template:
+            return name
+    return CUSTOM_SEARCH_ENGINE
+
 
 UI_COLOR_DEFAULTS = {
     "bg": "#06080d",
@@ -301,7 +322,7 @@ DEFAULT_PREFERENCES = {
     "site_permissions": {},
     "download_prompt": False,
     "update_repository": "",
-    "search_url_template": "https://www.startpage.com/sp/search?query={query}",
+    "search_url_template": DEFAULT_SEARCH_URL_TEMPLATE,
     "customization": dict(DEFAULT_CUSTOMIZATION),
 }
 
@@ -838,8 +859,8 @@ def load_preferences():
         prefs["site_permissions"] = {}
     prefs["update_repository"] = str(prefs.get("update_repository") or "").strip()[:160]
     prefs["homepage"] = str(prefs.get("homepage") or START_URL).strip()[:32768] or START_URL
-    template = str(prefs.get("search_url_template") or "https://www.startpage.com/sp/search?query={query}").strip()[:500]
-    prefs["search_url_template"] = template if "{query}" in template else "https://www.startpage.com/sp/search?query={query}"
+    template = str(prefs.get("search_url_template") or DEFAULT_SEARCH_URL_TEMPLATE).strip()[:500]
+    prefs["search_url_template"] = template if "{query}" in template else DEFAULT_SEARCH_URL_TEMPLATE
     prefs["customization"] = _normalized_customization(prefs.get("customization"))
     return prefs
 
@@ -857,9 +878,9 @@ def save_preferences(prefs):
     )
     payload["extensions"] = _normalized_extension_entries(payload.get("extensions", []))
     payload["homepage"] = str(payload.get("homepage") or START_URL).strip()[:32768] or START_URL
-    payload["search_url_template"] = str(payload.get("search_url_template") or "https://www.startpage.com/sp/search?query={query}").strip()[:500]
+    payload["search_url_template"] = str(payload.get("search_url_template") or DEFAULT_SEARCH_URL_TEMPLATE).strip()[:500]
     if "{query}" not in payload["search_url_template"]:
-        payload["search_url_template"] = "https://www.startpage.com/sp/search?query={query}"
+        payload["search_url_template"] = DEFAULT_SEARCH_URL_TEMPLATE
     payload["customization"] = _normalized_customization(payload.get("customization"))
     last_error = None
     for attempt in range(3):
@@ -11405,9 +11426,9 @@ class BrowserApp(BrowserFeatures):
         return icons.get(item, words.get(item, item.title()))
 
     def _search_url(self, query):
-        template = str(getattr(self, "preferences", DEFAULT_PREFERENCES).get("search_url_template") or "https://www.startpage.com/sp/search?query={query}")
+        template = str(getattr(self, "preferences", DEFAULT_PREFERENCES).get("search_url_template") or DEFAULT_SEARCH_URL_TEMPLATE)
         if "{query}" not in template:
-            template = "https://www.startpage.com/sp/search?query={query}"
+            template = DEFAULT_SEARCH_URL_TEMPLATE
         return template.replace("{query}", quote_plus(str(query or "")))
 
     def _apply_toolbar_layout(self):
@@ -12068,15 +12089,52 @@ class BrowserApp(BrowserFeatures):
 
         # Behavior -----------------------------------------------------------
         homepage_var = tk.StringVar(value=str(self.preferences.get("homepage", START_URL)))
-        search_var = tk.StringVar(value=str(self.preferences.get("search_url_template", "https://www.startpage.com/sp/search?query={query}")))
+        search_var = tk.StringVar(value=str(self.preferences.get("search_url_template", DEFAULT_SEARCH_URL_TEMPLATE)))
+        search_engine_var = tk.StringVar(
+            value=_search_engine_name_for_template(search_var.get())
+        )
         startup_var = tk.StringVar(value=str(self.preferences.get("startup", "homepage")))
         newtab_var = tk.StringVar(value=str(self.preferences.get("new_tab", "blank")))
         zoom_var = tk.StringVar(value=f"{self._page_zoom_percent()}%")
         statusbar_var = tk.BooleanVar(value=bool(self.preferences.get("show_status_bar", True)))
-        for text, var in (("Homepage", homepage_var), ("Search URL template", search_var)):
-            label(behavior_page, text, bold=True).pack(anchor="w", pady=(5, 2))
-            entry(behavior_page, var).pack(fill="x", ipady=5, pady=(0, 7))
-        label(behavior_page, "Use {query} where the URL-encoded search terms should go.", muted=True).pack(anchor="w", pady=(0, 10))
+
+        label(behavior_page, "Homepage", bold=True).pack(anchor="w", pady=(5, 2))
+        entry(behavior_page, homepage_var).pack(fill="x", ipady=5, pady=(0, 10))
+
+        search_row = tk.Frame(behavior_page, bg=self.ui["bg"])
+        search_row.pack(fill="x", pady=(2, 7))
+        label(search_row, "Search engine", bold=True, width=18).pack(side="left")
+        search_engine_box = ttk.Combobox(
+            search_row,
+            textvariable=search_engine_var,
+            values=list(SEARCH_ENGINE_PRESETS) + [CUSTOM_SEARCH_ENGINE],
+            state="readonly",
+            width=24,
+        )
+        search_engine_box.pack(side="left")
+
+        label(behavior_page, "Search URL template", bold=True).pack(anchor="w", pady=(7, 2))
+        search_template_entry = entry(behavior_page, search_var)
+        search_template_entry.pack(fill="x", ipady=5, pady=(0, 5))
+        label(
+            behavior_page,
+            "Choose a provider above, or use Custom with {query}. Local SearXNG URLs work here too.",
+            muted=True,
+        ).pack(anchor="w", pady=(0, 10))
+
+        def select_search_engine(_event=None):
+            template = SEARCH_ENGINE_PRESETS.get(search_engine_var.get())
+            if template:
+                search_var.set(template)
+
+        def sync_search_engine_from_template(*_args):
+            search_engine_var.set(
+                _search_engine_name_for_template(search_var.get())
+            )
+
+        search_engine_box.bind("<<ComboboxSelected>>", select_search_engine)
+        search_var.trace_add("write", sync_search_engine_from_template)
+
         row = tk.Frame(behavior_page, bg=self.ui["bg"]); row.pack(fill="x", pady=5)
         label(row, "Startup", width=14).pack(side="left")
         ttk.Combobox(row, textvariable=startup_var, values=["homepage", "blank"], state="readonly", width=14).pack(side="left", padx=(0, 18))
@@ -12221,7 +12279,11 @@ class BrowserApp(BrowserFeatures):
 
         def save_close():
             custom = collect_custom()
-            search_template = search_var.get().strip()
+            selected_engine = search_engine_var.get()
+            search_template = SEARCH_ENGINE_PRESETS.get(
+                selected_engine, search_var.get().strip()
+            )
+            search_template = str(search_template or "").strip()[:500]
             if "{query}" not in search_template:
                 self._show_message("error", "Customize Tekzite", "Search URL template must contain {query}.", parent=win)
                 return
