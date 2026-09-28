@@ -51,7 +51,7 @@ def test_live_socket_snapshot_includes_all_owned_tcp_udp_and_marks_direct(monkey
         200: {"pid": 200, "ppid": 100, "exe": "TekziteNetwork.exe"},
         300: {"pid": 300, "ppid": 100, "exe": "chromium.exe"},
         301: {"pid": 301, "ppid": 300, "exe": "chromium.exe"},
-        999: {"pid": 999, "ppid": 1, "exe": "other.exe"},
+        999: {"pid": 999, "ppid": 100, "exe": "other.exe"},
     }
     sockets = [
         {"pid": 300, "protocol": "TCP", "family": "IPv4", "local_address": "127.0.0.1", "local_port": 50000,

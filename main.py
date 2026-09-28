@@ -7359,7 +7359,7 @@ class BrowserApp(BrowserFeatures):
             columns = 4 if content_width >= 900 else (3 if content_width >= 690 else 2)
             gap = 14
             card_width = int((content_width - gap * (columns - 1)) / columns)
-            card_height = 126
+            card_height = 134
             grid_top = top + 82
 
             for index, item in enumerate(cards):
@@ -7408,14 +7408,14 @@ class BrowserApp(BrowserFeatures):
                     tags=(tag,),
                 )
                 canvas.create_text(
-                    x1 + 22, y1 + 72, text=host_display,
+                    x1 + 22, y1 + 80, text=host_display,
                     anchor="nw", width=max(80, card_width - 44),
                     fill=self.ui["muted"],
                     font=(self._ui_font_family, self._font_size(8)),
                     tags=(tag,),
                 )
                 canvas.create_text(
-                    x1 + 22, y1 + 96,
+                    x1 + 22, y1 + 106,
                     text=f"{count:,} visit{'s' if count != 1 else ''}",
                     anchor="nw",
                     fill=self.ui["muted_dim"],

@@ -642,43 +642,123 @@ def _windows_process_snapshot():
         return {}
 
 
+def _process_exe_name(exe) -> str:
+    return os.path.basename(str(exe or "").strip()).casefold()
+
+
+_CHROMIUM_PROCESS_NAMES = {
+    "chrome.exe", "chromium.exe", "ungoogled-chromium.exe",
+    "chrome", "chromium", "chromium-browser", "ungoogled-chromium",
+    "google-chrome", "google-chrome-stable",
+}
+
+_TEKZITE_NETWORK_PROCESS_NAMES = {
+    "tekzite-network.exe", "tekzite-network",
+    "python.exe", "pythonw.exe", "python", "pythonw",
+}
+
+
+def _is_chromium_process_name(exe) -> bool:
+    return _process_exe_name(exe) in _CHROMIUM_PROCESS_NAMES
+
+
+def _is_tekzite_network_process_name(exe) -> bool:
+    return _process_exe_name(exe) in _TEKZITE_NETWORK_PROCESS_NAMES
+
+
+def _tracked_process_pid(state) -> int:
+    """Return a PID only while Tekzite's exact subprocess handle is still alive."""
+    if not isinstance(state, dict):
+        return 0
+    proc = state.get("process")
+    if proc is None:
+        return 0
+    try:
+        pid = int(getattr(proc, "pid", 0) or 0)
+    except Exception:
+        return 0
+    if pid <= 0:
+        return 0
+    poll = getattr(proc, "poll", None)
+    if callable(poll):
+        try:
+            if poll() is not None:
+                return 0
+        except Exception:
+            return 0
+    return pid
+
+
+def _add_filtered_process_tree(owned, processes, root_pid, predicate, *, trusted_root=False):
+    """Add a tracked process tree without admitting arbitrary child applications."""
+    try:
+        root_pid = int(root_pid or 0)
+    except Exception:
+        return
+    if root_pid <= 0:
+        return
+
+    root_info = processes.get(root_pid)
+    if root_info is None:
+        if not trusted_root:
+            return
+    elif not predicate(root_info.get("exe")):
+        return
+
+    accepted = {root_pid}
+    for _ in range(max(2, len(processes) + 1)):
+        before = len(accepted)
+        for pid, item in processes.items():
+            try:
+                parent = int(item.get("ppid") or 0)
+                child_pid = int(pid)
+            except Exception:
+                continue
+            if parent in accepted and predicate(item.get("exe")):
+                accepted.add(child_pid)
+        if len(accepted) == before:
+            break
+    owned.update(accepted)
+
+
 def _windows_owned_processes(processes=None, extra_roots=None):
-    """Return Tekzite itself plus every live descendant visible to Toolhelp."""
+    """Return only Tekzite UI, Tekzite Network, and Tekzite-owned Chromium PIDs.
+
+    Process ancestry by itself is not sufficient proof of ownership: a browser or
+    helper can launch an unrelated application. Network Connections therefore
+    follows only expected executable families beneath Tekzite's exact live
+    subprocess handles. Extra roots (used by the sign-in handoff) are accepted
+    only when Toolhelp identifies them as Chromium-family processes.
+    """
     processes = dict(processes if processes is not None else _windows_process_snapshot())
     own_pid = int(os.getpid())
-    roots = {own_pid}
+    owned = {own_pid}
 
-    for state in (_NETWORK_ENGINE or {}, _EDGE_SESSION or {}):
-        proc = state.get("process") if isinstance(state, dict) else None
-        try:
-            pid = int(getattr(proc, "pid", 0) or 0)
-        except Exception:
-            pid = 0
-        if pid > 0:
-            roots.add(pid)
+    network_pid = _tracked_process_pid(_NETWORK_ENGINE or {})
+    chromium_pid = _tracked_process_pid(_EDGE_SESSION or {})
+    _add_filtered_process_tree(
+        owned, processes, network_pid, _is_tekzite_network_process_name,
+        trusted_root=True,
+    )
+    _add_filtered_process_tree(
+        owned, processes, chromium_pid, _is_chromium_process_name,
+        trusted_root=True,
+    )
 
     for value in list(extra_roots or []):
         try:
             pid = int(value or 0)
         except Exception:
-            pid = 0
-        if pid > 0:
-            roots.add(pid)
+            continue
+        # Auth/browser PIDs are discovered independently from the shared
+        # Tekzite Chromium profile. Do not trust a bare PID if Toolhelp says it
+        # belongs to some other executable, and do not follow non-Chromium
+        # children beneath it.
+        _add_filtered_process_tree(
+            owned, processes, pid, _is_chromium_process_name,
+            trusted_root=False,
+        )
 
-    owned = set(roots)
-    # Chromium's browser process can spawn several generations of renderer,
-    # utility, GPU and crash-handler children. Resolve the complete descendant
-    # closure rather than matching executable names globally.
-    for _ in range(max(2, len(processes) + 1)):
-        before = len(owned)
-        for pid, item in processes.items():
-            try:
-                if int(item.get("ppid") or 0) in owned:
-                    owned.add(int(pid))
-            except Exception:
-                continue
-        if len(owned) == before:
-            break
     return owned, processes
 
 
