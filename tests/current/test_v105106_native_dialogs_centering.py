@@ -60,101 +60,54 @@ def test_tk_owns_alert_confirm_prompt_and_beforeunload_controls():
     assert "'Cancel'" in FEATURES
     assert "'Leave'" in FEATURES
     assert "'Stay'" in FEATURES
-    assert "win.grab_set()" in FEATURES
-    assert "_raise_toplevel_above_dwm(" in FEATURES
-    assert "win, hold_ms=520, persistent_topmost=True" in FEATURES
 
 
-def test_javascript_dialog_topmost_is_not_released_while_modal_is_open():
-    source = inspect.getsource(main.BrowserApp._raise_toplevel_above_dwm)
-    assert "persistent_topmost=False" in source
-    assert "if not persistent_topmost:" in source
-    assert "if persistent_topmost:" in source
-    assert "flags |= SWP_NOACTIVATE" in source
-    assert "SetForegroundWindow" in source
-
-
-def test_javascript_dialog_arms_input_once_after_toplevel_is_mapped():
-    block = FEATURES[
-        FEATURES.index("win.protocol('WM_DELETE_WINDOW', close_action)"):
-        FEATURES.index("def _schedule_permission_prompt_poll")
-    ]
-    assert "def arm_dialog_input" in block
-    assert "win.winfo_ismapped()" in block
-    bind_pos = block.index("win.bind('<Map>', arm_after_map, add='+')")
-    show_pos = block.index("win.deiconify()")
-    assert bind_pos < show_pos
-    assert "win.after_idle(arm_dialog_input)" in block
-    assert "win.after(48, arm_dialog_input)" in block
-    assert "state['input_armed'] = True" in block
-    assert "state['arm_attempts']" not in block
-    assert "grab_current()" not in block
-    assert "win.after(20, arm_dialog_input)" not in block
-    assert "win.after(80, reassert_dialog_z_order)" not in block
-    assert "win.after(220, reassert_dialog_z_order)" not in block
-
-
-def test_fixed_size_page_dialog_does_not_drain_tk_idle_queue():
-    center = inspect.getsource(main.BrowserApp._screen_center_geometry)
-    assert "if width is None or height is None:" in center
-    assert center.index("if width is None or height is None:") < center.index("win.update_idletasks()")
-
-    raise_source = inspect.getsource(main.BrowserApp._raise_toplevel_above_dwm)
-    assert "prepare_tk=True" in raise_source
-    assert "if prepare_tk:" in raise_source
-
-    block = FEATURES[
-        FEATURES.index("def arm_dialog_input"):
-        FEATURES.index("def arm_after_map")
-    ]
-    assert "prepare_tk=False" in block
-    assert "update_idletasks()" not in block
-
-
-def test_page_dialog_shell_is_prewarmed_before_first_real_dialog():
-    assert "def _prewarm_javascript_dialog_ui" in FEATURES
-    startup = FEATURES[
-        FEATURES.index("def _feature_startup"):
-        FEATURES.index("def _schedule_network_health_watch")
-    ]
-    assert "self.root.after(350, self._prewarm_javascript_dialog_ui)" in startup
-
-    prewarm = FEATURES[
-        FEATURES.index("def _prewarm_javascript_dialog_ui"):
-        FEATURES.index("def _show_native_javascript_dialog")
-    ]
-    assert "_build_javascript_dialog_shell()" in prewarm
-    assert "560x330-32000-32000" in prewarm
-    assert "win.deiconify()" in prewarm
-    assert "win.withdraw()" in prewarm
-    assert "_javascript_dialog_prewarm_ready = True" in prewarm
-
-
-def test_first_real_page_dialog_reuses_prewarmed_shell():
+def test_page_dialog_uses_content_overlay_not_native_toplevel():
     block = FEATURES[
         FEATURES.index("def _show_native_javascript_dialog"):
         FEATURES.index("def _schedule_permission_prompt_poll")
     ]
-    assert "_javascript_dialog_prewarm_shell" in block
-    assert "_javascript_dialog_last_used_prewarm" in block
-    assert "shell = self._build_javascript_dialog_shell()" in block
-    assert "title.configure(text=title_text)" in block
-    assert "host_label.configure(text=str(host))" in block
-    assert "message_label.configure(text=shown_message)" in block
-    assert "_javascript_dialog_last_show_ms" in block
+    assert "overlay = tk.Frame(" in block
+    assert "self.content_frame" in block
+    assert "overlay.place(x=0, y=0, relwidth=1, relheight=1)" in block
+    assert "card.place(relx=0.5, rely=0.5, anchor='center')" in block
+    assert "_javascript_dialog_last_mode = 'content-overlay'" in block
+
+    assert "tk.Toplevel" not in block
+    assert "_new_animated_toplevel" not in block
+    assert "grab_set()" not in block
+    assert "_raise_toplevel_above_dwm" not in block
+    assert "attributes('-topmost'" not in block
+    assert "SetForegroundWindow" not in block
 
 
-def test_non_animated_toplevel_is_visible_immediately():
-    source = inspect.getsource(main.BrowserApp._new_animated_toplevel)
-    assert '0.0 if (auto_animate and self._motion_enabled()) else 1.0' in source
+def test_page_dialog_has_no_prewarm_or_first_window_activation_path():
+    startup = FEATURES[
+        FEATURES.index("def _feature_startup"):
+        FEATURES.index("def _schedule_network_health_watch")
+    ]
+    assert "_prewarm_javascript_dialog_ui" not in startup
+    assert "def _prewarm_javascript_dialog_ui" not in FEATURES
+    assert "def _build_javascript_dialog_shell" not in FEATURES
+
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert "<Map>" not in block
+    assert "after_idle" not in block
+    assert "winfo_ismapped" not in block
+    assert "persistent_topmost" not in block
 
 
-def test_page_dialog_suspends_only_dwm_presentation():
-    sync_source = inspect.getsource(main.BrowserApp._sync_dwm_host_geometry)
-    helper_source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
-    assert "not self._dwm_host_suspended_for_page_dialog" in sync_source
-    assert "self._dwm_host_suspended_for_page_dialog = suspended" in helper_source
-    assert "_sync_dwm_host_geometry(show=not suspended" in helper_source
+def test_page_dialog_suspends_dwm_before_showing_overlay():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
+    overlay_at = block.index("overlay.place(x=0, y=0, relwidth=1, relheight=1)")
+    assert hide_at < overlay_at
 
 
 def test_page_dialog_restores_dwm_only_after_cdp_answer_finishes():
@@ -162,13 +115,20 @@ def test_page_dialog_restores_dwm_only_after_cdp_answer_finishes():
         FEATURES.index("def _show_native_javascript_dialog"):
         FEATURES.index("def _schedule_permission_prompt_poll")
     ]
-    hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
-    show_at = block.index("win.deiconify()", hide_at)
     answer_at = block.index("future.result()")
     restore_at = block.index("restore_chromium_presentation()", answer_at)
-    assert hide_at < show_at
     assert restore_at > answer_at
     assert "suppress_embedded_chromium_javascript_dialog_ui" not in block
+
+
+def test_dialog_overlay_records_visible_handoff_timing():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert "started = time.perf_counter()" in block
+    assert "_javascript_dialog_last_show_ms" in block
+
 
 
 class _FakeRoot:

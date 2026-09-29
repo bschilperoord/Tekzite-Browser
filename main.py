@@ -13708,10 +13708,7 @@ class BrowserApp(BrowserFeatures):
             f"dwm_keyboard_poll_chars: {getattr(self, '_dwm_keyboard_poll_chars', 0)}",
             f"dwm_keyboard_poll_last: {getattr(self, '_dwm_keyboard_poll_last', None)}",
             f"dwm_keyboard_poll_error: {getattr(self, '_dwm_keyboard_poll_error', None)}",
-            f"javascript_dialog_prewarm_ready: {getattr(self, '_javascript_dialog_prewarm_ready', False)}",
-            f"javascript_dialog_prewarm_ms: {getattr(self, '_javascript_dialog_prewarm_ms', None)}",
-            f"javascript_dialog_prewarm_error: {getattr(self, '_javascript_dialog_prewarm_error', None)}",
-            f"javascript_dialog_last_used_prewarm: {getattr(self, '_javascript_dialog_last_used_prewarm', None)}",
+            f"javascript_dialog_last_mode: {getattr(self, '_javascript_dialog_last_mode', None)}",
             f"javascript_dialog_last_show_ms: {getattr(self, '_javascript_dialog_last_show_ms', None)}",
         ]))
         try:
