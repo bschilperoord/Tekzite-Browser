@@ -7282,12 +7282,16 @@ class BrowserApp(BrowserFeatures):
             should_show = bool(
                 show and self._dwm_surface_ready
                 and not self._dwm_host_suspended_for_minimize
-                and not self._dwm_host_suspended_for_page_dialog
                 and not root_iconic
             )
             if should_show and not self._dwm_host_visible:
                 SW_SHOWNOACTIVATE = 4
-                user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOWNOACTIVATE)
+                try:
+                    user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+                    user32.ShowWindowAsync.restype = wintypes.BOOL
+                    user32.ShowWindowAsync(wintypes.HWND(hwnd), SW_SHOWNOACTIVATE)
+                except Exception:
+                    user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOWNOACTIVATE)
                 self._dwm_host_visible = True
             elif not should_show and self._dwm_host_visible:
                 SW_HIDE = 0
@@ -7355,10 +7359,12 @@ class BrowserApp(BrowserFeatures):
         if not (self._embedded_mode and self._chromium_dwm_mode):
             return True
 
-        # Dialog suppression is latency-sensitive. The normal DWM hide path is
-        # asynchronous for tab/window transitions, but here even one compositor
-        # frame is visible. Force alpha to zero and synchronously hide once.
-        if suspended and os.name == "nt" and self._dwm_host:
+        # Never hide/remap the DWM destination for a page dialog. Hiding the
+        # popup made Windows/DWM tear down and rebuild part of the composition,
+        # which could stall Tk for a visible moment. Keep the host mapped and
+        # switch only its layered alpha. The native Tekzite dialog remains fully
+        # interactive while Chromium's own dialog is visually suppressed.
+        if os.name == "nt" and self._dwm_host:
             try:
                 import ctypes
                 from ctypes import wintypes
@@ -7366,27 +7372,33 @@ class BrowserApp(BrowserFeatures):
                 self._dwm_user32 = user32
                 hwnd = wintypes.HWND(int(self._dwm_host))
                 LWA_ALPHA = 0x00000002
+                target_alpha = 0 if suspended else 255
                 user32.SetLayeredWindowAttributes.argtypes = [
                     wintypes.HWND, wintypes.COLORREF, ctypes.c_ubyte, wintypes.DWORD
                 ]
                 user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
                 user32.SetLayeredWindowAttributes(
-                    hwnd, wintypes.COLORREF(0), ctypes.c_ubyte(0), LWA_ALPHA
+                    hwnd, wintypes.COLORREF(0), ctypes.c_ubyte(target_alpha), LWA_ALPHA
                 )
-                self._dwm_host_alpha = 0
-                user32.ShowWindow(hwnd, 0)  # SW_HIDE, synchronous on purpose.
-                self._dwm_host_visible = False
+                self._dwm_host_alpha = int(target_alpha)
+                # If another transition had already unmapped the host, enqueue a
+                # no-activate show. ShowWindowAsync never blocks Tk on DWM.
+                if not self._dwm_host_visible and not self._dwm_host_suspended_for_minimize:
+                    SW_SHOWNOACTIVATE = 4
+                    user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+                    user32.ShowWindowAsync.restype = wintypes.BOOL
+                    user32.ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE)
+                    self._dwm_host_visible = True
             except Exception:
                 try:
-                    self._sync_dwm_host_geometry(show=False, transparent=True)
+                    self._sync_dwm_host_geometry(show=True, transparent=suspended)
                 except Exception:
                     pass
-            return True
-
-        try:
-            self._sync_dwm_host_geometry(show=True, transparent=False)
-        except Exception:
-            pass
+        else:
+            try:
+                self._sync_dwm_host_geometry(show=True, transparent=suspended)
+            except Exception:
+                pass
 
         # Restore the low-level watchers only after the page presentation exists
         # again. Small delays keep them out of the dialog teardown click.
