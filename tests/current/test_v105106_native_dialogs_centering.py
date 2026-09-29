@@ -65,6 +65,22 @@ def test_javascript_dialog_topmost_is_not_released_while_modal_is_open():
     assert "persistent_topmost=False" in source
     assert "if not persistent_topmost:" in source
     assert "if persistent_topmost:" in source
+    assert "flags |= SWP_NOACTIVATE" in source
+    assert "SetForegroundWindow" in source
+
+
+def test_javascript_dialog_raise_happens_before_best_effort_tk_grab():
+    block = FEATURES[
+        FEATURES.index("win.protocol('WM_DELETE_WINDOW', close_action)"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    raise_pos = block.index(
+        "_raise_toplevel_above_dwm(\n                win, hold_ms=520, persistent_topmost=True"
+    )
+    grab_pos = block.index("win.grab_set()")
+    assert raise_pos < grab_pos
+    assert "win.after(80, reassert_dialog_z_order)" in block
+    assert "win.after(220, reassert_dialog_z_order)" in block
 
 
 class _FakeRoot:

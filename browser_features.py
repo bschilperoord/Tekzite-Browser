@@ -1368,11 +1368,47 @@ class BrowserFeatures:
         win.protocol('WM_DELETE_WINDOW', close_action)
         dialog_h = 330 if kind == 'prompt' else 285
         self._center_dialog_on_screen(win, 560, dialog_h, 18)
+        # Do not let a failed Tk grab short-circuit the native z-order handoff.
+        # Chromium's synchronous dialog may already own modal activation on some
+        # Windows systems. The Tekzite dialog must be made visible/foreground
+        # first, then the Tk grab is attempted independently.
         try:
             win.deiconify()
             win.lift()
+        except Exception:
+            pass
+        try:
+            self._raise_toplevel_above_dwm(
+                win, hold_ms=520, persistent_topmost=True
+            )
+        except Exception:
+            pass
+
+        def reassert_dialog_z_order():
+            if state['done']:
+                return
+            try:
+                if not win.winfo_exists():
+                    return
+                win.lift()
+                self._raise_toplevel_above_dwm(
+                    win, hold_ms=520, persistent_topmost=True
+                )
+            except Exception:
+                pass
+
+        # Chromium can finish presenting its own modal a frame after the CDP
+        # opening event. Reassert twice after that race window.
+        try:
+            win.after(80, reassert_dialog_z_order)
+            win.after(220, reassert_dialog_z_order)
+        except Exception:
+            pass
+        try:
             win.grab_set()
-            self._raise_toplevel_above_dwm(win, hold_ms=520, persistent_topmost=True)
+        except Exception:
+            pass
+        try:
             if entry is not None:
                 entry.focus_set()
                 entry.selection_range(0, 'end')

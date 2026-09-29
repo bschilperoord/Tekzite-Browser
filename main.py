@@ -918,7 +918,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.112"
+BROWSER_VERSION = "10.5.113"
 
 
 
@@ -13268,10 +13268,26 @@ class BrowserApp(BrowserFeatures):
             user32.SetWindowPos.restype = wintypes.BOOL
             raw = int(win.winfo_id())
             hwnd = int(user32.GetAncestor(wintypes.HWND(raw), GA_ROOT) or raw)
-            flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            flags = SWP_NOMOVE | SWP_NOSIZE
+            if not persistent_topmost:
+                flags |= SWP_NOACTIVATE
             user32.SetWindowPos(wintypes.HWND(hwnd), wintypes.HWND(HWND_TOPMOST), 0, 0, 0, 0, flags)
             win.attributes("-topmost", True)
             if persistent_topmost:
+                # Chromium's synchronous page dialog can temporarily own
+                # foreground activation. Explicitly activate the Tekzite
+                # replacement after moving it into the TOPMOST band so the
+                # native Chromium prompt cannot remain the only visible/clickable
+                # decision surface.
+                try:
+                    user32.BringWindowToTop.argtypes = [wintypes.HWND]
+                    user32.BringWindowToTop.restype = wintypes.BOOL
+                    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+                    user32.SetForegroundWindow.restype = wintypes.BOOL
+                    user32.BringWindowToTop(wintypes.HWND(hwnd))
+                    user32.SetForegroundWindow(wintypes.HWND(hwnd))
+                except Exception:
+                    pass
                 return True
 
             def release_native_topmost(w=win, native_hwnd=hwnd):

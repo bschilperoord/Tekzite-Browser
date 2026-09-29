@@ -1,3 +1,10 @@
+# v10.5.113 - Foreground native page dialogs
+
+- Raises Tekzite's Tk-native JavaScript alert, confirm, prompt and before-unload window before attempting the Tk modal grab, so a Chromium-owned synchronous modal cannot abort the visibility handoff.
+- Activates the persistent Tk dialog in the native Windows foreground/TOPMOST band while leaving ordinary Tekzite dialogs on the existing non-activating temporary z-order path.
+- Reasserts the dialog z-order after 80 ms and 220 ms to cover Chromium finishing its own modal presentation one or two compositor frames after the CDP opening event.
+- Adds regression coverage that the native raise happens before the best-effort Tk grab and that persistent page dialogs request foreground activation.
+
 # v10.5.112 - Persistent native page dialogs
 
 - Keeps Tekzite's Tk-native JavaScript alert, confirm, prompt and before-unload dialogs above Chromium's DWM-hosted modal surface for the full lifetime of the decision.
