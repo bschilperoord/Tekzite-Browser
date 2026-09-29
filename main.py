@@ -11948,8 +11948,107 @@ class BrowserApp(BrowserFeatures):
         for child in children:
             self._replace_palette_in_widget_tree(child, old_ui, new_ui)
 
+    def _replace_fonts_in_widget_tree(
+            self, widget, old_ui_family="", old_display_family="", old_mono_family=""):
+        """Apply current Tekzite font families to already-created widgets.
+
+        Keep size/weight/slant/decoration intact and avoid icon/symbol fonts.
+        Newly rebuilt widgets already use the current family; this closes the
+        runtime gap for dialogs/panels that remain alive while Preview/Save runs.
+        """
+        try:
+            import tkinter.font as tkfont
+        except Exception:
+            return
+
+        old_ui = str(old_ui_family or "").casefold()
+        old_display = str(old_display_family or "").casefold()
+        old_mono = str(old_mono_family or "").casefold()
+        symbol_tokens = ("symbol", "emoji", "wingdings", "webdings", "icons")
+
+        def mapped_font(font_value):
+            if not font_value:
+                return None
+            try:
+                font_obj = tkfont.Font(font=font_value)
+                actual = font_obj.actual()
+            except Exception:
+                return None
+            family = str(actual.get("family") or "")
+            folded = family.casefold()
+            if any(token in folded for token in symbol_tokens):
+                return None
+
+            if old_mono and folded == old_mono:
+                target = self._ui_monospace_font_family
+            elif old_display and folded == old_display:
+                target = self._ui_display_font_family
+            else:
+                # Tk defaults and the previous UI family are ordinary interface
+                # text, so switching UI font should update them everywhere.
+                target = self._ui_font_family
+
+            return (
+                target,
+                int(actual.get("size") or self._font_size(9)),
+                str(actual.get("weight") or "normal"),
+                str(actual.get("slant") or "roman"),
+                int(bool(actual.get("underline"))),
+                int(bool(actual.get("overstrike"))),
+            )
+
+        try:
+            current = widget.cget("font")
+        except Exception:
+            current = None
+        replacement = mapped_font(current)
+        if replacement is not None:
+            try:
+                family, size, weight, slant, underline, overstrike = replacement
+                widget.configure(font=(
+                    family, size, weight, slant, underline, overstrike
+                ))
+            except Exception:
+                try:
+                    widget.configure(font=(replacement[0], replacement[1], replacement[2]))
+                except Exception:
+                    pass
+
+        # Canvas text does not inherit the Canvas widget's font option.
+        try:
+            if isinstance(widget, tk.Canvas):
+                for item in widget.find_all():
+                    try:
+                        if widget.type(item) != "text":
+                            continue
+                        item_font = widget.itemcget(item, "font")
+                        repl = mapped_font(item_font)
+                        if repl is None:
+                            continue
+                        family, size, weight, slant, underline, overstrike = repl
+                        widget.itemconfigure(
+                            item,
+                            font=(family, size, weight, slant, underline, overstrike),
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            children = widget.winfo_children()
+        except Exception:
+            children = ()
+        for child in children:
+            self._replace_fonts_in_widget_tree(
+                child, old_ui_family, old_display_family, old_mono_family
+            )
+
     def _apply_customization_runtime(self, *, repack=True, refresh_tabs=True):
         old_ui = dict(getattr(self, "ui", UI_COLOR_DEFAULTS))
+        old_ui_font_family = str(getattr(self, "_ui_font_family", "") or "")
+        old_display_font_family = str(getattr(self, "_ui_display_font_family", "") or "")
+        old_mono_font_family = str(getattr(self, "_ui_monospace_font_family", "") or "")
         self.customization = _normalized_customization(self.preferences.get("customization"))
         self.preferences["customization"] = self.customization
         self.ui = dict(self.customization["colors"])
@@ -12008,7 +12107,13 @@ class BrowserApp(BrowserFeatures):
             base = max(7, int(self._custom("font_size", 10)))
             menu = max(7, int(self._custom("menu_font_size", 9)))
             toolbar_size = max(7, int(self._custom("toolbar_font_size", 10)))
-            self.address.configure(font=("Segoe UI", max(10, base + 1)))
+            self._replace_fonts_in_widget_tree(
+                self.root,
+                old_ui_font_family,
+                old_display_font_family,
+                old_mono_font_family,
+            )
+            self.address.configure(font=(self._ui_font_family, max(10, base + 1)))
             self._schedule_address_preview_render()
             self.title_label.configure(font=(self._ui_font_family, menu, "bold"))
             self.brand_badge.configure(font=(self._ui_font_family, menu, "bold"))
@@ -12070,7 +12175,12 @@ class BrowserApp(BrowserFeatures):
                             bordercolor=self.ui["bg"], arrowcolor=self.ui["muted"], lightcolor=self.ui["chrome_2"],
                             darkcolor=self.ui["chrome_2"], width=max(8, int(12 * float(self._custom("ui_scale", 1.0)))))
             style.configure("Tekzite.TNotebook", background=self.ui["bg"], borderwidth=0)
-            style.configure("Tekzite.TNotebook.Tab", background=self.ui["chrome_2"], foreground=self.ui["text"], padding=(10, 6))
+            style.configure(
+                "Tekzite.TNotebook.Tab",
+                background=self.ui["chrome_2"], foreground=self.ui["text"],
+                padding=(10, 6),
+                font=(self._ui_font_family, self._font_size(9)),
+            )
             style.map("Tekzite.TNotebook.Tab", background=[("selected", self.ui["accent"]), ("active", self.ui["chrome_hover"])], foreground=[("selected", "#ffffff")])
             style.configure("Treeview", background=self.ui["field"], fieldbackground=self.ui["field"], foreground=self.ui["text"],
                             rowheight=max(20, self._font_size(22)), bordercolor=self.ui["border"], font=(self._ui_font_family, self._font_size(9)))
@@ -12079,6 +12189,14 @@ class BrowserApp(BrowserFeatures):
                             bordercolor=self.ui["border"], font=(self._ui_font_family, self._font_size(9)))
             style.configure("TCombobox", fieldbackground=self.ui["field"], background=self.ui["chrome_2"], foreground=self.ui["text"],
                             arrowcolor=self.ui["muted"], bordercolor=self.ui["border"], font=(self._ui_font_family, self._font_size(9)))
+            for ttk_style in ("TLabel", "TButton", "TCheckbutton", "TRadiobutton"):
+                try:
+                    style.configure(
+                        ttk_style,
+                        font=(self._ui_font_family, self._font_size(9)),
+                    )
+                except Exception:
+                    pass
             style.map("TCombobox", fieldbackground=[("readonly", self.ui["field"])], foreground=[("readonly", self.ui["text"])])
         except Exception:
             pass
