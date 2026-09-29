@@ -365,3 +365,21 @@ def test_toplevel_factory_can_skip_delayed_prepare_callback():
     assert "auto_prepare=True" in source
     assert 'win._tekzite_auto_prepare = bool(auto_prepare)' in source
     assert 'if getattr(win, "_tekzite_auto_prepare", True):' in source
+
+
+def test_native_page_dialog_path_is_prewarmed_before_first_real_dialog():
+    startup = FEATURES[
+        FEATURES.index("def _feature_startup"):
+        FEATURES.index("def _schedule_network_health_watch")
+    ]
+    warmup = FEATURES[
+        FEATURES.index("def _prewarm_native_page_dialog"):
+        FEATURES.index("def _schedule_network_health_watch")
+    ]
+    assert "self.root.after(" in startup
+    assert "350, self._prewarm_native_page_dialog" in startup
+    assert "auto_prepare=False" in warmup
+    assert "win.withdraw()" in warmup
+    assert "self._bind_native_dialog_owner(win, self.root)" in warmup
+    assert "button.event_generate('<Enter>')" in warmup
+    assert "win.deiconify()" not in warmup
