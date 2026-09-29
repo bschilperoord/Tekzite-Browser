@@ -46,6 +46,10 @@ def test_dialog_monitor_is_armed_before_navigation():
     assert "'Page.handleJavaScriptDialog'" in NET
     assert "'Page.javascriptDialogOpening'" in NET
     assert "session_id=str(channel.get('session_id') or '')" in NET
+    assert "def _get_javascript_dialog_page_fallback_channel" in NET
+    assert "purpose='dialog-fallback'" in NET
+    assert "'ready-dual'" in NET
+    assert "'page-fallback'" in NET
 
 
 def test_tk_owns_alert_confirm_prompt_and_beforeunload_controls():
@@ -196,3 +200,58 @@ def test_browser_session_call_preserves_dialog_event_while_waiting_for_response(
     assert ws.sent[0]["method"] == "Page.enable"
     assert channel["events"][0]["type"] == "confirm"
     assert channel["events"][0]["message"] == "Restart service?"
+
+class _DirectPageDialogWs:
+    def __init__(self):
+        self.responses = [
+            json.dumps({
+                "method": "Page.javascriptDialogOpening",
+                "params": {
+                    "type": "confirm",
+                    "message": "Restart Kea DHCPv6?",
+                    "url": "http://192.168.25.254:8083/",
+                    "hasBrowserHandler": True,
+                },
+            }),
+        ]
+
+    def settimeout(self, _timeout):
+        pass
+
+    def recv(self):
+        return self.responses.pop(0)
+
+
+def test_dialog_poll_uses_direct_page_fallback_when_browser_observer_is_silent(monkeypatch):
+    target_id = "router-target"
+    direct = {
+        "target_id": target_id,
+        "ws": _DirectPageDialogWs(),
+        "lock": net.threading.RLock(),
+        "closed": False,
+        "enabled_domains": {"Page"},
+        "javascript_dialog_events": [],
+    }
+    session = {
+        "page_cdp_channels": {f"{target_id}:dialog-fallback": direct},
+        "javascript_dialog_browser_channels": {},
+    }
+
+    def fail_browser(*_args, **_kwargs):
+        raise RuntimeError("browser observer unavailable")
+
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", session)
+    monkeypatch.setattr(net, "_get_javascript_dialog_browser_channel", fail_browser)
+    monkeypatch.setattr(
+        net,
+        "_get_javascript_dialog_page_fallback_channel",
+        lambda *_args, **_kwargs: direct,
+    )
+
+    rows = net.poll_embedded_chromium_javascript_dialogs(target_id, timeout=0.04)
+    assert len(rows) == 1
+    assert rows[0]["type"] == "confirm"
+    assert rows[0]["message"] == "Restart Kea DHCPv6?"
+    assert session["javascript_dialog_resolution_paths"][target_id] == "page-fallback"
+    assert session["javascript_dialog_monitor_stage"] == "event-page-fallback"
+
