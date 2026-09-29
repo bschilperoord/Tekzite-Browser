@@ -24,11 +24,20 @@ def test_about_is_built_hidden_then_raised_after_geometry():
 
 
 def test_about_uses_native_z_order_over_dwm():
-    block = MAIN[MAIN.index("def _raise_toplevel_above_dwm"):MAIN.index("def _show_about")]
-    assert "HWND_TOPMOST = -1" in block
-    assert "HWND_NOTOPMOST = -2" in block
-    assert "SetWindowPos" in block
-    assert "GetAncestor" in block
+    owner_block = MAIN[
+        MAIN.index("def _bind_native_dialog_owner"):
+        MAIN.index("def _raise_toplevel_above_dwm")
+    ]
+    raise_block = MAIN[
+        MAIN.index("def _raise_toplevel_above_dwm"):
+        MAIN.index("def _show_about")
+    ]
+    assert "GWLP_HWNDPARENT = -8" in owner_block
+    assert "HWND_TOP = 0" in owner_block
+    assert "SetWindowPos" in owner_block
+    assert "GetAncestor" in owner_block
+    assert "_bind_native_dialog_owner" in raise_block
+    assert "HWND_TOPMOST = -1" not in raise_block
 
 
 def test_existing_about_is_raised_not_duplicated():
