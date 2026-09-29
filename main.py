@@ -3514,7 +3514,7 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             return False
 
-    def _new_animated_toplevel(self, parent=None, *, duration=165, slide=14, branded=True, auto_animate=True, auto_center=True):
+    def _new_animated_toplevel(self, parent=None, *, duration=165, slide=14, branded=True, auto_animate=True, auto_center=True, auto_prepare=True):
         """Create an app-owned Toplevel with automatic open/close motion.
 
         The destroy method is wrapped immediately, before callers wire buttons,
@@ -3559,6 +3559,7 @@ class BrowserApp(BrowserFeatures):
         win._tekzite_branded_dialog = bool(branded)
         win._tekzite_auto_animate = bool(auto_animate)
         win._tekzite_auto_center = bool(auto_center)
+        win._tekzite_auto_prepare = bool(auto_prepare)
         win._tekzite_dialog_parent = parent or self.root
         def prepare_dialog(w=win):
             try:
@@ -3583,15 +3584,16 @@ class BrowserApp(BrowserFeatures):
                     self._animate_toplevel_in(w, duration=duration, slide=slide)
             except Exception:
                 pass
-        try:
-            # Do not use after_idle here. Dialog builders commonly call
-            # update_idletasks() while measuring their requested size; that also
-            # drains idle callbacks and could start the animation before the
-            # caller has assigned the final geometry. The timer runs after the
-            # builder returns, applies the shared About-style shell, then animates.
-            win.after(1, prepare_dialog)
-        except Exception:
-            pass
+        if getattr(win, "_tekzite_auto_prepare", True):
+            try:
+                # Do not use after_idle here. Dialog builders commonly call
+                # update_idletasks() while measuring their requested size; that also
+                # drains idle callbacks and could start the animation before the
+                # caller has assigned the final geometry. The timer runs after the
+                # builder returns, applies the shared About-style shell, then animates.
+                win.after(1, prepare_dialog)
+            except Exception:
+                pass
         return win
 
     def _animate_toplevel_in(self, win, duration=165, slide=14):
