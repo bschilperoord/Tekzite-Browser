@@ -918,7 +918,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.107"
+BROWSER_VERSION = "10.5.111"
 
 
 
@@ -2207,8 +2207,10 @@ class BrowserApp(BrowserFeatures):
             requested_display = str(self.customization.get("display_font_family") or "").casefold()
             requested_mono = str(self.customization.get("monospace_font_family") or "").casefold()
             self._ui_font_family = families.get(requested_ui, automatic_ui_font) if requested_ui else automatic_ui_font
-            self._ui_display_font_family = families.get(requested_display, automatic_display_font) if requested_display else automatic_display_font
-            self._ui_monospace_font_family = families.get(requested_mono, automatic_mono_font) if requested_mono else automatic_mono_font
+            # A chosen UI font is the browser-wide default. Display and monospace
+            # only diverge when the user explicitly selects an override.
+            self._ui_display_font_family = families.get(requested_display, self._ui_font_family) if requested_display else self._ui_font_family
+            self._ui_monospace_font_family = families.get(requested_mono, self._ui_font_family) if requested_mono else self._ui_font_family
             for named in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkCaptionFont", "TkSmallCaptionFont"):
                 try:
                     tkfont.nametofont(named).configure(family=self._ui_font_family)
@@ -2271,7 +2273,10 @@ class BrowserApp(BrowserFeatures):
         self._tab_drag_threshold_px = 9
         self._tab_tearoff_margin_px = 28
         self._loading_spinner_frames = ("◐", "◓", "◑", "◒")
-        user_extension_paths = [] if self.preferences.get("privacy_lockdown", True) else _enabled_extension_paths(self.preferences)
+        # Enabled entries in Extension Manager are explicitly approved by the user.
+        # Privacy Core keeps its network/privacy protections active but no longer
+        # silently disables those approved extensions.
+        user_extension_paths = _enabled_extension_paths(self.preferences)
         os.environ["TEKZITE_USER_EXTENSIONS"] = json.dumps(user_extension_paths)
         self._state_directory = _preferences_path().parent
         self.root.report_callback_exception = self._report_tk_callback_exception
@@ -2359,6 +2364,12 @@ class BrowserApp(BrowserFeatures):
         # v6.0: Chromium is the only web engine.  Tekzite owns browser UI,
         # while all page parsing/layout/JS/media/storage live in Chromium.
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tekzite-chromium")
+        # JavaScript dialogs can synchronously block renderer/page CDP work. Their
+        # observer and response must never queue behind that blocked work or the
+        # only task capable of dismissing the modal can deadlock in the general pool.
+        self._javascript_dialog_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="tekzite-cdp-dialog"
+        )
         # v10.5.98: HTML inspection uses one serialized background worker. Large
         # DOM syntax/search jobs therefore cannot fan out across the general
         # Chromium pool and create CPU bursts that compete with Tk/DWM input.
@@ -2699,7 +2710,7 @@ class BrowserApp(BrowserFeatures):
             self.address_text_host, textvariable=self.url_var, bg=self.ui["field"], fg=self.ui["text"],
             insertbackground=self.ui["text"], selectbackground=self.ui["accent"], selectforeground="#ffffff",
             relief="flat", bd=0, highlightthickness=0,
-            font=("Segoe UI", max(10, int(self._custom("font_size", 10)) + 1)),
+            font=(self._ui_font_family, max(10, int(self._custom("font_size", 10)) + 1)),
         )
         self.address.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.address_preview = tk.Canvas(
@@ -11755,8 +11766,70 @@ class BrowserApp(BrowserFeatures):
         for child in children:
             self._replace_palette_in_widget_tree(child, old_ui, new_ui)
 
+    def _replace_font_family_in_widget_tree(self, widget, replacements):
+        """Retarget explicit Tk/custom-widget font tuples without changing size/style."""
+        replacements = {
+            str(source).casefold(): str(target)
+            for source, target in dict(replacements or {}).items()
+            if source and target and str(source).casefold() != str(target).casefold()
+        }
+        if not replacements:
+            return
+
+        def translated(spec):
+            if not spec:
+                return None
+            if isinstance(spec, (tuple, list)):
+                parts = list(spec)
+            else:
+                try:
+                    parts = list(self.root.tk.splitlist(str(spec)))
+                except Exception:
+                    return None
+            # Named Tk fonts contain only one token and are updated separately.
+            if len(parts) < 2:
+                return None
+            target = replacements.get(str(parts[0]).casefold())
+            if not target:
+                return None
+            return tuple([target] + parts[1:])
+
+        try:
+            explicit = translated(widget.cget("font"))
+        except Exception:
+            explicit = None
+        if explicit:
+            try:
+                widget.configure(font=explicit)
+            except Exception:
+                pass
+
+        # Tekzite's rounded Canvas controls keep their text font in _font rather
+        # than exposing a native Canvas font option.
+        try:
+            custom = translated(getattr(widget, "_font", None))
+        except Exception:
+            custom = None
+        if custom:
+            try:
+                widget.configure(font=custom)
+            except Exception:
+                pass
+
+        try:
+            children = widget.winfo_children()
+        except Exception:
+            children = ()
+        for child in children:
+            self._replace_font_family_in_widget_tree(child, replacements)
+
     def _apply_customization_runtime(self, *, repack=True, refresh_tabs=True):
         old_ui = dict(getattr(self, "ui", UI_COLOR_DEFAULTS))
+        old_font_families = (
+            str(getattr(self, "_ui_font_family", "") or ""),
+            str(getattr(self, "_ui_display_font_family", "") or ""),
+            str(getattr(self, "_ui_monospace_font_family", "") or ""),
+        )
         self.customization = _normalized_customization(self.preferences.get("customization"))
         self.preferences["customization"] = self.customization
         self.ui = dict(self.customization["colors"])
@@ -11801,8 +11874,8 @@ class BrowserApp(BrowserFeatures):
             requested_display = str(self._custom("display_font_family", "")).casefold()
             requested_mono = str(self._custom("monospace_font_family", "")).casefold()
             self._ui_font_family = families.get(requested_ui, automatic_ui) if requested_ui else automatic_ui
-            self._ui_display_font_family = families.get(requested_display, automatic_display) if requested_display else automatic_display
-            self._ui_monospace_font_family = families.get(requested_mono, automatic_mono) if requested_mono else automatic_mono
+            self._ui_display_font_family = families.get(requested_display, self._ui_font_family) if requested_display else self._ui_font_family
+            self._ui_monospace_font_family = families.get(requested_mono, self._ui_font_family) if requested_mono else self._ui_font_family
             for named in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkCaptionFont", "TkSmallCaptionFont"):
                 try:
                     tkfont.nametofont(named).configure(family=self._ui_font_family, size=max(7, int(self._custom("font_size", 10))))
@@ -11812,10 +11885,19 @@ class BrowserApp(BrowserFeatures):
                 tkfont.nametofont("TkHeadingFont").configure(family=self._ui_display_font_family, weight="bold")
             except Exception:
                 pass
+            replacements = {}
+            for previous, current in zip(
+                old_font_families,
+                (self._ui_font_family, self._ui_display_font_family, self._ui_monospace_font_family),
+            ):
+                if previous and str(previous).casefold() != str(current).casefold():
+                    replacements.setdefault(previous, current)
+            self._replace_font_family_in_widget_tree(self.root, replacements)
+
             base = max(7, int(self._custom("font_size", 10)))
             menu = max(7, int(self._custom("menu_font_size", 9)))
             toolbar_size = max(7, int(self._custom("toolbar_font_size", 10)))
-            self.address.configure(font=("Segoe UI", max(10, base + 1)))
+            self.address.configure(font=(self._ui_font_family, max(10, base + 1)))
             self._schedule_address_preview_render()
             self.title_label.configure(font=(self._ui_font_family, menu, "bold"))
             self.brand_badge.configure(font=(self._ui_font_family, menu, "bold"))
@@ -12101,7 +12183,7 @@ class BrowserApp(BrowserFeatures):
             cell = tk.Frame(colors_frame, bg=self.ui["bg"])
             cell.grid(row=idx // 2, column=idx % 2, sticky="ew", padx=(0, 14), pady=3)
             colors_frame.grid_columnconfigure(idx % 2, weight=1)
-            label(cell, pretty.get(key, key), width=16).pack(side="left")
+            label(cell, pretty.get(key, key), width=20).pack(side="left")
             entry(cell, color_vars[key], width=10).pack(side="left", padx=(0, 5), ipady=3)
             tk.Button(cell, text="●", command=lambda k=key: choose_color(k), bg=self.ui["chrome_2"], fg=color_vars[key].get(),
                       activebackground=self.ui["field_focus"], relief="flat", bd=0, padx=8).pack(side="left")
@@ -13462,7 +13544,7 @@ class BrowserApp(BrowserFeatures):
                 anchor="nw",
                 text=f"Load error:\n{exc}",
                 width=900,
-                font=("Arial", 14),
+                font=(self._ui_font_family, self._font_size(14)),
                 fill="black",
             )
 
@@ -14973,6 +15055,10 @@ class BrowserApp(BrowserFeatures):
                 pass
             try:
                 self._html_inspector_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            try:
+                self._javascript_dialog_executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass
             self._executor.shutdown(wait=False, cancel_futures=True)

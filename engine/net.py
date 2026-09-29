@@ -132,7 +132,14 @@ def _configured_user_extension_dirs():
         return []
     try:
         values = json.loads(raw)
-    except Exception:
+    except Exception as exc:
+        session['javascript_dialog_monitor_last_error'] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        session['javascript_dialog_monitor_last_error_at'] = time.monotonic()
+        session['javascript_dialog_monitor_failures'] = (
+            int(session.get('javascript_dialog_monitor_failures') or 0) + 1
+        )
         return []
     if not isinstance(values, list):
         return []
@@ -147,6 +154,16 @@ def _configured_user_extension_dirs():
         # Chromium's switch uses a comma-separated path list. Reject the rare
         # ambiguous path rather than silently loading the wrong directory.
         if "," in str(path) or not path.is_dir() or not (path / "manifest.json").is_file():
+            continue
+        try:
+            manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+            manifest_version = int(manifest.get("manifest_version"))
+        except Exception:
+            continue
+        # Tekzite intentionally supports both classic MV2 and modern MV3
+        # unpacked extensions. Reject unknown manifest generations early rather
+        # than asking Chromium to fail later with an opaque startup warning.
+        if not isinstance(manifest, dict) or manifest_version not in (2, 3):
             continue
         key = os.path.normcase(str(path))
         if key == builtin or key in seen:
@@ -5085,7 +5102,8 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     "--disable-default-apps",
                     "--disable-logging", "--metrics-recording-only", "--no-pings",
                     "--disable-hyperlink-auditing", "--disable-preconnect",
-                    "--disable-features=AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion,BrowsingTopics,InterestCohortAPI,SharedStorageAPI,FencedFrames,AttributionReporting,PrivateAggregationApi,FedCm,WebBluetooth,WebUSB,WebSerial,WebHID,IdleDetection,WebNFC,Prerender2,SpeculationRulesPrefetchProxy",
+                    "--disable-features=AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion,BrowsingTopics,InterestCohortAPI,SharedStorageAPI,FencedFrames,AttributionReporting,PrivateAggregationApi,FedCm,WebBluetooth,WebUSB,WebSerial,WebHID,IdleDetection,WebNFC,Prerender2,SpeculationRulesPrefetchProxy,ExtensionManifestV2Disabled,ExtensionManifestV2Unsupported,ExtensionsManifestV3Only,ExtensionDisableUnsupportedDeveloper,DisableLoadExtensionCommandLineSwitch",
+                    "--enable-features=AllowLegacyMV2Extensions",
                     "--disable-session-crashed-bubble", "--disable-background-mode",
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
@@ -12255,6 +12273,7 @@ def _get_javascript_dialog_browser_channel(
         _close_javascript_dialog_browser_channel(cached)
         channels.pop(target_id, None)
 
+    session['javascript_dialog_monitor_stage'] = 'browser-ws-url'
     ws_url = str(session.get('browser_ws_url') or '')
     if not ws_url:
         version = _devtools_json(
@@ -12267,9 +12286,13 @@ def _get_javascript_dialog_browser_channel(
     if not ws_url:
         raise RuntimeError('Chromium browser DevTools websocket unavailable')
 
+    session['javascript_dialog_monitor_stage'] = 'browser-ws-connect'
+    dialog_ws = _open_devtools_websocket(
+        ws_url, timeout=max(0.1, float(timeout))
+    )
     channel = {
         'target_id': target_id,
-        'ws': _open_devtools_websocket(ws_url, timeout=max(0.1, float(timeout))),
+        'ws': dialog_ws,
         'lock': threading.RLock(),
         'next_message_id': 5000,
         'session_id': '',
@@ -12280,6 +12303,7 @@ def _get_javascript_dialog_browser_channel(
         'created_at': time.monotonic(),
     }
     try:
+        session['javascript_dialog_monitor_stage'] = 'target-attach'
         attached = _javascript_dialog_browser_call(
             channel,
             'Target.attachToTarget',
@@ -12290,14 +12314,25 @@ def _get_javascript_dialog_browser_channel(
         if not session_id:
             raise RuntimeError('Chromium did not attach a dialog Target session')
         channel['session_id'] = session_id
+        session['javascript_dialog_monitor_stage'] = 'page-enable'
         _javascript_dialog_browser_call(
             channel, 'Page.enable', {},
             session_id=session_id, timeout=max(0.1, float(timeout)),
         )
         channel['page_enabled'] = True
         channels[target_id] = channel
+        session['javascript_dialog_monitor_stage'] = 'ready'
+        session['javascript_dialog_monitor_last_error'] = None
+        session['javascript_dialog_monitor_last_error_at'] = None
         return channel
-    except Exception:
+    except Exception as exc:
+        session['javascript_dialog_monitor_last_error'] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        session['javascript_dialog_monitor_last_error_at'] = time.monotonic()
+        session['javascript_dialog_monitor_failures'] = (
+            int(session.get('javascript_dialog_monitor_failures') or 0) + 1
+        )
         _close_javascript_dialog_browser_channel(channel)
         raise
 
@@ -12358,7 +12393,15 @@ def poll_embedded_chromium_javascript_dialogs(
                     if queued and queued[0] is event:
                         queued.pop(0)
                     return [event]
-    except Exception:
+    except Exception as exc:
+        session['javascript_dialog_monitor_stage'] = 'event-read'
+        session['javascript_dialog_monitor_last_error'] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        session['javascript_dialog_monitor_last_error_at'] = time.monotonic()
+        session['javascript_dialog_monitor_failures'] = (
+            int(session.get('javascript_dialog_monitor_failures') or 0) + 1
+        )
         _close_javascript_dialog_browser_channel(channel)
         (session.get('javascript_dialog_browser_channels') or {}).pop(
             target_id, None
