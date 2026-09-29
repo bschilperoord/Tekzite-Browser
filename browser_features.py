@@ -376,6 +376,9 @@ class BrowserFeatures:
         self._network_health_after_id = None
         if self._closing:
             return
+        if getattr(self, '_page_dialog_modal_active', False):
+            self._schedule_network_health_watch(1000)
+            return
         # Do not start the proxy just because a blank browser window is open.
         # Once Chromium exists, however, its --proxy-server URL is fixed and the
         # helper must be recovered on the same port if it ever crashes.
@@ -415,6 +418,11 @@ class BrowserFeatures:
 
     def _checkpoint_features(self):
         if self._closing or getattr(self, '_private_mode', False):
+            return
+        if getattr(self, '_page_dialog_modal_active', False):
+            # Disk serialization has no urgency while the user is interacting
+            # with a modal. Defer it rather than stealing a first-click frame.
+            self._checkpoint_job = self.root.after(1000, self._checkpoint_features)
             return
 
         wrote_state = False
