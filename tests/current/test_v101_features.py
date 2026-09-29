@@ -28,14 +28,32 @@ def test_extension_entries_are_normalized_and_deduplicated(tmp_path):
     assert main._enabled_extension_paths({'extensions': rows}) == [rows[0]['path']]
 
 
-def test_extension_launcher_validates_manifest_dirs(tmp_path, monkeypatch):
-    good = tmp_path / 'good'
-    bad = tmp_path / 'bad'
-    good.mkdir(); bad.mkdir()
-    (good / 'manifest.json').write_text('{"manifest_version":3,"name":"Test","version":"1"}', encoding='utf-8')
-    monkeypatch.setenv('TEKZITE_USER_EXTENSIONS', json.dumps([str(good), str(bad)]))
+def test_extension_launcher_accepts_manifest_v2_and_v3_only(tmp_path, monkeypatch):
+    mv2 = tmp_path / 'mv2'
+    mv3 = tmp_path / 'mv3'
+    unsupported = tmp_path / 'mv4'
+    missing = tmp_path / 'missing'
+    for path in (mv2, mv3, unsupported, missing):
+        path.mkdir()
+    (mv2 / 'manifest.json').write_text('{"manifest_version":2,"name":"Legacy","version":"1"}', encoding='utf-8')
+    (mv3 / 'manifest.json').write_text('{"manifest_version":3,"name":"Modern","version":"1"}', encoding='utf-8')
+    (unsupported / 'manifest.json').write_text('{"manifest_version":4,"name":"Future","version":"1"}', encoding='utf-8')
+    monkeypatch.setenv(
+        'TEKZITE_USER_EXTENSIONS',
+        json.dumps([str(mv2), str(mv3), str(unsupported), str(missing)]),
+    )
     result = net._configured_user_extension_dirs()
-    assert result == [good.resolve()]
+    assert result == [mv2.resolve(), mv3.resolve()]
+
+
+def test_chromium_launch_keeps_mv2_compatibility_flags():
+    source = Path(net.__file__).read_text(encoding='utf-8')
+    assert 'ExtensionManifestV2Disabled' in source
+    assert 'ExtensionManifestV2Unsupported' in source
+    assert 'ExtensionsManifestV3Only' in source
+    assert 'ExtensionDisableUnsupportedDeveloper' in source
+    assert 'DisableLoadExtensionCommandLineSwitch' in source
+    assert '--enable-features=AllowLegacyMV2Extensions' in source
 
 
 def test_private_profile_override(tmp_path, monkeypatch):
