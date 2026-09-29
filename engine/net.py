@@ -155,6 +155,16 @@ def _configured_user_extension_dirs():
         # ambiguous path rather than silently loading the wrong directory.
         if "," in str(path) or not path.is_dir() or not (path / "manifest.json").is_file():
             continue
+        try:
+            manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+            manifest_version = int(manifest.get("manifest_version"))
+        except Exception:
+            continue
+        # Tekzite intentionally supports both classic MV2 and modern MV3
+        # unpacked extensions. Reject unknown manifest generations early rather
+        # than asking Chromium to fail later with an opaque startup warning.
+        if not isinstance(manifest, dict) or manifest_version not in (2, 3):
+            continue
         key = os.path.normcase(str(path))
         if key == builtin or key in seen:
             continue
@@ -5092,7 +5102,8 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     "--disable-default-apps",
                     "--disable-logging", "--metrics-recording-only", "--no-pings",
                     "--disable-hyperlink-auditing", "--disable-preconnect",
-                    "--disable-features=AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion,BrowsingTopics,InterestCohortAPI,SharedStorageAPI,FencedFrames,AttributionReporting,PrivateAggregationApi,FedCm,WebBluetooth,WebUSB,WebSerial,WebHID,IdleDetection,WebNFC,Prerender2,SpeculationRulesPrefetchProxy",
+                    "--disable-features=AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion,BrowsingTopics,InterestCohortAPI,SharedStorageAPI,FencedFrames,AttributionReporting,PrivateAggregationApi,FedCm,WebBluetooth,WebUSB,WebSerial,WebHID,IdleDetection,WebNFC,Prerender2,SpeculationRulesPrefetchProxy,ExtensionManifestV2Disabled,ExtensionManifestV2Unsupported,ExtensionsManifestV3Only,ExtensionDisableUnsupportedDeveloper,DisableLoadExtensionCommandLineSwitch",
+                    "--enable-features=AllowLegacyMV2Extensions",
                     "--disable-session-crashed-bubble", "--disable-background-mode",
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
