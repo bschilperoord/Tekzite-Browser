@@ -217,7 +217,7 @@ def test_settings_dialog_uses_native_owner_path_instead_of_direct_topmost():
 def test_page_dialog_suspends_dwm_chromium_surface():
     sync_source = inspect.getsource(main.BrowserApp._sync_dwm_host_geometry)
     helper_source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
-    assert "not self._dwm_host_suspended_for_page_dialog" in sync_source
+    assert "transparent or self._dwm_host_suspended_for_page_dialog" in sync_source
     assert "self._dwm_host_suspended_for_page_dialog = suspended" in helper_source
     assert "user32.ShowWindow(hwnd, 0)" not in helper_source
     assert "ShowWindowAsync" in helper_source
