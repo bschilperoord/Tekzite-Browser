@@ -1354,30 +1354,76 @@ class BrowserFeatures:
             state['done'] = True
             if prompt_text is None:
                 prompt_text = prompt_var.get() if kind == 'prompt' else ''
+
+            # Reassert the visual block BEFORE starting teardown. The native Tk
+            # dialog remains visible and keeps its grab while Chromium handles
+            # Page.handleJavaScriptDialog in the background.
             try:
-                win.grab_release()
+                self._set_dwm_page_dialog_visual_fast(True)
             except Exception:
                 pass
-            try:
-                original_destroy = getattr(win, "_tekzite_original_destroy", None)
-                if callable(original_destroy):
-                    original_destroy()
-                else:
-                    win.destroy()
-            except Exception:
-                pass
-            self._javascript_dialog_window = None
+
+            def destroy_native_dialog():
+                try:
+                    win.grab_release()
+                except Exception:
+                    pass
+                try:
+                    original_destroy = getattr(win, "_tekzite_original_destroy", None)
+                    if callable(original_destroy):
+                        original_destroy()
+                    else:
+                        win.destroy()
+                except Exception:
+                    pass
+                self._javascript_dialog_window = None
 
             def work():
                 return features.net.resolve_embedded_chromium_javascript_dialog(
                     target_id, bool(accept), str(prompt_text or ''), timeout=1.0
                 )
+
             try:
                 future = self._javascript_dialog_executor.submit(work)
             except Exception as exc:
+                # CDP could not consume Chromium's dialog. Fall back cleanly:
+                # remove our modal and reveal Chromium so the page is not trapped.
+                destroy_native_dialog()
                 restore_chromium_presentation()
                 self.status_var.set(f'Could not answer page dialog: {exc}')
                 return
+
+            def restore_after_native_close():
+                if self._closing:
+                    return
+                restore_chromium_presentation()
+
+            def finish_native_teardown(ok):
+                if self._closing:
+                    return
+
+                # Chromium has acknowledged Page.handleJavaScriptDialog, but its
+                # compositor can still contain the old popup for one frame.
+                # Keep the DWM mirror transparent across that frame.
+                try:
+                    self._set_dwm_page_dialog_visual_fast(True)
+                except Exception:
+                    pass
+
+                destroy_native_dialog()
+
+                # Do not reveal Chromium in the same Tk callback that destroys
+                # the native dialog. One short frame gives DWM/Chromium time to
+                # present the post-dialog page before we raise alpha again.
+                try:
+                    self.root.after(16, restore_after_native_close)
+                except Exception:
+                    restore_after_native_close()
+
+                if ok:
+                    self.status_var.set(
+                        f'Page dialog {"accepted" if accept else "cancelled"}'
+                    )
 
             def finish_answer():
                 if self._closing:
@@ -1391,14 +1437,31 @@ class BrowserFeatures:
                 try:
                     ok = bool(future.result())
                 except Exception as exc:
-                    restore_chromium_presentation()
+                    # Preserve the same strict order even on an answer failure:
+                    # Chromium remains hidden until our native modal is gone.
+                    try:
+                        self._set_dwm_page_dialog_visual_fast(True)
+                    except Exception:
+                        pass
+                    destroy_native_dialog()
+                    try:
+                        self.root.after(16, restore_after_native_close)
+                    except Exception:
+                        restore_after_native_close()
                     self.status_var.set(f'Could not answer page dialog: {exc}')
                     return
-                restore_chromium_presentation()
-                if ok:
-                    self.status_var.set(
-                        f'Page dialog {"accepted" if accept else "cancelled"}'
-                    )
+
+                # Keep the Tk dialog covering the page for one compositor frame
+                # after Chromium confirms its own popup has closed.
+                try:
+                    self._set_dwm_page_dialog_visual_fast(True)
+                except Exception:
+                    pass
+                try:
+                    self.root.after(16, lambda: finish_native_teardown(ok))
+                except Exception:
+                    finish_native_teardown(ok)
+
             try:
                 self.root.after(8, finish_answer)
             except Exception:
