@@ -234,9 +234,18 @@ def test_native_page_dialog_hides_chromium_until_cdp_answer_finishes():
     ]
     hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
     show_dialog_at = block.index("win.deiconify()", hide_at)
-    restore_at = block.index("restore_chromium_presentation()", block.index("future.result()"))
-    assert hide_at < show_dialog_at
-    assert restore_at > block.index("future.result()")
+    result_at = block.index("future.result()")
+    settle_at = block.index(
+        "self.root.after(16, lambda: finish_native_teardown(ok))", result_at
+    )
+    teardown = block[
+        block.index("def finish_native_teardown(ok):"):
+        block.index("def finish_answer():")
+    ]
+    destroy_at = teardown.index("destroy_native_dialog()")
+    restore_at = teardown.index("self.root.after(16, restore_after_native_close)")
+    assert hide_at < show_dialog_at < result_at < settle_at
+    assert destroy_at < restore_at
     assert "_set_dwm_page_dialog_suspended(False)" in block
 
 
