@@ -1402,9 +1402,9 @@ class BrowserFeatures:
                 if self._closing:
                     return
 
-                # Chromium has acknowledged Page.handleJavaScriptDialog, but its
-                # compositor can still contain the old popup for one frame.
-                # Keep the DWM mirror transparent across that frame.
+                # Chromium has emitted the real Page.javascriptDialogClosed event,
+                # but DWM can still have queued pixels from the old popup. Keep
+                # the mirror transparent across several compositor frames.
                 try:
                     self._set_dwm_page_dialog_visual_fast(True)
                 except Exception:
@@ -1413,10 +1413,10 @@ class BrowserFeatures:
                 destroy_native_dialog()
 
                 # Do not reveal Chromium in the same Tk callback that destroys
-                # the native dialog. One short frame gives DWM/Chromium time to
-                # present the post-dialog page before we raise alpha again.
+                # the native dialog. Keep it hidden for several compositor frames
+                # so Chromium's close animation can never leak through.
                 try:
-                    self.root.after(16, restore_after_native_close)
+                    self.root.after(40, restore_after_native_close)
                 except Exception:
                     restore_after_native_close()
 
@@ -1445,20 +1445,20 @@ class BrowserFeatures:
                         pass
                     destroy_native_dialog()
                     try:
-                        self.root.after(16, restore_after_native_close)
+                        self.root.after(40, restore_after_native_close)
                     except Exception:
                         restore_after_native_close()
                     self.status_var.set(f'Could not answer page dialog: {exc}')
                     return
 
-                # Keep the Tk dialog covering the page for one compositor frame
-                # after Chromium confirms its own popup has closed.
+                # Keep the Tk dialog covering the page for several compositor
+                # frames after Chromium confirms its own popup has closed.
                 try:
                     self._set_dwm_page_dialog_visual_fast(True)
                 except Exception:
                     pass
                 try:
-                    self.root.after(16, lambda: finish_native_teardown(ok))
+                    self.root.after(40, lambda: finish_native_teardown(ok))
                 except Exception:
                     finish_native_teardown(ok)
 
