@@ -232,22 +232,32 @@ def test_native_page_dialog_hides_chromium_until_cdp_answer_finishes():
         FEATURES.index("def _show_native_javascript_dialog"):
         FEATURES.index("def _schedule_permission_prompt_poll")
     ]
+
+    # Open phase: Chromium is hidden before the Tk dialog is made visible.
     hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
-    show_dialog_at = block.index("win.deiconify()", hide_at)
-    result_at = block.index("future.result()")
-    settle_at = block.index(
+    show_dialog_at = block.index("win.deiconify()")
+    assert hide_at < show_dialog_at
+
+    # Close phase lives in nested callbacks defined earlier in source text, so
+    # verify its internal runtime sequence independently of the open phase.
+    decide = block[
+        block.index("def decide(accept, prompt_text=None):"):
+        block.index("header = tk.Frame")
+    ]
+    result_at = decide.index("future.result()")
+    settle_at = decide.index(
         "self.root.after(16, lambda: finish_native_teardown(ok))", result_at
     )
-    teardown = block[
-        block.index("def finish_native_teardown(ok):"):
-        block.index("def finish_answer():")
+    assert result_at < settle_at
+
+    teardown = decide[
+        decide.index("def finish_native_teardown(ok):"):
+        decide.index("def finish_answer():")
     ]
     destroy_at = teardown.index("destroy_native_dialog()")
     restore_at = teardown.index("self.root.after(16, restore_after_native_close)")
-    assert hide_at < show_dialog_at < result_at < settle_at
     assert destroy_at < restore_at
     assert "_set_dwm_page_dialog_suspended(False)" in block
-
 
 def test_javascript_dialog_watcher_has_no_large_polling_blind_spot():
     block = FEATURES[
