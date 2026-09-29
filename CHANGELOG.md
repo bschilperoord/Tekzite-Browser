@@ -1,3 +1,10 @@
+# v10.5.114 - Dual-path native JavaScript dialogs
+
+- Adds an independent direct-page CDP observer alongside the browser-level flattened Target observer for alert, confirm, prompt and before-unload dialogs.
+- Falls back to the direct page websocket when Chromium shows a native modal but the browser-level observer is silent or unavailable.
+- Resolves the dialog through the same CDP path that observed it and closes the unused observer path to prevent duplicate stale dialog events.
+- Keeps the existing Tk foreground/TOPMOST handling from v10.5.113 and adds regression coverage for the direct-page fallback path.
+
 # v10.5.113 - Foreground native page dialogs
 
 - Raises Tekzite's Tk-native JavaScript alert, confirm, prompt and before-unload window before attempting the Tk modal grab, so a Chromium-owned synchronous modal cannot abort the visibility handoff.
