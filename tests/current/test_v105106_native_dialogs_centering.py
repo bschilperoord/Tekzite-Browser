@@ -172,3 +172,36 @@ def test_browser_session_call_preserves_dialog_event_while_waiting_for_response(
     assert ws.sent[0]["method"] == "Page.enable"
     assert channel["events"][0]["type"] == "confirm"
     assert channel["events"][0]["message"] == "Restart service?"
+
+
+def test_auto_animate_false_dialogs_are_not_created_fully_transparent():
+    source = inspect.getsource(main.BrowserApp._new_animated_toplevel)
+    assert "0.0 if (auto_animate and self._motion_enabled()) else 1.0" in source
+    assert "_bind_native_dialog_owner" in source
+
+
+def test_parent_centered_small_modals_opt_out_of_second_centering_pass():
+    for method in (
+        main.BrowserApp._show_message,
+        main.BrowserApp._ask_yes_no,
+        main.BrowserApp._ask_string_animated,
+    ):
+        source = inspect.getsource(method)
+        assert "auto_center=False" in source
+
+
+def test_windows_dialog_raise_prefers_native_owner_over_global_topmost():
+    source = inspect.getsource(main.BrowserApp._raise_toplevel_above_dwm)
+    assert "_bind_native_dialog_owner" in source
+    assert "GWLP_HWNDPARENT" in inspect.getsource(main.BrowserApp._bind_native_dialog_owner)
+    assert "HWND_TOP = 0" in inspect.getsource(main.BrowserApp._bind_native_dialog_owner)
+    assert "HWND_TOPMOST" not in source
+
+
+def test_permission_prompt_is_modal_and_uses_shared_dwm_raise_path():
+    block = FEATURES[
+        FEATURES.index("def _show_permission_request_prompt"):
+        FEATURES.index("def _show_permissions_manager")
+    ]
+    assert "win.grab_set()" in block
+    assert "_raise_toplevel_above_dwm(win, hold_ms=520)" in block
