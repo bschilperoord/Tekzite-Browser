@@ -240,9 +240,9 @@ def test_javascript_dialog_watcher_has_no_large_polling_blind_spot():
         FEATURES.index("def _schedule_javascript_dialog_poll"):
         FEATURES.index("def _show_native_javascript_dialog")
     ]
-    assert "timeout=0.24" in block
-    assert "self.root.after(4, finish)" in block
-    assert "_schedule_javascript_dialog_poll(12 if rows else 2)" in block
+    assert "timeout=0.32" in block
+    assert "self.root.after(8, finish)" in block
+    assert "_schedule_javascript_dialog_poll(20 if rows else 2)" in block
     assert "max(1, int(delay_ms))" in block
     assert "90 if rows else 140" not in block
 
@@ -263,4 +263,57 @@ def test_page_dialog_hides_chromium_before_tk_window_is_built():
     hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
     window_at = block.index("self._new_animated_toplevel")
     assert hide_at < window_at
-    assert "self.root.after(5, finish_answer)" in block
+    assert "self.root.after(8, finish_answer)" in block
+
+
+def test_page_dialog_has_dedicated_serialized_cdp_executor():
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert 'thread_name_prefix="tekzite-js-dialog"' in source
+    block = FEATURES[
+        FEATURES.index("def _javascript_dialog_tick"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert "self._javascript_dialog_executor.submit(" in block
+    assert "poll_embedded_chromium_javascript_dialogs" in block
+    assert "resolve_embedded_chromium_javascript_dialog" in block
+
+
+def test_page_dialog_pauses_dwm_input_watchdogs():
+    source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
+    assert "self._stop_dwm_keyboard_poll()" in source
+    assert 'self.root.after_cancel(after_id)' in source
+    assert "self._dwm_pointer_after_id = None" in source
+    assert "self._chromium_left_button_down = False" in source
+    assert "self._schedule_dwm_pointer_bridge(delay=16)" in source
+    assert "self._schedule_dwm_keyboard_poll(delay=18)" in source
+
+
+def test_native_dialog_activation_is_explicit_but_does_not_steal_cross_app_focus():
+    source = inspect.getsource(main.BrowserApp._activate_native_dialog)
+    assert "SetForegroundWindow" in source
+    assert "SetActiveWindow" in source
+    assert "SetFocus" in source
+    assert "same_app_foreground" in source
+    assert "int(foreground_pid.value) == int(os.getpid())" in source
+
+
+def test_page_dialog_is_fully_built_hidden_before_first_visible_frame():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    create_at = block.index("self._new_animated_toplevel")
+    withdraw_at = block.index("win.withdraw()", create_at)
+    deiconify_at = block.index("win.deiconify()", withdraw_at)
+    activate_at = block.index("self._activate_native_dialog(win)", deiconify_at)
+    grab_at = block.index("win.grab_set()", activate_at)
+    assert create_at < withdraw_at < deiconify_at < activate_at < grab_at
+    assert "win.after(0, reinforce_activation)" in block
+
+
+def test_page_dialog_closes_without_generic_fade_callback_churn():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert 'getattr(win, "_tekzite_original_destroy", None)' in block
