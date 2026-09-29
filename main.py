@@ -3502,7 +3502,7 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             return False
 
-    def _new_animated_toplevel(self, parent=None, *, duration=165, slide=14, branded=True, auto_animate=True):
+    def _new_animated_toplevel(self, parent=None, *, duration=165, slide=14, branded=True, auto_animate=True, auto_center=True):
         """Create an app-owned Toplevel with automatic open/close motion.
 
         The destroy method is wrapped immediately, before callers wire buttons,
@@ -3523,7 +3523,9 @@ class BrowserApp(BrowserFeatures):
         win._tekzite_motion_duration = int(duration)
         win._tekzite_motion_slide = int(slide)
         try:
-            win.attributes("-alpha", 0.0 if self._motion_enabled() else 1.0)
+            # auto_animate=False is used by callers that finalize/show the window
+            # themselves. Those dialogs must never be born fully transparent.
+            win.attributes("-alpha", 0.0 if (auto_animate and self._motion_enabled()) else 1.0)
         except Exception:
             pass
 
@@ -3544,19 +3546,28 @@ class BrowserApp(BrowserFeatures):
             pass
         win._tekzite_branded_dialog = bool(branded)
         win._tekzite_auto_animate = bool(auto_animate)
+        win._tekzite_auto_center = bool(auto_center)
+        win._tekzite_dialog_parent = parent or self.root
         def prepare_dialog(w=win):
             try:
                 if not w.winfo_exists():
                     return
                 if getattr(w, "_tekzite_branded_dialog", False):
                     self._apply_about_style_to_dialog(w)
-                # v10.5.39: every ordinary Tekzite dialog is positioned by one
-                # shared screen-center path after its final header/content size
-                # is known, but before the opening animation captures geometry.
-                # Settings opts out because it has a larger custom size; its
-                # layout path calls the exact same centering helper explicitly.
+
+                # Give every Tekzite Toplevel a real Win32 owner as soon as the
+                # wrapper HWND exists. This keeps dialogs above Tekzite's DWM
+                # presentation popup without making them globally TOPMOST.
+                self._bind_native_dialog_owner(
+                    w, getattr(w, "_tekzite_dialog_parent", self.root)
+                )
+
+                # Callers with an explicit geometry can opt out of the generic
+                # screen-centering pass. This prevents the old 1 ms race where
+                # a modal first centered on its parent and was then moved again.
                 if getattr(w, "_tekzite_auto_animate", True):
-                    self._center_dialog_on_screen(w)
+                    if getattr(w, "_tekzite_auto_center", True):
+                        self._center_dialog_on_screen(w)
                     self._animate_toplevel_in(w, duration=duration, slide=slide)
             except Exception:
                 pass
@@ -3716,7 +3727,7 @@ class BrowserApp(BrowserFeatures):
     def _show_message(self, kind, title, message, *, parent=None):
         """Animated Tekzite-owned replacement for app message boxes."""
         parent = parent or self.root
-        win = self._new_animated_toplevel(parent, duration=150, slide=12)
+        win = self._new_animated_toplevel(parent, duration=150, slide=12, auto_center=False)
         win.title(str(title or "Tekzite"))
         win.transient(parent)
         win.resizable(False, False)
@@ -3758,7 +3769,7 @@ class BrowserApp(BrowserFeatures):
 
     def _ask_yes_no(self, title, message, *, parent=None):
         parent = parent or self.root
-        win = self._new_animated_toplevel(parent, duration=150, slide=12)
+        win = self._new_animated_toplevel(parent, duration=150, slide=12, auto_center=False)
         win.title(str(title or "Tekzite")); win.transient(parent); win.resizable(False, False); win.configure(bg=self.ui["bg"])
         result = {"value": False}
         outer = tk.Frame(win, bg=self.ui["bg"], padx=22, pady=18); outer.pack(fill="both", expand=True)
@@ -3782,7 +3793,7 @@ class BrowserApp(BrowserFeatures):
 
     def _ask_string_animated(self, title, prompt, *, initialvalue="", parent=None):
         parent = parent or self.root
-        win = self._new_animated_toplevel(parent, duration=150, slide=12)
+        win = self._new_animated_toplevel(parent, duration=150, slide=12, auto_center=False)
         win.title(str(title or "Tekzite")); win.transient(parent); win.resizable(False, False); win.configure(bg=self.ui["bg"])
         result = {"value": None}; value = tk.StringVar(value=str(initialvalue or ""))
         outer=tk.Frame(win,bg=self.ui["bg"],padx=22,pady=18); outer.pack(fill="both",expand=True)
@@ -13143,66 +13154,133 @@ class BrowserApp(BrowserFeatures):
         win.after_idle(fit_and_center_preferences)
         win.protocol("WM_DELETE_WINDOW", cancel_preferences)
 
-    def _raise_toplevel_above_dwm(self, win, hold_ms=420):
-        """Force an app dialog above the separate native DWM presentation HWND.
+    def _bind_native_dialog_owner(self, win, owner=None):
+        """Attach a Tk Toplevel to its real Win32 owner and raise it locally.
 
-        Tk ``lift``/``-topmost`` is usually enough, but the Chromium page is
-        mirrored through a raw owned Win32 popup.  Resolve the real Tk wrapper
-        HWND and use SetWindowPos so the dialog wins the native z-order race too.
-        The TOPMOST state is temporary; after the first visible frame it returns
-        to normal app-owned ordering.
+        Tekzite's webpage is presented by a separate owned DWM popup. Tk's
+        transient relationship alone is not always reflected in the native
+        wrapper HWND hierarchy, especially with override-redirect windows.
+        Establishing GWLP_HWNDPARENT makes Windows enforce the correct owner
+        relationship: the dialog stays above Tekzite, follows minimize/restore,
+        and does not need to remain globally TOPMOST.
+        """
+        if sys.platform != "win32" or win is None:
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            GA_ROOT = 2
+            GWLP_HWNDPARENT = -8
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+            HWND_TOP = 0
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.GetWindowLongW.restype = ctypes.c_long
+            user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+            user32.SetWindowLongW.restype = ctypes.c_long
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND, wintypes.HWND,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                wintypes.UINT,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
+
+            win.update_idletasks()
+            owner = owner or self.root
+            try:
+                owner.update_idletasks()
+            except Exception:
+                pass
+
+            raw_dialog = int(win.winfo_id())
+            raw_owner = int(owner.winfo_id())
+            dialog_hwnd = int(
+                user32.GetAncestor(wintypes.HWND(raw_dialog), GA_ROOT) or raw_dialog
+            )
+            owner_hwnd = int(
+                user32.GetAncestor(wintypes.HWND(raw_owner), GA_ROOT) or raw_owner
+            )
+            if not dialog_hwnd or not owner_hwnd or dialog_hwnd == owner_hwnd:
+                return False
+
+            set_owner = getattr(user32, "SetWindowLongPtrW", None)
+            if set_owner is not None:
+                set_owner.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+                set_owner.restype = ctypes.c_ssize_t
+                set_owner(
+                    wintypes.HWND(dialog_hwnd),
+                    GWLP_HWNDPARENT,
+                    ctypes.c_ssize_t(owner_hwnd),
+                )
+            else:
+                user32.SetWindowLongW(
+                    wintypes.HWND(dialog_hwnd), GWLP_HWNDPARENT, owner_hwnd
+                )
+
+            exstyle = int(
+                user32.GetWindowLongW(wintypes.HWND(dialog_hwnd), GWL_EXSTYLE)
+            )
+            wanted = (exstyle | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+            if wanted != exstyle:
+                user32.SetWindowLongW(
+                    wintypes.HWND(dialog_hwnd), GWL_EXSTYLE, wanted
+                )
+
+            # Raise only inside the normal (non-topmost) z-order. Owned-window
+            # semantics keep it above Tekzite without pinning it over other apps.
+            user32.SetWindowPos(
+                wintypes.HWND(dialog_hwnd), wintypes.HWND(HWND_TOP),
+                0, 0, 0, 0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            )
+            win._tekzite_native_owner_hwnd = owner_hwnd
+            win._tekzite_native_dialog_hwnd = dialog_hwnd
+            return True
+        except Exception:
+            return False
+
+    def _raise_toplevel_above_dwm(self, win, hold_ms=420):
+        """Keep an app dialog above Tekzite's native DWM presentation surface.
+
+        Prefer a real native owner relationship plus HWND_TOP. The old approach
+        temporarily promoted every dialog to HWND_TOPMOST, which could fight Tk
+        focus/grab state and leak above unrelated applications. A short TOPMOST
+        fallback remains only for cases where Windows refuses the owner update.
         """
         try:
             win.update_idletasks()
             win.deiconify()
             win.lift()
-            win.focus_force()
         except Exception:
             pass
-        if os.name != "nt":
-            try:
-                win.attributes("-topmost", True)
-                win.after(max(120, int(hold_ms)), lambda w=win: w.winfo_exists() and w.attributes("-topmost", False))
-            except Exception:
-                pass
-            return True
-        try:
-            import ctypes
-            from ctypes import wintypes
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
-            GA_ROOT = 2
-            HWND_TOPMOST = -1
-            HWND_NOTOPMOST = -2
-            SWP_NOMOVE = 0x0002
-            SWP_NOSIZE = 0x0001
-            SWP_NOACTIVATE = 0x0010
-            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
-            user32.GetAncestor.restype = wintypes.HWND
-            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
-            user32.SetWindowPos.restype = wintypes.BOOL
-            raw = int(win.winfo_id())
-            hwnd = int(user32.GetAncestor(wintypes.HWND(raw), GA_ROOT) or raw)
-            flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-            user32.SetWindowPos(wintypes.HWND(hwnd), wintypes.HWND(HWND_TOPMOST), 0, 0, 0, 0, flags)
-            win.attributes("-topmost", True)
 
-            def release_native_topmost(w=win, native_hwnd=hwnd):
-                try:
-                    if not w.winfo_exists():
-                        return
-                    user32.SetWindowPos(wintypes.HWND(native_hwnd), wintypes.HWND(HWND_NOTOPMOST), 0, 0, 0, 0, flags)
-                    w.attributes("-topmost", False)
-                    w.lift()
-                except Exception:
-                    pass
-            win.after(max(160, int(hold_ms)), release_native_topmost)
+        if sys.platform != "win32":
             return True
+
+        if self._bind_native_dialog_owner(
+            win, getattr(win, "_tekzite_dialog_parent", self.root)
+        ):
+            return True
+
+        # Defensive fallback for an unusual Tk wrapper failure.
+        try:
+            win.attributes("-topmost", True)
+            win.after(
+                max(160, int(hold_ms)),
+                lambda w=win: w.winfo_exists() and w.attributes("-topmost", False),
+            )
+            return False
         except Exception:
-            try:
-                win.attributes("-topmost", True)
-                win.after(max(160, int(hold_ms)), lambda w=win: w.winfo_exists() and w.attributes("-topmost", False))
-            except Exception:
-                pass
             return False
 
     def _show_about(self):
