@@ -1215,8 +1215,17 @@ class BrowserFeatures:
         win.title('Tekzite Page Dialog')
         win.transient(self.root)
         win.configure(bg=self.ui['bg'])
-        state = {'done': False}
+        state = {'done': False, 'presentation_restored': False}
         prompt_var = tk.StringVar(value=default_prompt)
+
+        def restore_chromium_presentation():
+            if state['presentation_restored']:
+                return
+            state['presentation_restored'] = True
+            try:
+                self._set_dwm_page_dialog_suspended(False)
+            except Exception:
+                pass
 
         def decide(accept, prompt_text=None):
             if state['done']:
@@ -1241,6 +1250,7 @@ class BrowserFeatures:
             try:
                 future = self._executor.submit(work)
             except Exception as exc:
+                restore_chromium_presentation()
                 self.status_var.set(f'Could not answer page dialog: {exc}')
                 return
 
@@ -1256,8 +1266,10 @@ class BrowserFeatures:
                 try:
                     ok = bool(future.result())
                 except Exception as exc:
+                    restore_chromium_presentation()
                     self.status_var.set(f'Could not answer page dialog: {exc}')
                     return
+                restore_chromium_presentation()
                 if ok:
                     self.status_var.set(
                         f'Page dialog {"accepted" if accept else "cancelled"}'
@@ -1358,6 +1370,11 @@ class BrowserFeatures:
         dialog_h = 330 if kind == 'prompt' else 285
         self._center_dialog_on_screen(win, 560, dialog_h, 18)
         try:
+            # Chromium's browser-level JS dialog is already open by the time
+            # Page.javascriptDialogOpening reaches CDP. Hide Tekzite's DWM
+            # presentation surface before showing our native equivalent so the
+            # user never sees two dialogs at once.
+            self._set_dwm_page_dialog_suspended(True)
             win.deiconify()
             win.lift()
             win.grab_set()
