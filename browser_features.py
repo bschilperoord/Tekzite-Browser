@@ -1388,6 +1388,29 @@ class BrowserFeatures:
             if prompt_text is None:
                 prompt_text = prompt_var.get() if kind == 'prompt' else ''
 
+            # Give immediate visual acknowledgement on mouse-up. The native
+            # dialog stays on screen only as a shield until Chromium confirms
+            # its own popup has closed, so it must not look like the click was
+            # ignored during a cold first close.
+            try:
+                for child in controls.winfo_children():
+                    try:
+                        child.configure(state='disabled', cursor='arrow')
+                    except Exception:
+                        pass
+                try:
+                    close_button.configure(state='disabled', cursor='arrow')
+                except Exception:
+                    pass
+                if entry is not None:
+                    try:
+                        entry.configure(state='disabled')
+                    except Exception:
+                        pass
+                win.configure(cursor='wait')
+            except Exception:
+                pass
+
             # Reassert the visual block BEFORE starting teardown. The native Tk
             # dialog remains visible and keeps its grab while Chromium handles
             # Page.handleJavaScriptDialog in the background.
