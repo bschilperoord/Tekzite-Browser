@@ -17,7 +17,8 @@ def test_dwm_host_is_layered_and_alpha_driven():
 
     sync = MAIN[MAIN.index("def _sync_dwm_host_geometry"):MAIN.index("def _cancel_dwm_host_reveal")]
     assert "SetLayeredWindowAttributes" in sync
-    assert "target_alpha = 0 if transparent else 255" in sync
+    assert "transparent or self._dwm_host_suspended_for_page_dialog" in sync
+    assert ") else 255" in sync
 
 
 def test_initial_dwm_reveal_starts_transparent_then_turns_opaque():
