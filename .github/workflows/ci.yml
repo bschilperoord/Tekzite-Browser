@@ -29,3 +29,17 @@ jobs:
       - name: Run current regression suite
         shell: pwsh
         run: python -m pytest -q tests/current
+
+      - name: Build Windows preview executable
+        if: github.ref == 'refs/heads/dev/v10.5.108-dialog-hwnd'
+        shell: pwsh
+        run: .\build_windows.ps1
+
+      - name: Upload Windows preview artifact
+        if: github.ref == 'refs/heads/dev/v10.5.108-dialog-hwnd'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tekzite-v10.5.108-dialog-hwnd-Windows-x64
+          path: dist/TekziteBrowser.exe
+          if-no-files-found: error
+          retention-days: 14
