@@ -1395,7 +1395,9 @@ class BrowserFeatures:
             win.update_idletasks()
             self._bind_native_dialog_owner(win, self.root)
             win.deiconify()
-            self._raise_toplevel_above_dwm(win, hold_ms=520)
+            win.lift()
+            # The HWND is already owned and materialized. Activating it directly
+            # avoids the generic raise helper's second owner/style pass.
             self._activate_native_dialog(win)
             win.grab_set()
             if entry is not None:
