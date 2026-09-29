@@ -2273,7 +2273,10 @@ class BrowserApp(BrowserFeatures):
         self._tab_drag_threshold_px = 9
         self._tab_tearoff_margin_px = 28
         self._loading_spinner_frames = ("◐", "◓", "◑", "◒")
-        user_extension_paths = [] if self.preferences.get("privacy_lockdown", True) else _enabled_extension_paths(self.preferences)
+        # Enabled entries in Extension Manager are explicitly approved by the user.
+        # Privacy Core keeps its network/privacy protections active but no longer
+        # silently disables those approved extensions.
+        user_extension_paths = _enabled_extension_paths(self.preferences)
         os.environ["TEKZITE_USER_EXTENSIONS"] = json.dumps(user_extension_paths)
         self._state_directory = _preferences_path().parent
         self.root.report_callback_exception = self._report_tk_callback_exception
