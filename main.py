@@ -2359,6 +2359,12 @@ class BrowserApp(BrowserFeatures):
         # v6.0: Chromium is the only web engine.  Tekzite owns browser UI,
         # while all page parsing/layout/JS/media/storage live in Chromium.
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tekzite-chromium")
+        # Keep browser-level JavaScript dialog traffic off the general Chromium
+        # worker pool. A blocked websocket receive or a busy page task must never
+        # delay the first clickable native dialog or its OK/Cancel response.
+        self._javascript_dialog_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="tekzite-js-dialog"
+        )
         # v10.5.98: HTML inspection uses one serialized background worker. Large
         # DOM syntax/search jobs therefore cannot fan out across the general
         # Chromium pool and create CPU bursts that compete with Tk/DWM input.
@@ -2431,6 +2437,8 @@ class BrowserApp(BrowserFeatures):
         # Tekzite presents the equivalent native Tk dialog.  This is separate
         # from minimize suspension so normal DWM recovery remains untouched.
         self._dwm_host_suspended_for_page_dialog = False
+        self._dwm_page_dialog_keyboard_was_active = False
+        self._dwm_page_dialog_pointer_was_armed = False
         # v10.5.50: taskbar restore is a cold DWM recovery, not merely a popup
         # remap.  Windows can retain the destination HWND while silently dropping
         # the live thumbnail composition after an override-redirect/iconify cycle.
@@ -7295,17 +7303,61 @@ class BrowserApp(BrowserFeatures):
             return None
 
     def _set_dwm_page_dialog_suspended(self, suspended):
-        """Instantly suppress Chromium's DWM mirror while Tekzite owns a page dialog."""
+        """Suspend only Chromium presentation/input while Tekzite owns a page dialog."""
         suspended = bool(suspended)
+        already = bool(getattr(self, "_dwm_host_suspended_for_page_dialog", False))
+        if suspended == already:
+            return True
         self._dwm_host_suspended_for_page_dialog = suspended
+
+        if suspended:
+            # Freeze Chromium-side input fallbacks before the native dialog is
+            # shown. Otherwise an 8 ms keyboard/pointer watchdog can still react
+            # to the same physical click that is meant for the dialog.
+            self._dwm_page_dialog_keyboard_was_active = bool(
+                getattr(self, "_dwm_keyboard_poll_active", False)
+                or getattr(self, "_chromium_page_keyboard_active", False)
+            )
+            self._dwm_page_dialog_pointer_was_armed = bool(
+                getattr(self, "_dwm_pointer_after_id", None) is not None
+                or getattr(self, "_dwm_host_visible", False)
+            )
+            try:
+                self._stop_dwm_keyboard_poll()
+            except Exception:
+                pass
+            try:
+                after_id = getattr(self, "_dwm_pointer_after_id", None)
+                if after_id is not None:
+                    self.root.after_cancel(after_id)
+                self._dwm_pointer_after_id = None
+            except Exception:
+                self._dwm_pointer_after_id = None
+
+            # Drop stale page gesture state. The JavaScript dialog has already
+            # been emitted, so no Chromium drag/press should survive into the
+            # native modal's first click.
+            self._dwm_pointer_inside = False
+            self._dwm_pointer_last_screen_xy = None
+            self._dwm_pointer_last_page_xy = None
+            self._chromium_left_button_down = False
+            self._chromium_drag_selecting = False
+            self._chromium_press_point = None
+            self._chromium_pending_drag = None
+            drag_after = getattr(self, "_chromium_drag_after_id", None)
+            if drag_after is not None:
+                try:
+                    self.root.after_cancel(drag_after)
+                except Exception:
+                    pass
+                self._chromium_drag_after_id = None
+
         if not (self._embedded_mode and self._chromium_dwm_mode):
-            return False
+            return True
 
         # Dialog suppression is latency-sensitive. The normal DWM hide path is
-        # intentionally asynchronous for tab/window transitions, but that can
-        # leave Chromium's own dialog visible for one compositor frame. Make
-        # this path synchronous and force alpha to zero first, then restore via
-        # the normal geometry path after Page.handleJavaScriptDialog completes.
+        # asynchronous for tab/window transitions, but here even one compositor
+        # frame is visible. Force alpha to zero and synchronously hide once.
         if suspended and os.name == "nt" and self._dwm_host:
             try:
                 import ctypes
@@ -7324,15 +7376,34 @@ class BrowserApp(BrowserFeatures):
                 self._dwm_host_alpha = 0
                 user32.ShowWindow(hwnd, 0)  # SW_HIDE, synchronous on purpose.
                 self._dwm_host_visible = False
-                return True
             except Exception:
-                pass
+                try:
+                    self._sync_dwm_host_geometry(show=False, transparent=True)
+                except Exception:
+                    pass
+            return True
 
         try:
-            self._sync_dwm_host_geometry(show=not suspended, transparent=suspended)
-            return True
+            self._sync_dwm_host_geometry(show=True, transparent=False)
         except Exception:
-            return False
+            pass
+
+        # Restore the low-level watchers only after the page presentation exists
+        # again. Small delays keep them out of the dialog teardown click.
+        if self._dwm_page_dialog_pointer_was_armed:
+            try:
+                self._schedule_dwm_pointer_bridge(delay=16)
+            except Exception:
+                pass
+        if self._dwm_page_dialog_keyboard_was_active:
+            try:
+                self._chromium_page_keyboard_active = True
+                self._schedule_dwm_keyboard_poll(delay=18)
+            except Exception:
+                pass
+        self._dwm_page_dialog_keyboard_was_active = False
+        self._dwm_page_dialog_pointer_was_armed = False
+        return True
 
     def _cancel_dwm_host_reveal(self):
         if self._dwm_reveal_after_id is not None:
@@ -13296,6 +13367,100 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             return False
 
+    def _activate_native_dialog(self, win):
+        """Activate a Tekzite dialog HWND so the first click reaches its control."""
+        if win is None:
+            return False
+        try:
+            win.update_idletasks()
+        except Exception:
+            pass
+
+        # Tk focus remains the portable fallback.
+        if sys.platform != "win32":
+            try:
+                win.lift()
+                win.focus_force()
+                return True
+            except Exception:
+                return False
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            self._bind_native_dialog_owner(
+                win, getattr(win, "_tekzite_dialog_parent", self.root)
+            )
+
+            hwnd = int(getattr(win, "_tekzite_native_dialog_hwnd", 0) or 0)
+            if not hwnd:
+                raw = int(win.winfo_id())
+                user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+                user32.GetAncestor.restype = wintypes.HWND
+                hwnd = int(user32.GetAncestor(wintypes.HWND(raw), 2) or raw)  # GA_ROOT
+            if not hwnd:
+                return False
+
+            user32.GetForegroundWindow.argtypes = []
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            user32.GetWindowThreadProcessId.argtypes = [
+                wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+            ]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND, wintypes.HWND,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                wintypes.UINT,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+            user32.SetForegroundWindow.restype = wintypes.BOOL
+            user32.SetActiveWindow.argtypes = [wintypes.HWND]
+            user32.SetActiveWindow.restype = wintypes.HWND
+            user32.SetFocus.argtypes = [wintypes.HWND]
+            user32.SetFocus.restype = wintypes.HWND
+
+            HWND_TOP = 0
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            foreground = user32.GetForegroundWindow()
+            foreground_pid = wintypes.DWORD()
+            if foreground:
+                user32.GetWindowThreadProcessId(
+                    foreground, ctypes.byref(foreground_pid)
+                )
+            same_app_foreground = bool(
+                foreground and int(foreground_pid.value) == int(os.getpid())
+            )
+
+            # A page-triggered dialog normally appears while Tekzite is already
+            # foreground. Activate only in that case so a background tab can
+            # never steal focus from another application.
+            user32.SetWindowPos(
+                wintypes.HWND(hwnd), wintypes.HWND(HWND_TOP),
+                0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE,
+            )
+            if same_app_foreground:
+                user32.SetForegroundWindow(wintypes.HWND(hwnd))
+                user32.SetActiveWindow(wintypes.HWND(hwnd))
+                user32.SetFocus(wintypes.HWND(hwnd))
+
+            try:
+                win.lift()
+                if same_app_foreground:
+                    win.focus_force()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            try:
+                win.lift()
+                win.focus_force()
+                return True
+            except Exception:
+                return False
+
     def _raise_toplevel_above_dwm(self, win, hold_ms=420):
         """Keep an app dialog above Tekzite's native DWM presentation surface.
 
@@ -15098,6 +15263,10 @@ class BrowserApp(BrowserFeatures):
                 pass
             try:
                 self._html_inspector_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            try:
+                self._javascript_dialog_executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass
             self._executor.shutdown(wait=False, cancel_futures=True)
