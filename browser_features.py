@@ -1237,11 +1237,23 @@ class BrowserFeatures:
         # Keep one worker parked on the CDP websocket for a short window. This
         # behaves almost event-driven: when Chromium emits javascriptDialogOpening
         # the future completes immediately, without a 90-140 ms blind spot.
-        future = self._javascript_dialog_executor.submit(
-            features.net.poll_embedded_chromium_javascript_dialogs,
-            target_id,
-            timeout=0.32,
-        )
+        def wait_for_dialog():
+            rows = features.net.poll_embedded_chromium_javascript_dialogs(
+                target_id, timeout=0.32
+            )
+            if rows:
+                # This executes on the dedicated CDP worker immediately after
+                # javascriptDialogOpening is read from the websocket, before
+                # Tk's 8 ms completion check can run. Suppress Chromium here so
+                # its own popup never gets a visible compositor frame ahead of
+                # the native Tekzite dialog.
+                try:
+                    self._set_dwm_page_dialog_visual_fast(True)
+                except Exception:
+                    pass
+            return rows
+
+        future = self._javascript_dialog_executor.submit(wait_for_dialog)
 
         def finish():
             if self._closing:
@@ -1258,7 +1270,16 @@ class BrowserFeatures:
             except Exception:
                 rows = []
             if rows:
-                self._show_native_javascript_dialog(rows[0])
+                try:
+                    self._show_native_javascript_dialog(rows[0])
+                except Exception:
+                    # Never strand the page visually hidden if native dialog
+                    # construction itself fails unexpectedly.
+                    try:
+                        self._set_dwm_page_dialog_visual_fast(False)
+                    except Exception:
+                        pass
+                    raise
             self._schedule_javascript_dialog_poll(20 if rows else 2)
 
         try:
