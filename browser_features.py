@@ -1215,11 +1215,6 @@ class BrowserFeatures:
         win.title('Tekzite Page Dialog')
         win.transient(self.root)
         win.configure(bg=self.ui['bg'])
-        try:
-            win.attributes('-topmost', True)
-        except Exception:
-            pass
-
         state = {'done': False}
         prompt_var = tk.StringVar(value=default_prompt)
 
@@ -1664,7 +1659,11 @@ class BrowserFeatures:
         win.protocol('WM_DELETE_WINDOW', lambda: decide(False, False))
         win.bind('<Escape>', lambda event: decide(False, False))
         try:
-            win.lift()
+            # This is a real modal decision. Give the Toplevel native HWND
+            # ownership, keep input inside the prompt, and raise it above the
+            # separate DWM page presenter without making it globally topmost.
+            win.grab_set()
+            self._raise_toplevel_above_dwm(win, hold_ms=520)
             win.after(60, win.focus_force)
         except Exception:
             pass
