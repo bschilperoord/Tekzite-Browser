@@ -246,7 +246,7 @@ def test_native_page_dialog_hides_chromium_until_cdp_answer_finishes():
     ]
     result_at = decide.index("future.result()")
     settle_at = decide.index(
-        "self.root.after(16, lambda: finish_native_teardown(ok))", result_at
+        "self.root.after(40, lambda: finish_native_teardown(ok))", result_at
     )
     assert result_at < settle_at
 
@@ -255,7 +255,7 @@ def test_native_page_dialog_hides_chromium_until_cdp_answer_finishes():
         decide.index("def finish_answer():")
     ]
     destroy_at = teardown.index("destroy_native_dialog()")
-    restore_at = teardown.index("self.root.after(16, restore_after_native_close)")
+    restore_at = teardown.index("self.root.after(40, restore_after_native_close)")
     assert destroy_at < restore_at
     assert "_set_dwm_page_dialog_suspended(False)" in block
 
@@ -446,10 +446,10 @@ def test_chromium_stays_hidden_until_after_tk_dialog_teardown():
     prehide_at = decide.index("_set_dwm_page_dialog_visual_fast(True)")
     submit_at = decide.index("self._javascript_dialog_executor.submit(work)")
     result_at = decide.index("future.result()")
-    settle_at = decide.index("self.root.after(16, lambda: finish_native_teardown(ok))")
+    settle_at = decide.index("self.root.after(40, lambda: finish_native_teardown(ok))")
     destroy_def_at = decide.index("def destroy_native_dialog():")
     teardown_at = decide.index("def finish_native_teardown(ok):")
-    restore_schedule_at = decide.index("self.root.after(16, restore_after_native_close)")
+    restore_schedule_at = decide.index("self.root.after(40, restore_after_native_close)")
     assert prehide_at < submit_at < result_at < settle_at
     assert destroy_def_at < teardown_at < restore_schedule_at
 
@@ -466,13 +466,13 @@ def test_success_path_does_not_restore_chromium_before_native_close():
     ]
     assert "_set_dwm_page_dialog_visual_fast(True)" in teardown
     assert "destroy_native_dialog()" in teardown
-    assert "self.root.after(16, restore_after_native_close)" in teardown
+    assert "self.root.after(40, restore_after_native_close)" in teardown
     assert teardown.index("destroy_native_dialog()") < teardown.index(
-        "self.root.after(16, restore_after_native_close)"
+        "self.root.after(40, restore_after_native_close)"
     )
 
 
-def test_post_cdp_settle_keeps_tk_dialog_visible_for_one_frame():
+def test_post_cdp_settle_keeps_tk_dialog_visible_across_compositor_frames():
     block = FEATURES[
         FEATURES.index("def _show_native_javascript_dialog"):
         FEATURES.index("def _schedule_permission_prompt_poll")
@@ -480,4 +480,38 @@ def test_post_cdp_settle_keeps_tk_dialog_visible_for_one_frame():
     decide = block[block.index("def decide(accept, prompt_text=None):"):block.index("header = tk.Frame")]
     finish = decide[decide.index("def finish_answer():"):]
     assert "_set_dwm_page_dialog_visual_fast(True)" in finish
-    assert "self.root.after(16, lambda: finish_native_teardown(ok))" in finish
+    assert "self.root.after(40, lambda: finish_native_teardown(ok))" in finish
+
+
+def test_net_waits_for_real_javascript_dialog_closed_event():
+    net_source = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
+    resolve = net_source[
+        net_source.index("def resolve_embedded_chromium_javascript_dialog"):
+        net_source.index("def set_embedded_chromium_permission")
+    ]
+    waiter = net_source[
+        net_source.index("def _wait_for_javascript_dialog_closed"):
+        net_source.index("def resolve_embedded_chromium_javascript_dialog")
+    ]
+    recorder = net_source[
+        net_source.index("def _record_javascript_dialog_browser_event"):
+        net_source.index("def _javascript_dialog_browser_call")
+    ]
+    assert "_wait_for_javascript_dialog_closed(" in resolve
+    assert "channel['dialog_open'] = False" not in resolve
+    assert "Page.javascriptDialogClosed" in waiter
+    assert "last_dialog_closed_at" in recorder
+    assert "last_dialog_close_confirmed" in resolve
+
+
+def test_close_handoff_uses_multi_frame_hidden_guard():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    decide = block[
+        block.index("def decide(accept, prompt_text=None):"):
+        block.index("header = tk.Frame")
+    ]
+    assert "self.root.after(40, lambda: finish_native_teardown(ok))" in decide
+    assert "self.root.after(40, restore_after_native_close)" in decide
