@@ -276,7 +276,7 @@ class BrowserFeatures:
             self._checkpoint_job = self.root.after(3500, self._checkpoint_features)
         self._schedule_network_health_watch(3000)
         self._schedule_permission_prompt_poll(450)
-        self._schedule_javascript_dialog_poll(140)
+        self._schedule_javascript_dialog_poll(20)
         scheduler = getattr(self, '_schedule_sleeping_tabs', None)
         if callable(scheduler):
             scheduler(15000)
@@ -1119,12 +1119,12 @@ class BrowserFeatures:
             return False
 
 
-    def _schedule_javascript_dialog_poll(self, delay_ms=140):
+    def _schedule_javascript_dialog_poll(self, delay_ms=8):
         if self._closing:
             return
         try:
             self._javascript_dialog_after_id = self.root.after(
-                max(70, int(delay_ms)), self._javascript_dialog_tick
+                max(1, int(delay_ms)), self._javascript_dialog_tick
             )
         except Exception:
             self._javascript_dialog_after_id = None
@@ -1143,20 +1143,23 @@ class BrowserFeatures:
                 pass
             self._javascript_dialog_window = None
         if getattr(self, '_javascript_dialog_poll_busy', False):
-            self._schedule_javascript_dialog_poll(100)
+            self._schedule_javascript_dialog_poll(6)
             return
 
         tab = self._active_tab() or {}
         target_id = str(tab.get('chromium_target_id') or '')
         if not target_id:
-            self._schedule_javascript_dialog_poll(350)
+            self._schedule_javascript_dialog_poll(120)
             return
 
         self._javascript_dialog_poll_busy = True
+        # Keep one worker parked on the CDP websocket for a short window. This
+        # behaves almost event-driven: when Chromium emits javascriptDialogOpening
+        # the future completes immediately, without a 90-140 ms blind spot.
         future = self._executor.submit(
             features.net.poll_embedded_chromium_javascript_dialogs,
             target_id,
-            timeout=0.07,
+            timeout=0.24,
         )
 
         def finish():
@@ -1164,7 +1167,7 @@ class BrowserFeatures:
                 return
             if not future.done():
                 try:
-                    self.root.after(25, finish)
+                    self.root.after(4, finish)
                 except Exception:
                     pass
                 return
@@ -1174,11 +1177,17 @@ class BrowserFeatures:
             except Exception:
                 rows = []
             if rows:
+                # Suppress Chromium before building any Tk controls. The native
+                # dialog then becomes the first visible UI for this decision.
+                try:
+                    self._set_dwm_page_dialog_suspended(True)
+                except Exception:
+                    pass
                 self._show_native_javascript_dialog(rows[0])
-            self._schedule_javascript_dialog_poll(90 if rows else 140)
+            self._schedule_javascript_dialog_poll(12 if rows else 2)
 
         try:
-            self.root.after(25, finish)
+            self.root.after(4, finish)
         except Exception:
             self._javascript_dialog_poll_busy = False
 
@@ -1205,6 +1214,12 @@ class BrowserFeatures:
         host = origin or page_url or 'Current page'
         try:
             host = urlsplit(origin or page_url).hostname or host
+        except Exception:
+            pass
+
+        # Direct callers also get the same no-flash guarantee.
+        try:
+            self._set_dwm_page_dialog_suspended(True)
         except Exception:
             pass
 
@@ -1259,7 +1274,7 @@ class BrowserFeatures:
                     return
                 if not future.done():
                     try:
-                        self.root.after(30, finish_answer)
+                        self.root.after(5, finish_answer)
                     except Exception:
                         pass
                     return
@@ -1275,7 +1290,7 @@ class BrowserFeatures:
                         f'Page dialog {"accepted" if accept else "cancelled"}'
                     )
             try:
-                self.root.after(30, finish_answer)
+                self.root.after(5, finish_answer)
             except Exception:
                 pass
 
@@ -1370,11 +1385,6 @@ class BrowserFeatures:
         dialog_h = 330 if kind == 'prompt' else 285
         self._center_dialog_on_screen(win, 560, dialog_h, 18)
         try:
-            # Chromium's browser-level JS dialog is already open by the time
-            # Page.javascriptDialogOpening reaches CDP. Hide Tekzite's DWM
-            # presentation surface before showing our native equivalent so the
-            # user never sees two dialogs at once.
-            self._set_dwm_page_dialog_suspended(True)
             win.deiconify()
             win.lift()
             win.grab_set()
