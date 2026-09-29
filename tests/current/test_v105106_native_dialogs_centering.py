@@ -111,6 +111,39 @@ def test_fixed_size_page_dialog_does_not_drain_tk_idle_queue():
     assert "update_idletasks()" not in block
 
 
+def test_page_dialog_shell_is_prewarmed_before_first_real_dialog():
+    assert "def _prewarm_javascript_dialog_ui" in FEATURES
+    startup = FEATURES[
+        FEATURES.index("def _feature_startup"):
+        FEATURES.index("def _schedule_network_health_watch")
+    ]
+    assert "self.root.after(350, self._prewarm_javascript_dialog_ui)" in startup
+
+    prewarm = FEATURES[
+        FEATURES.index("def _prewarm_javascript_dialog_ui"):
+        FEATURES.index("def _show_native_javascript_dialog")
+    ]
+    assert "_build_javascript_dialog_shell()" in prewarm
+    assert "560x330-32000-32000" in prewarm
+    assert "win.deiconify()" in prewarm
+    assert "win.withdraw()" in prewarm
+    assert "_javascript_dialog_prewarm_ready = True" in prewarm
+
+
+def test_first_real_page_dialog_reuses_prewarmed_shell():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert "_javascript_dialog_prewarm_shell" in block
+    assert "_javascript_dialog_last_used_prewarm" in block
+    assert "shell = self._build_javascript_dialog_shell()" in block
+    assert "title.configure(text=title_text)" in block
+    assert "host_label.configure(text=str(host))" in block
+    assert "message_label.configure(text=shown_message)" in block
+    assert "_javascript_dialog_last_show_ms" in block
+
+
 def test_non_animated_toplevel_is_visible_immediately():
     source = inspect.getsource(main.BrowserApp._new_animated_toplevel)
     assert '0.0 if (auto_animate and self._motion_enabled()) else 1.0' in source

@@ -272,6 +272,10 @@ class BrowserFeatures:
     def _feature_startup(self, action):
         action()
         self._apply_quiet_mode()
+        try:
+            self.root.after(350, self._prewarm_javascript_dialog_ui)
+        except Exception:
+            pass
         if not getattr(self, '_private_mode', False):
             self._checkpoint_job = self.root.after(3500, self._checkpoint_features)
         self._schedule_network_health_watch(3000)
@@ -1187,6 +1191,142 @@ class BrowserFeatures:
         except Exception:
             self._javascript_dialog_poll_busy = False
 
+    def _build_javascript_dialog_shell(self):
+        """Build the reusable Tk shell used by alert/confirm/prompt dialogs."""
+        win = self._new_animated_toplevel(
+            self.root, branded=False, auto_animate=False
+        )
+        try:
+            win.withdraw()
+        except Exception:
+            pass
+        win.title('Tekzite Page Dialog')
+        win.transient(self.root)
+        win.configure(bg=self.ui['bg'])
+
+        prompt_var = tk.StringVar(value='')
+
+        header = tk.Frame(win, bg=self.ui['bg'])
+        header.pack(fill='x', padx=18, pady=(16, 8))
+        logo = tk.Label(
+            header, text='T', bg=self.ui['accent'], fg='#ffffff',
+            font=(self._ui_display_font_family, self._font_size(12), 'bold'),
+            width=2, pady=4,
+        )
+        logo.pack(side='left', padx=(0, 10))
+        title = tk.Label(
+            header, text='', bg=self.ui['bg'], fg=self.ui['text'],
+            font=(self._ui_display_font_family, self._font_size(13), 'bold'),
+            anchor='w',
+        )
+        title.pack(side='left', fill='x', expand=True)
+        close_button = tk.Button(
+            header, text='×', command=lambda: None,
+            bg=self.ui['bg'], fg=self.ui['muted'],
+            activebackground=self.ui['chrome_hover'],
+            activeforeground=self.ui['text'],
+            relief='flat', bd=0, highlightthickness=0, cursor='hand2',
+            font=(self._ui_display_font_family, self._font_size(14)),
+            padx=9, pady=2,
+        )
+        close_button.pack(side='right')
+        self._bind_frameless_dialog_drag(win, header, logo, title)
+
+        body = tk.Frame(win, bg=self.ui['bg'])
+        body.pack(fill='both', expand=True, padx=20, pady=(2, 10))
+        host_label = tk.Label(
+            body, text='', bg=self.ui['bg'], fg=self.ui['accent'],
+            font=(self._ui_font_family, self._font_size(9), 'bold'),
+            anchor='w',
+        )
+        host_label.pack(fill='x', pady=(0, 9))
+        message_label = tk.Label(
+            body, text='', bg=self.ui['bg'], fg=self.ui['text'],
+            justify='left', anchor='w', wraplength=520,
+            font=(self._ui_font_family, self._font_size(10)),
+        )
+        message_label.pack(fill='x', pady=(0, 12))
+        entry = tk.Entry(
+            body, textvariable=prompt_var,
+            bg=self.ui['field'], fg=self.ui['text'],
+            insertbackground=self.ui['text'], relief='flat',
+            highlightthickness=1, highlightbackground=self.ui['border'],
+            highlightcolor=self.ui['accent'],
+            font=(self._ui_font_family, self._font_size(10)),
+        )
+
+        controls = tk.Frame(win, bg=self.ui['bg'])
+        controls.pack(fill='x', padx=16, pady=(4, 16))
+        cancel_button = self._feature_button(
+            controls, 'Cancel', lambda: None
+        )
+        ok_button = self._feature_button(
+            controls, 'OK', lambda: None
+        )
+        cancel_button.pack_forget()
+        ok_button.pack_forget()
+
+        return {
+            'win': win,
+            'prompt_var': prompt_var,
+            'title': title,
+            'close_button': close_button,
+            'host_label': host_label,
+            'message_label': message_label,
+            'entry': entry,
+            'controls': controls,
+            'cancel_button': cancel_button,
+            'ok_button': ok_button,
+        }
+
+    def _prewarm_javascript_dialog_ui(self):
+        """Create and map the first page-dialog shell before the user needs it."""
+        if self._closing:
+            return
+        current = getattr(self, '_javascript_dialog_prewarm_shell', None)
+        if isinstance(current, dict):
+            win = current.get('win')
+            try:
+                if win is not None and win.winfo_exists():
+                    return
+            except Exception:
+                pass
+
+        started = time.perf_counter()
+        try:
+            shell = self._build_javascript_dialog_shell()
+            win = shell['win']
+            self._javascript_dialog_prewarm_shell = shell
+            self._javascript_dialog_prewarm_ready = False
+            self._javascript_dialog_prewarm_started_at = started
+
+            # Map the native HWND once, off-screen, so Windows/Tk/font/widget
+            # cold initialization is already paid before the first real dialog.
+            win.geometry('560x330-32000-32000')
+            win.deiconify()
+
+            def finish_prewarm():
+                try:
+                    if not win.winfo_exists():
+                        return
+                    win.withdraw()
+                    self._javascript_dialog_prewarm_ready = True
+                    self._javascript_dialog_prewarm_ms = round(
+                        (time.perf_counter() - started) * 1000.0, 3
+                    )
+                except Exception as exc:
+                    self._javascript_dialog_prewarm_error = (
+                        f'{type(exc).__name__}: {exc}'
+                    )
+
+            win.after(32, finish_prewarm)
+        except Exception as exc:
+            self._javascript_dialog_prewarm_shell = None
+            self._javascript_dialog_prewarm_ready = False
+            self._javascript_dialog_prewarm_error = (
+                f'{type(exc).__name__}: {exc}'
+            )
+
     def _show_native_javascript_dialog(self, dialog):
         previous = getattr(self, '_javascript_dialog_window', None)
         if previous is not None:
@@ -1213,20 +1353,38 @@ class BrowserFeatures:
         except Exception:
             pass
 
-        win = self._new_animated_toplevel(
-            self.root, branded=False, auto_animate=False
-        )
+        show_started = time.perf_counter()
+        shell = getattr(self, '_javascript_dialog_prewarm_shell', None)
+        used_prewarm = False
+        if isinstance(shell, dict):
+            try:
+                shell_win = shell.get('win')
+                used_prewarm = bool(
+                    shell_win is not None and shell_win.winfo_exists()
+                    and getattr(self, '_javascript_dialog_prewarm_ready', False)
+                )
+            except Exception:
+                used_prewarm = False
+        if not used_prewarm:
+            shell = self._build_javascript_dialog_shell()
+
+        self._javascript_dialog_prewarm_shell = None
+        self._javascript_dialog_prewarm_ready = False
+        win = shell['win']
         self._javascript_dialog_window = win
-        win.title('Tekzite Page Dialog')
-        win.transient(self.root)
-        win.configure(bg=self.ui['bg'])
+        try:
+            win.withdraw()
+        except Exception:
+            pass
         try:
             win.attributes('-topmost', True)
         except Exception:
             pass
 
+        prompt_var = shell['prompt_var']
+        prompt_var.set(default_prompt)
         state = {'done': False, 'presentation_restored': False}
-        prompt_var = tk.StringVar(value=default_prompt)
+        self._javascript_dialog_last_used_prewarm = bool(used_prewarm)
 
         def restore_chromium_presentation():
             if state['presentation_restored']:
@@ -1281,6 +1439,10 @@ class BrowserFeatures:
                     self.status_var.set(f'Could not answer page dialog: {exc}')
                     return
                 restore_chromium_presentation()
+                try:
+                    self.root.after(120, self._prewarm_javascript_dialog_ui)
+                except Exception:
+                    pass
                 if ok:
                     self.status_var.set(
                         f'Page dialog {"accepted" if accept else "cancelled"}'
@@ -1290,90 +1452,79 @@ class BrowserFeatures:
             except Exception:
                 pass
 
-        header = tk.Frame(win, bg=self.ui['bg'])
-        header.pack(fill='x', padx=18, pady=(16, 8))
-        logo = tk.Label(
-            header, text='T', bg=self.ui['accent'], fg='#ffffff',
-            font=(self._ui_display_font_family, self._font_size(12), 'bold'),
-            width=2, pady=4,
-        )
-        logo.pack(side='left', padx=(0, 10))
         title_text = {
             'alert': 'Message from page',
             'confirm': 'Confirm action',
             'prompt': 'Page input',
             'beforeunload': 'Leave this page?',
         }[kind]
-        title = tk.Label(
-            header, text=title_text, bg=self.ui['bg'], fg=self.ui['text'],
-            font=(self._ui_display_font_family, self._font_size(13), 'bold'),
-            anchor='w',
-        )
-        title.pack(side='left', fill='x', expand=True)
-        close_action = (lambda: decide(True)) if kind == 'alert' else (lambda: decide(False))
-        close_button = tk.Button(
-            header, text='×', command=close_action,
-            bg=self.ui['bg'], fg=self.ui['muted'],
-            activebackground=self.ui['chrome_hover'], activeforeground=self.ui['text'],
-            relief='flat', bd=0, highlightthickness=0, cursor='hand2',
-            font=(self._ui_display_font_family, self._font_size(14)),
-            padx=9, pady=2,
-        )
-        close_button.pack(side='right')
-
-        self._bind_frameless_dialog_drag(win, header, logo, title)
-
-        body = tk.Frame(win, bg=self.ui['bg'])
-        body.pack(fill='both', expand=True, padx=20, pady=(2, 10))
-        tk.Label(
-            body, text=str(host), bg=self.ui['bg'], fg=self.ui['accent'],
-            font=(self._ui_font_family, self._font_size(9), 'bold'),
-            anchor='w',
-        ).pack(fill='x', pady=(0, 9))
-
         shown_message = message or (
             'This page wants to continue.' if kind != 'beforeunload'
             else 'Changes you made may not be saved.'
         )
-        tk.Label(
-            body, text=shown_message, bg=self.ui['bg'], fg=self.ui['text'],
-            justify='left', anchor='w', wraplength=520,
-            font=(self._ui_font_family, self._font_size(10)),
-        ).pack(fill='x', pady=(0, 12))
 
-        entry = None
-        if kind == 'prompt':
-            entry = tk.Entry(
-                body, textvariable=prompt_var,
-                bg=self.ui['field'], fg=self.ui['text'],
-                insertbackground=self.ui['text'], relief='flat',
-                highlightthickness=1, highlightbackground=self.ui['border'],
-                highlightcolor=self.ui['accent'],
-                font=(self._ui_font_family, self._font_size(10)),
-            )
-            entry.pack(fill='x', ipady=7, pady=(0, 8))
+        title = shell['title']
+        close_button = shell['close_button']
+        host_label = shell['host_label']
+        message_label = shell['message_label']
+        entry = shell['entry']
+        controls = shell['controls']
+        cancel_button = shell['cancel_button']
+        ok_button = shell['ok_button']
 
-        controls = tk.Frame(win, bg=self.ui['bg'])
-        controls.pack(fill='x', padx=16, pady=(4, 16))
+        title.configure(text=title_text)
+        host_label.configure(text=str(host))
+        message_label.configure(text=shown_message)
+
+        close_action = (
+            (lambda: decide(True))
+            if kind == 'alert'
+            else (lambda: decide(False))
+        )
+        close_button.configure(command=close_action)
+
+        try:
+            entry.pack_forget()
+            cancel_button.pack_forget()
+            ok_button.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            win.unbind('<Return>')
+            win.unbind('<Escape>')
+        except Exception:
+            pass
 
         if kind == 'alert':
-            self._feature_button(controls, 'OK', lambda: decide(True))
+            ok_button.configure(text='OK', command=lambda: decide(True))
+            ok_button.pack(side='left', padx=4)
             win.bind('<Return>', lambda _event: decide(True))
             win.bind('<Escape>', lambda _event: decide(True))
         elif kind == 'beforeunload':
-            self._feature_button(controls, 'Stay', lambda: decide(False))
-            self._feature_button(controls, 'Leave', lambda: decide(True))
+            cancel_button.configure(text='Stay', command=lambda: decide(False))
+            ok_button.configure(text='Leave', command=lambda: decide(True))
+            cancel_button.pack(side='left', padx=4)
+            ok_button.pack(side='left', padx=4)
             win.bind('<Return>', lambda _event: decide(True))
             win.bind('<Escape>', lambda _event: decide(False))
         else:
-            self._feature_button(controls, 'Cancel', lambda: decide(False))
-            self._feature_button(
-                controls, 'OK',
-                lambda: decide(True, prompt_var.get() if kind == 'prompt' else '')
+            if kind == 'prompt':
+                entry.pack(fill='x', ipady=7, pady=(0, 8))
+            cancel_button.configure(text='Cancel', command=lambda: decide(False))
+            ok_button.configure(
+                text='OK',
+                command=lambda: decide(
+                    True, prompt_var.get() if kind == 'prompt' else ''
+                ),
             )
+            cancel_button.pack(side='left', padx=4)
+            ok_button.pack(side='left', padx=4)
             win.bind(
                 '<Return>',
-                lambda _event: decide(True, prompt_var.get() if kind == 'prompt' else '')
+                lambda _event: decide(
+                    True, prompt_var.get() if kind == 'prompt' else ''
+                ),
             )
             win.bind('<Escape>', lambda _event: decide(False))
 
@@ -1434,6 +1585,9 @@ class BrowserFeatures:
             self._set_dwm_page_dialog_suspended(True)
             win.deiconify()
             win.lift()
+            self._javascript_dialog_last_show_ms = round(
+                (time.perf_counter() - show_started) * 1000.0, 3
+            )
             # One bounded fallback in case a window manager suppresses <Map>.
             win.after(48, arm_dialog_input)
         except Exception:
