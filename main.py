@@ -7400,6 +7400,17 @@ class BrowserApp(BrowserFeatures):
             self._chromium_drag_selecting = False
             self._chromium_press_point = None
             self._chromium_pending_drag = None
+
+            # A geometry callback queued just before javascriptDialogOpening can
+            # otherwise run while the user is trying to click the first modal.
+            geometry_after = getattr(self, "_dwm_geometry_after_id", None)
+            if geometry_after is not None:
+                try:
+                    self.root.after_cancel(geometry_after)
+                except Exception:
+                    pass
+                self._dwm_geometry_after_id = None
+
             drag_after = getattr(self, "_chromium_drag_after_id", None)
             if drag_after is not None:
                 try:
@@ -7436,6 +7447,19 @@ class BrowserApp(BrowserFeatures):
                 pass
         self._dwm_page_dialog_keyboard_was_active = False
         self._dwm_page_dialog_pointer_was_armed = False
+
+        if (
+            self._dwm_geometry_after_id is None
+            and (
+                self._dwm_pending_resize
+                or self._dwm_pending_force_resize
+                or self._dwm_pending_input_metrics_refresh
+            )
+        ):
+            try:
+                self._schedule_dwm_geometry_sync(delay=6)
+            except Exception:
+                pass
         return True
 
     def _cancel_dwm_host_reveal(self):
@@ -7477,6 +7501,13 @@ class BrowserApp(BrowserFeatures):
         self._dwm_pending_input_metrics_refresh = bool(
             self._dwm_pending_input_metrics_refresh or refresh_input_metrics
         )
+        if (
+            getattr(self, "_dwm_host_suspended_for_page_dialog", False)
+            or getattr(self, "_dwm_page_dialog_visual_preblocked", False)
+        ):
+            # Preserve the pending flags but do no Tk/DWM work while the modal
+            # owns the screen. One coalesced refresh runs after it closes.
+            return
         if self._dwm_geometry_after_id is not None:
             return
 
