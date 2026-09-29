@@ -683,6 +683,12 @@ class BrowserFeatures:
         data = json.loads(manifest_path.read_text(encoding='utf-8'))
         if not isinstance(data, dict):
             raise ValueError('manifest.json must contain a JSON object')
+        try:
+            manifest_version = int(data.get('manifest_version'))
+        except Exception as exc:
+            raise ValueError('manifest_version must be 2 or 3') from exc
+        if manifest_version not in (2, 3):
+            raise ValueError(f'Unsupported manifest version: {manifest_version}. Tekzite supports Manifest V2 and V3.')
         name = str(data.get('name') or path.name)
         if name.startswith('__MSG_') and name.endswith('__'):
             key = name[6:-2]
@@ -703,7 +709,7 @@ class BrowserFeatures:
         return {
             'name': name,
             'version': str(data.get('version') or '?'),
-            'manifest_version': data.get('manifest_version'),
+            'manifest_version': manifest_version,
             'permissions': permissions,
         }
 
@@ -714,7 +720,7 @@ class BrowserFeatures:
             return 'break'
 
         win, tree, controls = self._feature_window(
-            'Extension Manager', ('Extension', 'Version', 'State', 'Folder'), (220, 90, 100, 390)
+            'Extension Manager', ('Extension', 'Version', 'Manifest', 'State', 'Folder'), (205, 80, 75, 120, 360)
         )
         self._extensions_window = win
         win.geometry('940x520')
@@ -722,7 +728,7 @@ class BrowserFeatures:
         note = tk.StringVar(value=(
             'Privacy Core active: extensions are saved but not loaded.'
             if lockdown else
-            'Extensions load at startup; restart after changes.'
+            'Manifest V2 + V3 unpacked extensions are supported; restart after changes.'
         ))
         tk.Label(win, textvariable=note, bg=self.ui['bg'], fg=self.ui['muted'], anchor='w').pack(side='bottom', fill='x', padx=12)
         state = {'rows': {}}
@@ -750,7 +756,7 @@ class BrowserFeatures:
                 builtin_path = features.net._zoom_extension_dir()
                 builtin = self._extension_metadata(builtin_path)
                 tree.insert('', 'end', iid='builtin', values=(
-                    builtin['name'], builtin['version'], 'Built-in', str(builtin_path)
+                    builtin['name'], builtin['version'], f"MV{builtin['manifest_version']}", 'Built-in', str(builtin_path)
                 ))
                 state['rows']['builtin'] = {'builtin': True, 'path': str(builtin_path), 'meta': builtin}
             except Exception:
@@ -767,10 +773,11 @@ class BrowserFeatures:
                     else:
                         state_label = 'Enabled' if row.get('enabled') else 'Disabled'
                 except Exception as exc:
-                    meta = {'name': Path(path).name or 'Missing extension', 'version': '?', 'permissions': []}
+                    meta = {'name': Path(path).name or 'Missing extension', 'version': '?', 'manifest_version': '?', 'permissions': []}
                     state_label = 'Missing / invalid'
                     meta['error'] = str(exc)
-                tree.insert('', 'end', iid=iid, values=(meta['name'], meta['version'], state_label, path))
+                manifest_label = f"MV{meta['manifest_version']}" if meta.get('manifest_version') in (2, 3) else '?'
+                tree.insert('', 'end', iid=iid, values=(meta['name'], meta['version'], manifest_label, state_label, path))
                 state['rows'][iid] = {'builtin': False, 'index': index, 'path': path, 'meta': meta}
                 if select_path and os.path.normcase(path) == os.path.normcase(select_path):
                     tree.selection_set(iid)
@@ -805,7 +812,7 @@ class BrowserFeatures:
             entries.append({'path': path, 'enabled': True})
             if persist(entries):
                 refresh(path)
-                note.set(f'Added {meta["name"]}. Restart Tekzite to load it.')
+                note.set(f'Added {meta["name"]} (Manifest V{meta["manifest_version"]}). Restart Tekzite to load it.')
 
         def toggle_selected():
             item = selected()
