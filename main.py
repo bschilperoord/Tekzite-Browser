@@ -13133,11 +13133,11 @@ class BrowserApp(BrowserFeatures):
                 # the animation has settled so every opening lands identically.
                 enforce_final_geometry()
                 win.lift()
-                win.attributes("-topmost", True)
+                self._bind_native_dialog_owner(win, self.root)
+                self._raise_toplevel_above_dwm(win, hold_ms=520)
                 self._animate_toplevel_in(win, 155, slide=14)
                 win.after(190, enforce_final_geometry)
                 win.after(360, enforce_final_geometry)
-                win.after(390, lambda: win.winfo_exists() and win.attributes("-topmost", False))
             except Exception:
                 try:
                     win.deiconify()
