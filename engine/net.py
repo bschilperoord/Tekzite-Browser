@@ -4630,7 +4630,7 @@ def _get_persistent_page_cdp_channel(session, target_id=None, timeout=5.0, purpo
     # configuration on general/control channels and make input/scroll/hover/
     # cursor sockets immediately usable after the websocket handshake.
     latency_only_purposes = {"input", "scroll", "hover", "cursor"}
-    if purpose in latency_only_purposes or purpose in {"permission", "dialog"}:
+    if purpose in latency_only_purposes or purpose in {"permission", "dialog", "dialog-fallback"}:
         channel["privacy_headers"] = False
         channel["network_setup_skipped_for_latency"] = True
     else:
@@ -12337,49 +12337,119 @@ def _get_javascript_dialog_browser_channel(
         raise
 
 
+def _get_javascript_dialog_page_fallback_channel(
+        session, target_id: str, *, timeout: float = 1.0):
+    """Return a direct page CDP lane that also receives Page dialog events.
+
+    Chromium normally delivers page-dialog events through Tekzite's flattened
+    browser Target session. Some full DWM/native runtime combinations can leave
+    that browser-level observer alive but silent while Chromium still shows its
+    own modal. Keep a second, independent page websocket armed so Tekzite has a
+    real fallback event source instead of guessing from window z-order.
+    """
+    target_id = str(target_id or '').strip()
+    if not session or not target_id:
+        raise RuntimeError('A live Chromium target is required')
+
+    channel = _get_persistent_page_cdp_channel(
+        session, target_id=target_id, timeout=max(0.1, float(timeout)),
+        purpose='dialog-fallback',
+    )
+    if 'Page' in channel.get('enabled_domains', set()):
+        return channel
+
+    _persistent_page_cdp_call(
+        session, 'Page.enable', {}, target_id=target_id,
+        timeout=max(0.1, float(timeout)), purpose='dialog-fallback',
+    )
+    channel = _get_persistent_page_cdp_channel(
+        session, target_id=target_id, timeout=max(0.1, float(timeout)),
+        purpose='dialog-fallback',
+    )
+    channel.setdefault('enabled_domains', set()).add('Page')
+    channel.setdefault('javascript_dialog_events', [])
+    channel['javascript_dialog_fallback_ready'] = True
+    return channel
+
+
+def _drop_javascript_dialog_page_fallback_channel(session, target_id: str):
+    if not session:
+        return
+    key = f"{str(target_id or '').strip()}:dialog-fallback"
+    channel = (session.get('page_cdp_channels') or {}).pop(key, None)
+    if isinstance(channel, dict):
+        _close_page_cdp_channel(channel)
+
+
 def ensure_embedded_chromium_javascript_dialog_monitor(
         target_id: str, *, timeout: float = 1.0):
-    """Arm browser-UI JavaScript dialog events for one Tekzite page target."""
+    """Arm both browser-level and direct-page JavaScript dialog observers."""
     target_id = str(target_id or '').strip()
     if not target_id:
         return False
     session = _CHROMIUM_SESSION or _start_persistent_chromium_session(
         timeout=min(max(float(timeout), 0.1), 8.0)
     )
-    channel = _get_javascript_dialog_browser_channel(
-        session, target_id, timeout=max(0.1, float(timeout))
-    )
-    return bool(channel.get('session_id') and channel.get('page_enabled'))
 
-
-def poll_embedded_chromium_javascript_dialogs(
-        target_id: str, *, timeout: float = 0.08):
-    """Return one Chromium-owned JavaScript dialog for Tekzite's Tk shell."""
-    target_id = str(target_id or '').strip()
-    if not target_id:
-        return []
-    session = _CHROMIUM_SESSION
-    if not session:
-        return []
-
+    browser_ok = False
+    fallback_ok = False
     try:
         channel = _get_javascript_dialog_browser_channel(
+            session, target_id, timeout=max(0.1, float(timeout))
+        )
+        browser_ok = bool(channel.get('session_id') and channel.get('page_enabled'))
+    except Exception as exc:
+        session['javascript_dialog_primary_last_error'] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    try:
+        fallback = _get_javascript_dialog_page_fallback_channel(
+            session, target_id, timeout=max(0.1, float(timeout))
+        )
+        fallback_ok = bool(
+            fallback.get('ws') is not None
+            and 'Page' in fallback.get('enabled_domains', set())
+        )
+    except Exception as exc:
+        session['javascript_dialog_fallback_last_error'] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    session['javascript_dialog_monitor_primary_ready'] = browser_ok
+    session['javascript_dialog_monitor_fallback_ready'] = fallback_ok
+    if browser_ok or fallback_ok:
+        session['javascript_dialog_monitor_stage'] = (
+            'ready-dual' if browser_ok and fallback_ok
+            else ('ready-browser' if browser_ok else 'ready-page-fallback')
+        )
+    return bool(browser_ok or fallback_ok)
+
+
+def _poll_javascript_dialog_page_fallback(
+        session, target_id: str, *, timeout: float = 0.06):
+    """Poll the independent direct-page dialog observer once."""
+    try:
+        channel = _get_javascript_dialog_page_fallback_channel(
             session, target_id,
             timeout=max(0.1, min(float(timeout) + 0.12, 0.5)),
         )
-    except Exception:
-        return []
+    except Exception as exc:
+        session['javascript_dialog_fallback_last_error'] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
 
-    queue = channel.setdefault('events', [])
+    queue = channel.setdefault('javascript_dialog_events', [])
     if queue:
-        return [queue.pop(0)]
+        return queue.pop(0)
 
-    deadline = time.monotonic() + max(0.01, min(float(timeout), 0.25))
+    deadline = time.monotonic() + max(0.01, min(float(timeout), 0.20))
     try:
         with channel['lock']:
             ws = channel.get('ws')
             if ws is None or channel.get('closed'):
-                return []
+                return None
             while time.monotonic() < deadline:
                 try:
                     ws.settimeout(max(0.005, deadline - time.monotonic()))
@@ -12387,31 +12457,119 @@ def poll_embedded_chromium_javascript_dialogs(
                 except socket.timeout:
                     break
                 payload = json.loads(raw)
-                event = _record_javascript_dialog_browser_event(channel, payload)
+                event = _normalize_javascript_dialog_event(
+                    payload, channel.get('target_id') or target_id
+                )
                 if event is not None:
-                    queued = channel.setdefault('events', [])
-                    if queued and queued[0] is event:
-                        queued.pop(0)
-                    return [event]
+                    channel['javascript_dialog_open'] = True
+                    channel['javascript_dialog_last_event_at'] = time.monotonic()
+                    return event
+                if (isinstance(payload, dict)
+                        and payload.get('method') == 'Page.javascriptDialogClosed'):
+                    channel['javascript_dialog_open'] = False
+                    params = payload.get('params') or {}
+                    channel['javascript_dialog_last_result'] = bool(
+                        params.get('result')
+                    )
     except Exception as exc:
-        session['javascript_dialog_monitor_stage'] = 'event-read'
-        session['javascript_dialog_monitor_last_error'] = (
+        session['javascript_dialog_fallback_last_error'] = (
             f"{type(exc).__name__}: {exc}"
         )
-        session['javascript_dialog_monitor_last_error_at'] = time.monotonic()
-        session['javascript_dialog_monitor_failures'] = (
-            int(session.get('javascript_dialog_monitor_failures') or 0) + 1
+        _drop_javascript_dialog_page_fallback_channel(session, target_id)
+    return None
+
+
+def poll_embedded_chromium_javascript_dialogs(
+        target_id: str, *, timeout: float = 0.08):
+    """Return one Chromium JavaScript dialog from either independent CDP path."""
+    target_id = str(target_id or '').strip()
+    if not target_id:
+        return []
+    session = _CHROMIUM_SESSION
+    if not session:
+        return []
+
+    # Primary path: browser-level flattened Target session.
+    browser_channel = None
+    try:
+        browser_channel = _get_javascript_dialog_browser_channel(
+            session, target_id,
+            timeout=max(0.1, min(float(timeout) + 0.12, 0.5)),
         )
-        _close_javascript_dialog_browser_channel(channel)
+        queue = browser_channel.setdefault('events', [])
+        if queue:
+            event = queue.pop(0)
+            session.setdefault('javascript_dialog_resolution_paths', {})[
+                target_id
+            ] = 'browser-target'
+            return [event]
+
+        browser_budget = max(0.01, min(float(timeout) * 0.55, 0.08))
+        deadline = time.monotonic() + browser_budget
+        with browser_channel['lock']:
+            ws = browser_channel.get('ws')
+            if ws is not None and not browser_channel.get('closed'):
+                while time.monotonic() < deadline:
+                    try:
+                        ws.settimeout(max(0.005, deadline - time.monotonic()))
+                        raw = ws.recv()
+                    except socket.timeout:
+                        break
+                    payload = json.loads(raw)
+                    event = _record_javascript_dialog_browser_event(
+                        browser_channel, payload
+                    )
+                    if event is not None:
+                        queued = browser_channel.setdefault('events', [])
+                        if queued and queued[0] is event:
+                            queued.pop(0)
+                        session.setdefault(
+                            'javascript_dialog_resolution_paths', {}
+                        )[target_id] = 'browser-target'
+                        return [event]
+    except Exception as exc:
+        session['javascript_dialog_monitor_stage'] = 'browser-event-read'
+        session['javascript_dialog_primary_last_error'] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        if browser_channel is not None:
+            _close_javascript_dialog_browser_channel(browser_channel)
         (session.get('javascript_dialog_browser_channels') or {}).pop(
             target_id, None
         )
+
+    # Independent fallback: a dedicated direct page websocket with Page enabled.
+    event = _poll_javascript_dialog_page_fallback(
+        session, target_id,
+        timeout=max(0.02, min(float(timeout), 0.10)),
+    )
+    if event is not None:
+        session.setdefault('javascript_dialog_resolution_paths', {})[
+            target_id
+        ] = 'page-fallback'
+        session['javascript_dialog_monitor_stage'] = 'event-page-fallback'
+        return [event]
     return []
+
+
+def _resolve_javascript_dialog_via_page_fallback(
+        session, target_id: str, params, *, timeout: float = 1.0):
+    channel = _get_javascript_dialog_page_fallback_channel(
+        session, target_id, timeout=max(0.1, float(timeout))
+    )
+    _persistent_page_cdp_call(
+        session, 'Page.handleJavaScriptDialog', dict(params or {}),
+        target_id=target_id, timeout=max(0.1, float(timeout)),
+        purpose='dialog-fallback',
+    )
+    channel['javascript_dialog_open'] = False
+    channel.setdefault('javascript_dialog_events', []).clear()
+    return True
 
 
 def resolve_embedded_chromium_javascript_dialog(
         target_id: str, accept: bool, prompt_text: str = '', *, timeout: float = 1.0):
-    """Answer Chromium's browser-owned JavaScript dialog through its Target session."""
+    """Answer Chromium's current dialog through the path that observed it."""
     target_id = str(target_id or '').strip()
     if not target_id:
         return False
@@ -12419,20 +12577,56 @@ def resolve_embedded_chromium_javascript_dialog(
     if not session:
         return False
 
-    channel = _get_javascript_dialog_browser_channel(
-        session, target_id, timeout=max(0.1, float(timeout))
-    )
     params = {'accept': bool(accept)}
     if prompt_text is not None:
         params['promptText'] = str(prompt_text)[:4096]
-    _javascript_dialog_browser_call(
-        channel, 'Page.handleJavaScriptDialog', params,
-        session_id=str(channel.get('session_id') or ''),
-        timeout=max(0.1, float(timeout)),
+
+    paths = session.setdefault('javascript_dialog_resolution_paths', {})
+    preferred = str(paths.get(target_id) or '')
+    errors = []
+
+    if preferred == 'page-fallback':
+        try:
+            ok = _resolve_javascript_dialog_via_page_fallback(
+                session, target_id, params, timeout=timeout
+            )
+            _close_javascript_dialog_browser_channels(session, target_id)
+            paths.pop(target_id, None)
+            return bool(ok)
+        except Exception as exc:
+            errors.append(exc)
+
+    try:
+        channel = _get_javascript_dialog_browser_channel(
+            session, target_id, timeout=max(0.1, float(timeout))
+        )
+        _javascript_dialog_browser_call(
+            channel, 'Page.handleJavaScriptDialog', params,
+            session_id=str(channel.get('session_id') or ''),
+            timeout=max(0.1, float(timeout)),
+        )
+        channel['dialog_open'] = False
+        channel.setdefault('events', []).clear()
+        _drop_javascript_dialog_page_fallback_channel(session, target_id)
+        paths.pop(target_id, None)
+        return True
+    except Exception as exc:
+        errors.append(exc)
+
+    try:
+        ok = _resolve_javascript_dialog_via_page_fallback(
+            session, target_id, params, timeout=timeout
+        )
+        _close_javascript_dialog_browser_channels(session, target_id)
+        paths.pop(target_id, None)
+        return bool(ok)
+    except Exception as exc:
+        errors.append(exc)
+
+    session['javascript_dialog_resolve_last_error'] = '; '.join(
+        f"{type(exc).__name__}: {exc}" for exc in errors[-2:]
     )
-    channel['dialog_open'] = False
-    channel.setdefault('events', []).clear()
-    return True
+    return False
 
 
 def set_embedded_chromium_permission(origin: str, permission: str, setting: str, *, timeout: int = 4):
