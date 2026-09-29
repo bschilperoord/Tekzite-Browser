@@ -13424,6 +13424,7 @@ class BrowserApp(BrowserFeatures):
             HWND_TOP = 0
             SWP_NOSIZE = 0x0001
             SWP_NOMOVE = 0x0002
+            SWP_NOACTIVATE = 0x0010
             foreground = user32.GetForegroundWindow()
             foreground_pid = wintypes.DWORD()
             if foreground:
@@ -13437,9 +13438,12 @@ class BrowserApp(BrowserFeatures):
             # A page-triggered dialog normally appears while Tekzite is already
             # foreground. Activate only in that case so a background tab can
             # never steal focus from another application.
+            position_flags = SWP_NOSIZE | SWP_NOMOVE
+            if not same_app_foreground:
+                position_flags |= SWP_NOACTIVATE
             user32.SetWindowPos(
                 wintypes.HWND(hwnd), wintypes.HWND(HWND_TOP),
-                0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE,
+                0, 0, 0, 0, position_flags,
             )
             if same_app_foreground:
                 user32.SetForegroundWindow(wintypes.HWND(hwnd))
