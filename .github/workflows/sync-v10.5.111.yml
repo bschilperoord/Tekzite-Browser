@@ -1,6 +1,9 @@
 name: Sync v10.5.111 release metadata
 
 on:
+  push:
+    branches:
+      - "dev/v10.5.111-privacy-core-extensions"
   pull_request:
     branches: [main]
 
@@ -9,7 +12,7 @@ permissions:
 
 jobs:
   sync:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'dev/v10.5.111-privacy-core-extensions'
+    if: github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'dev/v10.5.111-privacy-core-extensions')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release branch
