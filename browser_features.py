@@ -1218,7 +1218,11 @@ class BrowserFeatures:
             pass
 
         win = self._new_animated_toplevel(
-            self.root, branded=False, auto_animate=False
+            self.root,
+            branded=False,
+            auto_animate=False,
+            auto_center=False,
+            auto_prepare=False,
         )
         self._javascript_dialog_window = win
         # Never expose a half-initialized Toplevel. Build it fully while hidden,
