@@ -609,3 +609,50 @@ def test_customize_color_labels_are_not_clipped():
     assert "width=color_label_width" in block
     assert 'padx=(0, 8)' in block
     assert 'label(cell, pretty.get(key, key), width=16)' not in block
+
+
+def test_customize_preview_applies_selected_fonts_everywhere():
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    collect = source[
+        source.index("        def collect_custom():"):
+        source.index("        def load_custom_into_controls", source.index("        def collect_custom():"))
+    ]
+    preview = source[
+        source.index("        def preview():", source.index("def _show_customize_browser"))
+        :source.index("        def export_preset():", source.index("def _show_customize_browser"))
+    ]
+    runtime = inspect.getsource(main.BrowserApp._apply_customization_runtime)
+    recursive = inspect.getsource(main.BrowserApp._replace_fonts_in_widget_tree)
+
+    assert 'custom["font_family"] = font_var.get().strip()' in collect
+    assert 'custom["display_font_family"] = display_font_var.get().strip()' in collect
+    assert 'custom["monospace_font_family"] = mono_font_var.get().strip()' in collect
+    assert "self._apply_customization_runtime()" in preview
+    assert "self._replace_fonts_in_widget_tree(" in runtime
+    assert "widget.winfo_children()" in recursive
+    assert "widget.find_all()" in recursive
+    assert 'widget.type(item) != "text"' in recursive
+
+
+def test_runtime_font_switch_preserves_styles_and_symbol_fonts():
+    recursive = inspect.getsource(main.BrowserApp._replace_fonts_in_widget_tree)
+    assert '"bold"' in recursive
+    assert '"italic"' in recursive
+    assert '"underline"' in recursive
+    assert '"overstrike"' in recursive
+    assert '"symbol"' in recursive
+    assert '"emoji"' in recursive
+    assert "font=(family, size, *styles)" in recursive
+
+
+def test_address_bar_no_longer_forces_segoe_ui():
+    runtime = inspect.getsource(main.BrowserApp._apply_customization_runtime)
+    assert 'self.address.configure(font=(self._ui_font_family' in runtime
+    assert 'self.address.configure(font=("Segoe UI"' not in runtime
+
+
+def test_ttk_runtime_styles_follow_selected_ui_font():
+    runtime = inspect.getsource(main.BrowserApp._apply_customization_runtime)
+    assert '"Tekzite.TNotebook.Tab"' in runtime
+    assert 'font=(self._ui_font_family, self._font_size(9))' in runtime
+    assert 'for ttk_style in ("TLabel", "TButton", "TCheckbutton", "TRadiobutton")' in runtime
