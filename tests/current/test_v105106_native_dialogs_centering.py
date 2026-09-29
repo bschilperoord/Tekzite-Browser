@@ -525,5 +525,60 @@ def test_chromium_dialog_presenters_are_reparked_on_open_and_close():
     ]
     assert "dialog_presenters_parked_on_open" in recorder
     assert "dialog_presenters_parked_on_close" in recorder
-    assert recorder.count("_park_chromium_top_level_presenters(") >= 2
+    assert "_park_chromium_top_level_presenters(" in recorder
+    assert "_repark_known_chromium_presenters_fast(session)" in recorder
     assert "passes=1, settle_delay=0.0" in recorder
+
+
+def test_real_first_dialog_cancels_hidden_prewarm_and_permission_poll():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert "_native_page_dialog_prewarm_after_id" in block
+    assert "self.root.after_cancel(prewarm_id)" in block
+    assert "self._native_page_dialog_prewarmed = True" in block
+    assert "self._page_dialog_modal_active = True" in block
+    assert "self.root.after_cancel(permission_after)" in block
+
+
+def test_modal_defers_permission_network_and_checkpoint_housekeeping():
+    permission = FEATURES[
+        FEATURES.index("def _permission_prompt_tick"):
+        FEATURES.index("def _handle_permission_bridge_request")
+    ]
+    network = FEATURES[
+        FEATURES.index("def _network_health_tick"):
+        FEATURES.index("def _checkpoint_features")
+    ]
+    checkpoint = FEATURES[
+        FEATURES.index("def _checkpoint_features"):
+        FEATURES.index("def _record_page_visit")
+    ]
+    assert "_page_dialog_modal_active" in permission
+    assert "_schedule_permission_prompt_poll(320)" in permission
+    assert "_page_dialog_modal_active" in network
+    assert "_schedule_network_health_watch(1000)" in network
+    assert "_page_dialog_modal_active" in checkpoint
+    assert "self.root.after(1000, self._checkpoint_features)" in checkpoint
+
+
+def test_dwm_geometry_work_is_coalesced_until_modal_closes():
+    schedule = inspect.getsource(main.BrowserApp._schedule_dwm_geometry_sync)
+    suspend = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
+    assert "_dwm_host_suspended_for_page_dialog" in schedule
+    assert "_dwm_page_dialog_visual_preblocked" in schedule
+    assert "Preserve the pending flags" in schedule
+    assert 'self.root.after_cancel(geometry_after)' in suspend
+    assert "self._schedule_dwm_geometry_sync(delay=6)" in suspend
+
+
+def test_close_repark_avoids_second_window_enumeration():
+    net_source = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
+    helper = net_source[
+        net_source.index("def _repark_known_chromium_presenters_fast"):
+        net_source.index("def _dwm_input_offset_for_crop")
+    ]
+    assert "EnumWindows" not in helper
+    assert "dwm_chromium_presenters_parked" in helper
+    assert "SetWindowPos" in helper
