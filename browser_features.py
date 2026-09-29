@@ -248,6 +248,8 @@ class BrowserFeatures:
         self._network_health_after_id = None
         self._network_health_future = None
         self._network_health_failures = 0
+        self._native_page_dialog_prewarmed = False
+        self._native_page_dialog_prewarm_after_id = None
         self._closing = False
         self._configure_feature_preferences()
 
@@ -277,9 +279,88 @@ class BrowserFeatures:
         self._schedule_network_health_watch(3000)
         self._schedule_permission_prompt_poll(450)
         self._schedule_javascript_dialog_poll(20)
+        try:
+            self._native_page_dialog_prewarm_after_id = self.root.after(
+                350, self._prewarm_native_page_dialog
+            )
+        except Exception:
+            self._native_page_dialog_prewarm_after_id = None
         scheduler = getattr(self, '_schedule_sleeping_tabs', None)
         if callable(scheduler):
             scheduler(15000)
+
+    def _prewarm_native_page_dialog(self):
+        """Warm Tk/Win32 dialog plumbing invisibly before the first real page dialog."""
+        self._native_page_dialog_prewarm_after_id = None
+        if self._closing or self._native_page_dialog_prewarmed:
+            return
+        win = None
+        try:
+            win = self._new_animated_toplevel(
+                self.root,
+                branded=False,
+                auto_animate=False,
+                auto_center=False,
+                auto_prepare=False,
+            )
+            win.withdraw()
+            win.title('Tekzite Dialog Warmup')
+            win.transient(self.root)
+            win.configure(bg=self.ui['bg'])
+
+            # Exercise the exact widget class/state machinery used by page-dialog
+            # controls without ever mapping the window on screen.
+            frame = tk.Frame(win, bg=self.ui['bg'])
+            frame.pack(fill='both', expand=True)
+            button = tk.Button(
+                frame,
+                text='OK',
+                bg=self.ui['chrome_2'],
+                fg=self.ui['text'],
+                activebackground=self.ui['chrome_hover'],
+                activeforeground=self.ui['text'],
+                relief='flat',
+                bd=0,
+                padx=14,
+                pady=7,
+            )
+            button.pack()
+
+            win.update_idletasks()
+            self._bind_native_dialog_owner(win, self.root)
+
+            # Let Tk initialize button active-state bookkeeping once while hidden.
+            try:
+                button.event_generate('<Enter>')
+                win.update_idletasks()
+                button.event_generate('<Leave>')
+            except Exception:
+                pass
+
+            original_destroy = getattr(win, '_tekzite_original_destroy', None)
+            if callable(original_destroy):
+                original_destroy()
+            else:
+                win.destroy()
+            win = None
+            self._native_page_dialog_prewarmed = True
+        except Exception:
+            try:
+                if win is not None:
+                    original_destroy = getattr(win, '_tekzite_original_destroy', None)
+                    if callable(original_destroy):
+                        original_destroy()
+                    else:
+                        win.destroy()
+            except Exception:
+                pass
+            if not self._closing:
+                try:
+                    self._native_page_dialog_prewarm_after_id = self.root.after(
+                        900, self._prewarm_native_page_dialog
+                    )
+                except Exception:
+                    self._native_page_dialog_prewarm_after_id = None
 
     def _schedule_network_health_watch(self, delay_ms=4000):
         if self._closing:
