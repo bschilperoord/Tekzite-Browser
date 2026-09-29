@@ -515,3 +515,15 @@ def test_close_handoff_uses_multi_frame_hidden_guard():
     ]
     assert "self.root.after(40, lambda: finish_native_teardown(ok))" in decide
     assert "self.root.after(40, restore_after_native_close)" in decide
+
+
+def test_chromium_dialog_presenters_are_reparked_on_open_and_close():
+    net_source = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
+    recorder = net_source[
+        net_source.index("def _record_javascript_dialog_browser_event"):
+        net_source.index("def _javascript_dialog_browser_call")
+    ]
+    assert "dialog_presenters_parked_on_open" in recorder
+    assert "dialog_presenters_parked_on_close" in recorder
+    assert recorder.count("_park_chromium_top_level_presenters(") >= 2
+    assert "passes=1, settle_delay=0.0" in recorder
