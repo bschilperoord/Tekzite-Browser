@@ -97,9 +97,10 @@ def test_privacy_shield_is_exposed():
     assert 'Sites still see your public IP' in MAIN
 
 
-def test_privacy_core_keeps_persistent_profile_but_still_limits_user_extensions():
+def test_privacy_core_keeps_persistent_profile_and_allows_user_approved_extensions():
     assert 'tempfile.mkdtemp(prefix=f"Tekzite-Privacy-{os.getpid()}-")' not in MAIN
-    assert 'user_extension_paths = [] if self.preferences.get("privacy_lockdown", True)' in MAIN
+    assert 'user_extension_paths = _enabled_extension_paths(self.preferences)' in MAIN
+    assert 'user_extension_paths = [] if self.preferences.get("privacy_lockdown", True)' not in MAIN
     close = MAIN[MAIN.index("def on_close(self):"):MAIN.index("def run(self):")]
     assert 'or self.preferences.get("privacy_lockdown", True)' not in close
     assert 'or self.preferences.get("clear_browsing_data_on_exit", False)' in close
