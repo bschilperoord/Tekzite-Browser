@@ -13383,10 +13383,6 @@ class BrowserApp(BrowserFeatures):
         """Activate a Tekzite dialog HWND so the first click reaches its control."""
         if win is None:
             return False
-        try:
-            win.update_idletasks()
-        except Exception:
-            pass
 
         # Tk focus remains the portable fallback.
         if sys.platform != "win32":
@@ -13401,11 +13397,20 @@ class BrowserApp(BrowserFeatures):
             import ctypes
             from ctypes import wintypes
             user32 = ctypes.WinDLL("user32", use_last_error=True)
-            self._bind_native_dialog_owner(
-                win, getattr(win, "_tekzite_dialog_parent", self.root)
-            )
 
+            # Fast path: page dialogs already materialize and bind their HWND
+            # while hidden. Do not drain Tk idles or rewrite owner/style state
+            # again on the first visible frame.
             hwnd = int(getattr(win, "_tekzite_native_dialog_hwnd", 0) or 0)
+            if not hwnd:
+                try:
+                    win.update_idletasks()
+                except Exception:
+                    pass
+                self._bind_native_dialog_owner(
+                    win, getattr(win, "_tekzite_dialog_parent", self.root)
+                )
+                hwnd = int(getattr(win, "_tekzite_native_dialog_hwnd", 0) or 0)
             if not hwnd:
                 raw = int(win.winfo_id())
                 user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
