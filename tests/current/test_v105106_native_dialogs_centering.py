@@ -74,23 +74,24 @@ def test_javascript_dialog_topmost_is_not_released_while_modal_is_open():
     assert "SetForegroundWindow" in source
 
 
-def test_javascript_dialog_arms_input_only_after_toplevel_is_mapped():
+def test_javascript_dialog_arms_input_once_after_toplevel_is_mapped():
     block = FEATURES[
         FEATURES.index("win.protocol('WM_DELETE_WINDOW', close_action)"):
         FEATURES.index("def _schedule_permission_prompt_poll")
     ]
     assert "def arm_dialog_input" in block
     assert "win.winfo_ismapped()" in block
-    assert "win.bind('<Map>', arm_dialog_input, add='+')" in block
+    bind_pos = block.index("win.bind('<Map>', arm_after_map, add='+')")
+    show_pos = block.index("win.deiconify()")
+    assert bind_pos < show_pos
     assert "win.after_idle(arm_dialog_input)" in block
-    assert "win.after(24, arm_dialog_input)" in block
-    focus_pos = block.index("win.focus_force()")
-    grab_pos = block.index("win.grab_set()")
-    assert focus_pos < grab_pos
-    assert "grabbed = win.grab_current()" in block
-    assert "win.after(20, arm_dialog_input)" in block
-    assert "win.after(80, reassert_dialog_z_order)" in block
-    assert "win.after(220, reassert_dialog_z_order)" in block
+    assert "win.after(48, arm_dialog_input)" in block
+    assert "state['input_armed'] = True" in block
+    assert "state['arm_attempts']" not in block
+    assert "grab_current()" not in block
+    assert "win.after(20, arm_dialog_input)" not in block
+    assert "win.after(80, reassert_dialog_z_order)" not in block
+    assert "win.after(220, reassert_dialog_z_order)" not in block
 
 
 def test_non_animated_toplevel_is_visible_immediately():
