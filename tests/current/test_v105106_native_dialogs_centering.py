@@ -416,3 +416,49 @@ def test_native_dialog_failure_releases_worker_visual_preblock():
         FEATURES.index("def _show_native_javascript_dialog")
     ]
     assert "_set_dwm_page_dialog_visual_fast(False)" in block
+
+
+def test_chromium_stays_hidden_until_after_tk_dialog_teardown():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    decide = block[block.index("def decide(accept, prompt_text=None):"):block.index("header = tk.Frame")]
+    prehide_at = decide.index("_set_dwm_page_dialog_visual_fast(True)")
+    submit_at = decide.index("self._javascript_dialog_executor.submit(work)")
+    result_at = decide.index("future.result()")
+    settle_at = decide.index("self.root.after(16, lambda: finish_native_teardown(ok))")
+    destroy_def_at = decide.index("def destroy_native_dialog():")
+    teardown_at = decide.index("def finish_native_teardown(ok):")
+    restore_schedule_at = decide.index("self.root.after(16, restore_after_native_close)")
+    assert prehide_at < submit_at < result_at < settle_at
+    assert destroy_def_at < teardown_at < restore_schedule_at
+
+
+def test_success_path_does_not_restore_chromium_before_native_close():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    decide = block[block.index("def decide(accept, prompt_text=None):"):block.index("header = tk.Frame")]
+    teardown = decide[
+        decide.index("def finish_native_teardown(ok):"):
+        decide.index("def finish_answer():")
+    ]
+    assert "_set_dwm_page_dialog_visual_fast(True)" in teardown
+    assert "destroy_native_dialog()" in teardown
+    assert "self.root.after(16, restore_after_native_close)" in teardown
+    assert teardown.index("destroy_native_dialog()") < teardown.index(
+        "self.root.after(16, restore_after_native_close)"
+    )
+
+
+def test_post_cdp_settle_keeps_tk_dialog_visible_for_one_frame():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    decide = block[block.index("def decide(accept, prompt_text=None):"):block.index("header = tk.Frame")]
+    finish = decide[decide.index("def finish_answer():"):]
+    assert "_set_dwm_page_dialog_visual_fast(True)" in finish
+    assert "self.root.after(16, lambda: finish_native_teardown(ok))" in finish
