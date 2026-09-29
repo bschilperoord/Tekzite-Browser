@@ -1400,7 +1400,8 @@ class BrowserFeatures:
             try:
                 win.lift()
                 self._raise_toplevel_above_dwm(
-                    win, hold_ms=520, persistent_topmost=True
+                    win, hold_ms=520, persistent_topmost=True,
+                    prepare_tk=False,
                 )
             except Exception:
                 pass

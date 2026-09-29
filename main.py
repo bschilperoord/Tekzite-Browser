@@ -957,7 +957,13 @@ def _centered_startup_geometry(root, width, height, margin=24):
                     ("dwFlags", wintypes.DWORD),
                 ]
 
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            # The DWM host initializes user32 during browser startup, so reuse
+            # that handle on the dialog hot path instead of performing another
+            # first-use DLL setup while the user is waiting to click.
+            user32 = getattr(self, "_dwm_user32", None)
+            if user32 is None:
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                self._dwm_user32 = user32
             point = POINT()
             if user32.GetCursorPos(ctypes.byref(point)):
                 MONITOR_DEFAULTTONEAREST = 2
@@ -3348,7 +3354,11 @@ class BrowserApp(BrowserFeatures):
         the requested size to the visible screen, then center that final box.
         """
         try:
-            win.update_idletasks()
+            # Fixed-size dialogs already know their final geometry. Avoid draining
+            # the process-wide Tk idle queue just to center them; on a cold first
+            # dialog that queue can still contain startup work and stall input.
+            if width is None or height is None:
+                win.update_idletasks()
             screen_w = max(1, int(win.winfo_screenwidth()))
             screen_h = max(1, int(win.winfo_screenheight()))
             if width is None:
@@ -13242,7 +13252,8 @@ class BrowserApp(BrowserFeatures):
         win.after_idle(fit_and_center_preferences)
         win.protocol("WM_DELETE_WINDOW", cancel_preferences)
 
-    def _raise_toplevel_above_dwm(self, win, hold_ms=420, persistent_topmost=False):
+    def _raise_toplevel_above_dwm(
+            self, win, hold_ms=420, persistent_topmost=False, prepare_tk=True):
         """Force an app dialog above the separate native DWM presentation HWND.
 
         Tk ``lift``/``-topmost`` is usually enough, but the Chromium page is
@@ -13254,13 +13265,14 @@ class BrowserApp(BrowserFeatures):
         replacement is destroyed, preventing Chromium's modal surface from
         reclaiming the z-order while the user is deciding.
         """
-        try:
-            win.update_idletasks()
-            win.deiconify()
-            win.lift()
-            win.focus_force()
-        except Exception:
-            pass
+        if prepare_tk:
+            try:
+                win.update_idletasks()
+                win.deiconify()
+                win.lift()
+                win.focus_force()
+            except Exception:
+                pass
         if os.name != "nt":
             try:
                 win.attributes("-topmost", True)

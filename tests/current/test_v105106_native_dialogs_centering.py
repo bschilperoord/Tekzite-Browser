@@ -94,6 +94,23 @@ def test_javascript_dialog_arms_input_once_after_toplevel_is_mapped():
     assert "win.after(220, reassert_dialog_z_order)" not in block
 
 
+def test_fixed_size_page_dialog_does_not_drain_tk_idle_queue():
+    center = inspect.getsource(main.BrowserApp._screen_center_geometry)
+    assert "if width is None or height is None:" in center
+    assert center.index("if width is None or height is None:") < center.index("win.update_idletasks()")
+
+    raise_source = inspect.getsource(main.BrowserApp._raise_toplevel_above_dwm)
+    assert "prepare_tk=True" in raise_source
+    assert "if prepare_tk:" in raise_source
+
+    block = FEATURES[
+        FEATURES.index("def arm_dialog_input"):
+        FEATURES.index("def arm_after_map")
+    ]
+    assert "prepare_tk=False" in block
+    assert "update_idletasks()" not in block
+
+
 def test_non_animated_toplevel_is_visible_immediately():
     source = inspect.getsource(main.BrowserApp._new_animated_toplevel)
     assert '0.0 if (auto_animate and self._motion_enabled()) else 1.0' in source
