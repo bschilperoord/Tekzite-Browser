@@ -212,3 +212,24 @@ def test_settings_dialog_uses_native_owner_path_instead_of_direct_topmost():
     assert "_bind_native_dialog_owner(win, self.root)" in source
     assert "_raise_toplevel_above_dwm(win, hold_ms=520)" in source
     assert 'win.attributes("-topmost", True)' not in source
+
+
+def test_page_dialog_suspends_dwm_chromium_surface():
+    sync_source = inspect.getsource(main.BrowserApp._sync_dwm_host_geometry)
+    helper_source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
+    assert "not self._dwm_host_suspended_for_page_dialog" in sync_source
+    assert "self._dwm_host_suspended_for_page_dialog = suspended" in helper_source
+    assert "_sync_dwm_host_geometry(show=not suspended" in helper_source
+
+
+def test_native_page_dialog_hides_chromium_until_cdp_answer_finishes():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
+    show_dialog_at = block.index("win.deiconify()", hide_at)
+    restore_at = block.index("restore_chromium_presentation()", block.index("future.result()"))
+    assert hide_at < show_dialog_at
+    assert restore_at > block.index("future.result()")
+    assert "_set_dwm_page_dialog_suspended(False)" in block
