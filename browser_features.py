@@ -1380,25 +1380,13 @@ class BrowserFeatures:
         win.protocol('WM_DELETE_WINDOW', close_action)
         dialog_h = 330 if kind == 'prompt' else 285
         self._center_dialog_on_screen(win, 560, dialog_h, 18)
-        # Do not let a failed Tk grab short-circuit the native z-order handoff.
-        # Chromium's synchronous dialog may already own modal activation on some
-        # Windows systems. The Tekzite dialog must be made visible/foreground
-        # first, then the Tk grab is attempted independently.
-        try:
-            # Keep Chromium's own browser-level modal out of the DWM mirror while
-            # Tekzite presents the native replacement. Do not manipulate Chromium
-            # HWNDs; the page remains synchronously blocked until the CDP answer.
-            self._set_dwm_page_dialog_suspended(True)
-            win.deiconify()
-            win.lift()
-        except Exception:
-            pass
-        try:
-            self._raise_toplevel_above_dwm(
-                win, hold_ms=520, persistent_topmost=True
-            )
-        except Exception:
-            pass
+        # Chromium can already own native modal activation when the CDP event
+        # reaches Tk. On the first dialog of a process, a freshly-created
+        # Toplevel may not be mapped yet even though deiconify() has been called.
+        # Do not grab/focus it until Tk has actually mapped the native window.
+        # This keeps the first dialog just as responsive as later ones.
+        state['input_armed'] = False
+        state['arm_attempts'] = 0
 
         def reassert_dialog_z_order():
             if state['done']:
@@ -1413,23 +1401,63 @@ class BrowserFeatures:
             except Exception:
                 pass
 
+        def arm_dialog_input(_event=None):
+            if state['done'] or state.get('input_armed'):
+                return
+            state['arm_attempts'] = int(state.get('arm_attempts') or 0) + 1
+            try:
+                if not win.winfo_exists():
+                    return
+                if not win.winfo_ismapped():
+                    if state['arm_attempts'] < 10:
+                        win.after(16, arm_dialog_input)
+                    return
+
+                # Once the Toplevel is truly mapped, move it into the foreground,
+                # then give it keyboard focus before taking Tk's local modal grab.
+                # The grab is best-effort and verified; a failed first attempt is
+                # retried rather than leaving a visible but dead dialog.
+                win.lift()
+                self._raise_toplevel_above_dwm(
+                    win, hold_ms=520, persistent_topmost=True
+                )
+                if entry is not None:
+                    entry.focus_force()
+                    entry.selection_range(0, 'end')
+                else:
+                    win.focus_force()
+                win.grab_set()
+                grabbed = win.grab_current()
+                state['input_armed'] = bool(grabbed == win)
+                if not state['input_armed'] and state['arm_attempts'] < 10:
+                    win.after(20, arm_dialog_input)
+            except Exception:
+                if state['arm_attempts'] < 10:
+                    try:
+                        win.after(20, arm_dialog_input)
+                    except Exception:
+                        pass
+
+        try:
+            # Keep Chromium's own browser-level modal out of the DWM mirror while
+            # Tekzite presents the native replacement. Do not manipulate Chromium
+            # HWNDs; the page remains synchronously blocked until the CDP answer.
+            self._set_dwm_page_dialog_suspended(True)
+            win.deiconify()
+            win.lift()
+            # <Map> is the reliable handoff point for the cold/first Toplevel.
+            # after_idle/after provide fallbacks for window-manager edge cases.
+            win.bind('<Map>', arm_dialog_input, add='+')
+            win.after_idle(arm_dialog_input)
+            win.after(24, arm_dialog_input)
+        except Exception:
+            pass
+
         # Chromium can finish presenting its own modal a frame after the CDP
         # opening event. Reassert twice after that race window.
         try:
             win.after(80, reassert_dialog_z_order)
             win.after(220, reassert_dialog_z_order)
-        except Exception:
-            pass
-        try:
-            win.grab_set()
-        except Exception:
-            pass
-        try:
-            if entry is not None:
-                entry.focus_set()
-                entry.selection_range(0, 'end')
-            else:
-                win.focus_force()
         except Exception:
             pass
 

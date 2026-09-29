@@ -74,16 +74,21 @@ def test_javascript_dialog_topmost_is_not_released_while_modal_is_open():
     assert "SetForegroundWindow" in source
 
 
-def test_javascript_dialog_raise_happens_before_best_effort_tk_grab():
+def test_javascript_dialog_arms_input_only_after_toplevel_is_mapped():
     block = FEATURES[
         FEATURES.index("win.protocol('WM_DELETE_WINDOW', close_action)"):
         FEATURES.index("def _schedule_permission_prompt_poll")
     ]
-    raise_pos = block.index(
-        "_raise_toplevel_above_dwm(\n                win, hold_ms=520, persistent_topmost=True"
-    )
+    assert "def arm_dialog_input" in block
+    assert "win.winfo_ismapped()" in block
+    assert "win.bind('<Map>', arm_dialog_input, add='+')" in block
+    assert "win.after_idle(arm_dialog_input)" in block
+    assert "win.after(24, arm_dialog_input)" in block
+    focus_pos = block.index("win.focus_force()")
     grab_pos = block.index("win.grab_set()")
-    assert raise_pos < grab_pos
+    assert focus_pos < grab_pos
+    assert "grabbed = win.grab_current()" in block
+    assert "win.after(20, arm_dialog_input)" in block
     assert "win.after(80, reassert_dialog_z_order)" in block
     assert "win.after(220, reassert_dialog_z_order)" in block
 
