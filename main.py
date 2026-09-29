@@ -2437,6 +2437,10 @@ class BrowserApp(BrowserFeatures):
         # Tekzite presents the equivalent native Tk dialog.  This is separate
         # from minimize suspension so normal DWM recovery remains untouched.
         self._dwm_host_suspended_for_page_dialog = False
+        # Set from the CDP dialog worker before Tk has even scheduled the
+        # native dialog. Geometry refreshes must respect this pre-block so the
+        # Chromium popup cannot leak through for one compositor frame.
+        self._dwm_page_dialog_visual_preblocked = False
         self._dwm_page_dialog_keyboard_was_active = False
         self._dwm_page_dialog_pointer_was_armed = False
         # v10.5.50: taskbar restore is a cold DWM recovery, not merely a popup
@@ -7257,7 +7261,9 @@ class BrowserApp(BrowserFeatures):
 
             LWA_ALPHA = 0x00000002
             target_alpha = 0 if (
-                transparent or self._dwm_host_suspended_for_page_dialog
+                transparent
+                or self._dwm_host_suspended_for_page_dialog
+                or self._dwm_page_dialog_visual_preblocked
             ) else 255
             if target_alpha != self._dwm_host_alpha:
                 try:
@@ -7307,6 +7313,50 @@ class BrowserApp(BrowserFeatures):
             return (w, h)
         except Exception:
             return None
+
+    def _set_dwm_page_dialog_visual_fast(self, hidden):
+        """Flip only the DWM presentation alpha; safe from the CDP worker thread."""
+        hidden = bool(hidden)
+        self._dwm_page_dialog_visual_preblocked = hidden
+        if not (
+            os.name == "nt"
+            and self._embedded_mode
+            and self._chromium_dwm_mode
+            and self._dwm_host
+        ):
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
+            self._dwm_user32 = user32
+            hwnd = wintypes.HWND(int(self._dwm_host))
+            if not user32.IsWindow(hwnd):
+                return False
+
+            LWA_ALPHA = 0x00000002
+            target_alpha = 0 if hidden else 255
+            user32.SetLayeredWindowAttributes.argtypes = [
+                wintypes.HWND, wintypes.COLORREF, ctypes.c_ubyte, wintypes.DWORD
+            ]
+            user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+            ok = bool(user32.SetLayeredWindowAttributes(
+                hwnd, wintypes.COLORREF(0), ctypes.c_ubyte(target_alpha), LWA_ALPHA
+            ))
+            if ok:
+                self._dwm_host_alpha = int(target_alpha)
+
+            # Keep the destination mapped. If another transition happened to
+            # unmap it, queue a no-activate show instead of blocking on DWM.
+            if hidden and not self._dwm_host_visible and not self._dwm_host_suspended_for_minimize:
+                SW_SHOWNOACTIVATE = 4
+                user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+                user32.ShowWindowAsync.restype = wintypes.BOOL
+                user32.ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE)
+                self._dwm_host_visible = True
+            return ok
+        except Exception:
+            return False
 
     def _set_dwm_page_dialog_suspended(self, suspended):
         """Suspend only Chromium presentation/input while Tekzite owns a page dialog."""
@@ -7361,42 +7411,11 @@ class BrowserApp(BrowserFeatures):
         if not (self._embedded_mode and self._chromium_dwm_mode):
             return True
 
-        # Never hide/remap the DWM destination for a page dialog. Hiding the
-        # popup made Windows/DWM tear down and rebuild part of the composition,
-        # which could stall Tk for a visible moment. Keep the host mapped and
-        # switch only its layered alpha. The native Tekzite dialog remains fully
-        # interactive while Chromium's own dialog is visually suppressed.
-        if os.name == "nt" and self._dwm_host:
-            try:
-                import ctypes
-                from ctypes import wintypes
-                user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
-                self._dwm_user32 = user32
-                hwnd = wintypes.HWND(int(self._dwm_host))
-                LWA_ALPHA = 0x00000002
-                target_alpha = 0 if suspended else 255
-                user32.SetLayeredWindowAttributes.argtypes = [
-                    wintypes.HWND, wintypes.COLORREF, ctypes.c_ubyte, wintypes.DWORD
-                ]
-                user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
-                user32.SetLayeredWindowAttributes(
-                    hwnd, wintypes.COLORREF(0), ctypes.c_ubyte(target_alpha), LWA_ALPHA
-                )
-                self._dwm_host_alpha = int(target_alpha)
-                # If another transition had already unmapped the host, enqueue a
-                # no-activate show. ShowWindowAsync never blocks Tk on DWM.
-                if not self._dwm_host_visible and not self._dwm_host_suspended_for_minimize:
-                    SW_SHOWNOACTIVATE = 4
-                    user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
-                    user32.ShowWindowAsync.restype = wintypes.BOOL
-                    user32.ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE)
-                    self._dwm_host_visible = True
-            except Exception:
-                try:
-                    self._sync_dwm_host_geometry(show=True, transparent=suspended)
-                except Exception:
-                    pass
-        else:
+        # The CDP worker may already have visually pre-blocked Chromium before
+        # this Tk-side modal setup begins. Reassert the same cheap alpha state,
+        # then fall back to the normal geometry path only if the direct Win32
+        # operation is unavailable.
+        if not self._set_dwm_page_dialog_visual_fast(suspended):
             try:
                 self._sync_dwm_host_geometry(show=True, transparent=suspended)
             except Exception:
