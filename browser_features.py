@@ -1143,7 +1143,7 @@ class BrowserFeatures:
                 pass
             self._javascript_dialog_window = None
         if getattr(self, '_javascript_dialog_poll_busy', False):
-            self._schedule_javascript_dialog_poll(6)
+            self._schedule_javascript_dialog_poll(24)
             return
 
         tab = self._active_tab() or {}
@@ -1156,10 +1156,10 @@ class BrowserFeatures:
         # Keep one worker parked on the CDP websocket for a short window. This
         # behaves almost event-driven: when Chromium emits javascriptDialogOpening
         # the future completes immediately, without a 90-140 ms blind spot.
-        future = self._executor.submit(
+        future = self._javascript_dialog_executor.submit(
             features.net.poll_embedded_chromium_javascript_dialogs,
             target_id,
-            timeout=0.24,
+            timeout=0.32,
         )
 
         def finish():
@@ -1167,7 +1167,7 @@ class BrowserFeatures:
                 return
             if not future.done():
                 try:
-                    self.root.after(4, finish)
+                    self.root.after(8, finish)
                 except Exception:
                     pass
                 return
@@ -1177,17 +1177,11 @@ class BrowserFeatures:
             except Exception:
                 rows = []
             if rows:
-                # Suppress Chromium before building any Tk controls. The native
-                # dialog then becomes the first visible UI for this decision.
-                try:
-                    self._set_dwm_page_dialog_suspended(True)
-                except Exception:
-                    pass
                 self._show_native_javascript_dialog(rows[0])
-            self._schedule_javascript_dialog_poll(12 if rows else 2)
+            self._schedule_javascript_dialog_poll(20 if rows else 2)
 
         try:
-            self.root.after(4, finish)
+            self.root.after(8, finish)
         except Exception:
             self._javascript_dialog_poll_busy = False
 
@@ -1196,7 +1190,7 @@ class BrowserFeatures:
         if previous is not None:
             try:
                 if previous.winfo_exists():
-                    previous.lift()
+                    self._activate_native_dialog(previous)
                     return
             except Exception:
                 pass
@@ -1227,6 +1221,12 @@ class BrowserFeatures:
             self.root, branded=False, auto_animate=False
         )
         self._javascript_dialog_window = win
+        # Never expose a half-initialized Toplevel. Build it fully while hidden,
+        # then bind/activate its native HWND before the first visible frame.
+        try:
+            win.withdraw()
+        except Exception:
+            pass
         win.title('Tekzite Page Dialog')
         win.transient(self.root)
         win.configure(bg=self.ui['bg'])
@@ -1253,7 +1253,11 @@ class BrowserFeatures:
             except Exception:
                 pass
             try:
-                win.destroy()
+                original_destroy = getattr(win, "_tekzite_original_destroy", None)
+                if callable(original_destroy):
+                    original_destroy()
+                else:
+                    win.destroy()
             except Exception:
                 pass
             self._javascript_dialog_window = None
@@ -1263,7 +1267,7 @@ class BrowserFeatures:
                     target_id, bool(accept), str(prompt_text or ''), timeout=1.0
                 )
             try:
-                future = self._executor.submit(work)
+                future = self._javascript_dialog_executor.submit(work)
             except Exception as exc:
                 restore_chromium_presentation()
                 self.status_var.set(f'Could not answer page dialog: {exc}')
@@ -1274,7 +1278,7 @@ class BrowserFeatures:
                     return
                 if not future.done():
                     try:
-                        self.root.after(5, finish_answer)
+                        self.root.after(8, finish_answer)
                     except Exception:
                         pass
                     return
@@ -1290,7 +1294,7 @@ class BrowserFeatures:
                         f'Page dialog {"accepted" if accept else "cancelled"}'
                     )
             try:
-                self.root.after(5, finish_answer)
+                self.root.after(8, finish_answer)
             except Exception:
                 pass
 
@@ -1359,9 +1363,10 @@ class BrowserFeatures:
 
         controls = tk.Frame(win, bg=self.ui['bg'])
         controls.pack(fill='x', padx=16, pady=(4, 16))
+        default_button = None
 
         if kind == 'alert':
-            self._feature_button(controls, 'OK', lambda: decide(True))
+            default_button = self._feature_button(controls, 'OK', lambda: decide(True))
             win.bind('<Return>', lambda _event: decide(True))
             win.bind('<Escape>', lambda _event: decide(True))
         elif kind == 'beforeunload':
@@ -1371,7 +1376,7 @@ class BrowserFeatures:
             win.bind('<Escape>', lambda _event: decide(False))
         else:
             self._feature_button(controls, 'Cancel', lambda: decide(False))
-            self._feature_button(
+            default_button = self._feature_button(
                 controls, 'OK',
                 lambda: decide(True, prompt_var.get() if kind == 'prompt' else '')
             )
@@ -1385,15 +1390,37 @@ class BrowserFeatures:
         dialog_h = 330 if kind == 'prompt' else 285
         self._center_dialog_on_screen(win, 560, dialog_h, 18)
         try:
+            # Materialize and bind the native wrapper while still hidden. This
+            # removes the first-click activation race with the DWM page surface.
+            win.update_idletasks()
+            self._bind_native_dialog_owner(win, self.root)
             win.deiconify()
-            win.lift()
-            win.grab_set()
             self._raise_toplevel_above_dwm(win, hold_ms=520)
+            self._activate_native_dialog(win)
+            win.grab_set()
             if entry is not None:
-                entry.focus_set()
+                entry.focus_force()
                 entry.selection_range(0, 'end')
+            elif default_button is not None:
+                default_button.focus_force()
             else:
                 win.focus_force()
+
+            # Windows/Tk can finalize the override-redirect wrapper one message
+            # later. Reassert activation once after the first paint, not in a
+            # polling loop, so the first physical click always reaches a button.
+            def reinforce_activation():
+                try:
+                    if state['done'] or not win.winfo_exists():
+                        return
+                    self._activate_native_dialog(win)
+                    if entry is not None:
+                        entry.focus_force()
+                    elif default_button is not None:
+                        default_button.focus_force()
+                except Exception:
+                    pass
+            win.after(0, reinforce_activation)
         except Exception:
             pass
 
