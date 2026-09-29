@@ -1,3 +1,12 @@
+# v10.5.111 - Extensions, Privacy Core and global fonts
+
+- Allows explicitly enabled user extensions to run while Privacy Core remains active, instead of silently disabling every user-installed extension.
+- Adds explicit unpacked Manifest V2 and Manifest V3 support, including manifest validation and MV2 compatibility flags for the Chromium backend.
+- Shows MV2/MV3 directly in Extension Manager and reports unsupported manifest generations clearly.
+- Makes the selected UI font cascade across Tekzite chrome, dialogs, menus, controls and the omnibox, while keeping display/monospace fonts available as explicit overrides.
+- Expands Customize Tekzite color-label spacing so Window background and Toolbar background remain fully readable.
+- Retains the browser-level native JavaScript dialog work from v10.5.107 while keeping Chromium's hidden dialog surface out of the interaction path.
+
 # v10.5.107 - Browser-level native JavaScript dialogs
 
 - Moves Chromium JavaScript dialog interception from a secondary page websocket to a dedicated browser-level DevTools connection with a flattened Target session attached to the Tekzite tab.
