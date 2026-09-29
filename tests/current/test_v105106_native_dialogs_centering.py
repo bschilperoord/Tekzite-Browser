@@ -57,7 +57,14 @@ def test_tk_owns_alert_confirm_prompt_and_beforeunload_controls():
     assert "'Leave'" in FEATURES
     assert "'Stay'" in FEATURES
     assert "win.grab_set()" in FEATURES
-    assert "_raise_toplevel_above_dwm(win, hold_ms=520)" in FEATURES
+    assert "_raise_toplevel_above_dwm(win, hold_ms=520, persistent_topmost=True)" in FEATURES
+
+
+def test_javascript_dialog_topmost_is_not_released_while_modal_is_open():
+    source = inspect.getsource(main.BrowserApp._raise_toplevel_above_dwm)
+    assert "persistent_topmost=False" in source
+    assert "if not persistent_topmost:" in source
+    assert "if persistent_topmost:" in source
 
 
 class _FakeRoot:
