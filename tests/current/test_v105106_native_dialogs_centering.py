@@ -205,3 +205,10 @@ def test_permission_prompt_is_modal_and_uses_shared_dwm_raise_path():
     ]
     assert "win.grab_set()" in block
     assert "_raise_toplevel_above_dwm(win, hold_ms=520)" in block
+
+
+def test_settings_dialog_uses_native_owner_path_instead_of_direct_topmost():
+    source = inspect.getsource(main.BrowserApp.show_preferences)
+    assert "_bind_native_dialog_owner(win, self.root)" in source
+    assert "_raise_toplevel_above_dwm(win, hold_ms=520)" in source
+    assert 'win.attributes("-topmost", True)' not in source
