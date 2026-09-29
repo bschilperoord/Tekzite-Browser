@@ -597,3 +597,15 @@ def test_page_dialog_click_is_acknowledged_before_cdp_close_wait():
     submit_at = decide.index("self._javascript_dialog_executor.submit(work)")
     assert disable_at < submit_at
     assert "win.configure(cursor='wait')" in decide
+
+
+def test_customize_color_labels_are_not_clipped():
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    block = source[
+        source.index('"bg": "Window background"'):
+        source.index("# Toolbar", source.index('"bg": "Window background"'))
+    ]
+    assert "color_label_width = max(len(str(text)) for text in pretty.values()) + 1" in block
+    assert "width=color_label_width" in block
+    assert 'padx=(0, 8)' in block
+    assert 'label(cell, pretty.get(key, key), width=16)' not in block
