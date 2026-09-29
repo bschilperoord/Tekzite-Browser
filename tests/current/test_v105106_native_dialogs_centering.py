@@ -49,7 +49,7 @@ def test_dialog_monitor_is_armed_before_navigation():
 
 
 def test_tk_owns_alert_confirm_prompt_and_beforeunload_controls():
-    assert "_schedule_javascript_dialog_poll(140)" in FEATURES
+    assert "_schedule_javascript_dialog_poll(20)" in FEATURES
     assert "def _show_native_javascript_dialog" in FEATURES
     assert "'alert', 'confirm', 'prompt', 'beforeunload'" in FEATURES
     assert "'OK'" in FEATURES
@@ -233,3 +233,34 @@ def test_native_page_dialog_hides_chromium_until_cdp_answer_finishes():
     assert hide_at < show_dialog_at
     assert restore_at > block.index("future.result()")
     assert "_set_dwm_page_dialog_suspended(False)" in block
+
+
+def test_javascript_dialog_watcher_has_no_large_polling_blind_spot():
+    block = FEATURES[
+        FEATURES.index("def _schedule_javascript_dialog_poll"):
+        FEATURES.index("def _show_native_javascript_dialog")
+    ]
+    assert "timeout=0.24" in block
+    assert "self.root.after(4, finish)" in block
+    assert "_schedule_javascript_dialog_poll(12 if rows else 2)" in block
+    assert "max(1, int(delay_ms))" in block
+    assert "90 if rows else 140" not in block
+
+
+def test_page_dialog_suppression_is_synchronous_and_transparent_first():
+    source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
+    assert "SetLayeredWindowAttributes" in source
+    assert "ctypes.c_ubyte(0)" in source
+    assert "user32.ShowWindow(hwnd, 0)" in source
+    assert source.index("SetLayeredWindowAttributes") < source.index("user32.ShowWindow(hwnd, 0)")
+
+
+def test_page_dialog_hides_chromium_before_tk_window_is_built():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
+    window_at = block.index("self._new_animated_toplevel")
+    assert hide_at < window_at
+    assert "self.root.after(5, finish_answer)" in block
