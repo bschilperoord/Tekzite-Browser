@@ -12166,7 +12166,9 @@ def _record_javascript_dialog_browser_event(channel, payload):
         params = payload.get('params') or {}
         channel['last_result'] = bool(params.get('result'))
         channel['last_user_input'] = str(params.get('userInput') or '')[:4096]
-        channel['last_event_at'] = time.monotonic()
+        now = time.monotonic()
+        channel['last_event_at'] = now
+        channel['last_dialog_closed_at'] = now
     return None
 
 
@@ -12366,6 +12368,43 @@ def poll_embedded_chromium_javascript_dialogs(
     return []
 
 
+def _wait_for_javascript_dialog_closed(channel, timeout: float = 0.6):
+    """Wait for Chromium's real Page.javascriptDialogClosed event.
+
+    The Page.handleJavaScriptDialog command can acknowledge before the browser
+    compositor has emitted its close event. Do not infer closure from the command
+    response; consume the dedicated CDP socket until Chromium says it is closed.
+    """
+    if not isinstance(channel, dict):
+        return False
+    if not channel.get('dialog_open'):
+        return True
+
+    ws = channel.get('ws')
+    if ws is None or channel.get('closed'):
+        return False
+
+    deadline = time.monotonic() + max(0.05, min(float(timeout), 1.5))
+    try:
+        with channel['lock']:
+            while time.monotonic() < deadline:
+                if not channel.get('dialog_open'):
+                    return True
+                remaining = max(0.005, deadline - time.monotonic())
+                try:
+                    ws.settimeout(remaining)
+                    raw = ws.recv()
+                except socket.timeout:
+                    break
+                payload = json.loads(raw)
+                _record_javascript_dialog_browser_event(channel, payload)
+                if not channel.get('dialog_open'):
+                    return True
+    except Exception:
+        return False
+    return not bool(channel.get('dialog_open'))
+
+
 def resolve_embedded_chromium_javascript_dialog(
         target_id: str, accept: bool, prompt_text: str = '', *, timeout: float = 1.0):
     """Answer Chromium's browser-owned JavaScript dialog through its Target session."""
@@ -12382,14 +12421,21 @@ def resolve_embedded_chromium_javascript_dialog(
     params = {'accept': bool(accept)}
     if prompt_text is not None:
         params['promptText'] = str(prompt_text)[:4096]
+    # Keep dialog_open true until Chromium itself emits
+    # Page.javascriptDialogClosed. The command response alone is not a visual
+    # close barrier and can arrive one or more compositor frames early.
+    channel['last_dialog_close_confirmed'] = False
     _javascript_dialog_browser_call(
         channel, 'Page.handleJavaScriptDialog', params,
         session_id=str(channel.get('session_id') or ''),
         timeout=max(0.1, float(timeout)),
     )
-    channel['dialog_open'] = False
+    closed = _wait_for_javascript_dialog_closed(
+        channel, timeout=min(max(float(timeout), 0.25), 0.9)
+    )
+    channel['last_dialog_close_confirmed'] = bool(closed)
     channel.setdefault('events', []).clear()
-    return True
+    return bool(closed)
 
 
 def set_embedded_chromium_permission(origin: str, permission: str, setting: str, *, timeout: int = 4):
