@@ -250,6 +250,7 @@ class BrowserFeatures:
         self._network_health_failures = 0
         self._native_page_dialog_prewarmed = False
         self._native_page_dialog_prewarm_after_id = None
+        self._page_dialog_modal_active = False
         self._closing = False
         self._configure_feature_preferences()
 
@@ -1303,6 +1304,27 @@ class BrowserFeatures:
         if not target_id or kind not in {'alert', 'confirm', 'prompt', 'beforeunload'}:
             return
 
+        # The real first dialog itself is the warm-up. Never let the scheduled
+        # hidden prewarm Toplevel wake up underneath it, and keep unrelated
+        # permission polling out of Tk's modal input path.
+        prewarm_id = getattr(self, '_native_page_dialog_prewarm_after_id', None)
+        if prewarm_id is not None:
+            try:
+                self.root.after_cancel(prewarm_id)
+            except Exception:
+                pass
+            self._native_page_dialog_prewarm_after_id = None
+        self._native_page_dialog_prewarmed = True
+        self._page_dialog_modal_active = True
+
+        permission_after = getattr(self, '_permission_prompt_after_id', None)
+        if permission_after is not None:
+            try:
+                self.root.after_cancel(permission_after)
+            except Exception:
+                pass
+            self._permission_prompt_after_id = None
+
         message = str(dialog.get('message') or '')
         default_prompt = str(dialog.get('default_prompt') or '')
         origin = str(dialog.get('origin') or '')
@@ -1343,10 +1365,13 @@ class BrowserFeatures:
             if state['presentation_restored']:
                 return
             state['presentation_restored'] = True
+            self._page_dialog_modal_active = False
             try:
                 self._set_dwm_page_dialog_suspended(False)
             except Exception:
                 pass
+            if getattr(self, '_permission_prompt_after_id', None) is None:
+                self._schedule_permission_prompt_poll(220)
 
         def decide(accept, prompt_text=None):
             if state['done']:
@@ -1608,6 +1633,9 @@ class BrowserFeatures:
     def _permission_prompt_tick(self):
         self._permission_prompt_after_id = None
         if self._closing:
+            return
+        if getattr(self, '_page_dialog_modal_active', False):
+            self._schedule_permission_prompt_poll(320)
             return
         prompt = getattr(self, '_permission_prompt_window', None)
         if prompt is not None:
