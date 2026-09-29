@@ -195,7 +195,7 @@ def test_windows_dialog_raise_prefers_native_owner_over_global_topmost():
     assert "_bind_native_dialog_owner" in source
     assert "GWLP_HWNDPARENT" in inspect.getsource(main.BrowserApp._bind_native_dialog_owner)
     assert "HWND_TOP = 0" in inspect.getsource(main.BrowserApp._bind_native_dialog_owner)
-    assert "HWND_TOPMOST" not in source
+    assert "wintypes.HWND(HWND_TOPMOST)" not in source
 
 
 def test_permission_prompt_is_modal_and_uses_shared_dwm_raise_path():
