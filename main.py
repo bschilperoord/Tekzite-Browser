@@ -13225,14 +13225,17 @@ class BrowserApp(BrowserFeatures):
         win.after_idle(fit_and_center_preferences)
         win.protocol("WM_DELETE_WINDOW", cancel_preferences)
 
-    def _raise_toplevel_above_dwm(self, win, hold_ms=420):
+    def _raise_toplevel_above_dwm(self, win, hold_ms=420, persistent_topmost=False):
         """Force an app dialog above the separate native DWM presentation HWND.
 
         Tk ``lift``/``-topmost`` is usually enough, but the Chromium page is
         mirrored through a raw owned Win32 popup.  Resolve the real Tk wrapper
         HWND and use SetWindowPos so the dialog wins the native z-order race too.
-        The TOPMOST state is temporary; after the first visible frame it returns
-        to normal app-owned ordering.
+        The TOPMOST state is temporary by default; after the first visible
+        frame it returns to normal app-owned ordering. Browser-owned synchronous
+        JavaScript dialogs can keep their Tk replacement TOPMOST until the
+        replacement is destroyed, preventing Chromium's modal surface from
+        reclaiming the z-order while the user is deciding.
         """
         try:
             win.update_idletasks()
@@ -13244,7 +13247,8 @@ class BrowserApp(BrowserFeatures):
         if os.name != "nt":
             try:
                 win.attributes("-topmost", True)
-                win.after(max(120, int(hold_ms)), lambda w=win: w.winfo_exists() and w.attributes("-topmost", False))
+                if not persistent_topmost:
+                    win.after(max(120, int(hold_ms)), lambda w=win: w.winfo_exists() and w.attributes("-topmost", False))
             except Exception:
                 pass
             return True
@@ -13267,6 +13271,8 @@ class BrowserApp(BrowserFeatures):
             flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
             user32.SetWindowPos(wintypes.HWND(hwnd), wintypes.HWND(HWND_TOPMOST), 0, 0, 0, 0, flags)
             win.attributes("-topmost", True)
+            if persistent_topmost:
+                return True
 
             def release_native_topmost(w=win, native_hwnd=hwnd):
                 try:
@@ -13282,7 +13288,8 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             try:
                 win.attributes("-topmost", True)
-                win.after(max(160, int(hold_ms)), lambda w=win: w.winfo_exists() and w.attributes("-topmost", False))
+                if not persistent_topmost:
+                    win.after(max(160, int(hold_ms)), lambda w=win: w.winfo_exists() and w.attributes("-topmost", False))
             except Exception:
                 pass
             return False
