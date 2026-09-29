@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - "dev/v10.5.110-manifest-v2-v3"
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
