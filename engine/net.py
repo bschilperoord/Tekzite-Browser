@@ -12159,6 +12159,26 @@ def _record_javascript_dialog_browser_event(channel, payload):
             del queue[:-8]
         channel['dialog_open'] = True
         channel['last_event_at'] = time.monotonic()
+
+        # A JavaScript dialog can create a fresh Chrome_WidgetWin_* top-level
+        # presenter after the normal DWM startup parking pass. Re-park all
+        # Chromium presenters immediately on the dialog worker so a separate
+        # browser-owned popup can never appear directly on the desktop.
+        try:
+            session = _CHROMIUM_SESSION
+            if session:
+                source = (
+                    session.get('dwm_thumbnail_source')
+                    or session.get('dwm_source_hwnd')
+                    or session.get('embedded_hwnd')
+                    or 0
+                )
+                _park_chromium_top_level_presenters(
+                    session, source_hwnd=source, passes=1, settle_delay=0.0
+                )
+                channel['dialog_presenters_parked_on_open'] = True
+        except Exception:
+            channel['dialog_presenters_parked_on_open'] = False
         return event
 
     if method == 'Page.javascriptDialogClosed':
@@ -12169,6 +12189,21 @@ def _record_javascript_dialog_browser_event(channel, payload):
         now = time.monotonic()
         channel['last_event_at'] = now
         channel['last_dialog_closed_at'] = now
+        try:
+            session = _CHROMIUM_SESSION
+            if session:
+                source = (
+                    session.get('dwm_thumbnail_source')
+                    or session.get('dwm_source_hwnd')
+                    or session.get('embedded_hwnd')
+                    or 0
+                )
+                _park_chromium_top_level_presenters(
+                    session, source_hwnd=source, passes=1, settle_delay=0.0
+                )
+                channel['dialog_presenters_parked_on_close'] = True
+        except Exception:
+            channel['dialog_presenters_parked_on_close'] = False
     return None
 
 
