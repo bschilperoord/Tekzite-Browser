@@ -1372,7 +1372,7 @@ class BrowserFeatures:
             win.deiconify()
             win.lift()
             win.grab_set()
-            self._raise_toplevel_above_dwm(win, hold_ms=520)
+            self._raise_toplevel_above_dwm(win, hold_ms=520, persistent_topmost=True)
             if entry is not None:
                 entry.focus_set()
                 entry.selection_range(0, 'end')
