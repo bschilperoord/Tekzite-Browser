@@ -11981,20 +11981,26 @@ class BrowserApp(BrowserFeatures):
 
             if old_mono and folded == old_mono:
                 target = self._ui_monospace_font_family
-            elif old_display and folded == old_display:
+            elif old_display and old_display != old_ui and folded == old_display:
                 target = self._ui_display_font_family
             else:
                 # Tk defaults and the previous UI family are ordinary interface
                 # text, so switching UI font should update them everywhere.
                 target = self._ui_font_family
 
+            styles = []
+            if str(actual.get("weight") or "normal") == "bold":
+                styles.append("bold")
+            if str(actual.get("slant") or "roman") == "italic":
+                styles.append("italic")
+            if bool(actual.get("underline")):
+                styles.append("underline")
+            if bool(actual.get("overstrike")):
+                styles.append("overstrike")
             return (
                 target,
                 int(actual.get("size") or self._font_size(9)),
-                str(actual.get("weight") or "normal"),
-                str(actual.get("slant") or "roman"),
-                int(bool(actual.get("underline"))),
-                int(bool(actual.get("overstrike"))),
+                tuple(styles),
             )
 
         try:
@@ -12004,15 +12010,10 @@ class BrowserApp(BrowserFeatures):
         replacement = mapped_font(current)
         if replacement is not None:
             try:
-                family, size, weight, slant, underline, overstrike = replacement
-                widget.configure(font=(
-                    family, size, weight, slant, underline, overstrike
-                ))
+                family, size, styles = replacement
+                widget.configure(font=(family, size, *styles))
             except Exception:
-                try:
-                    widget.configure(font=(replacement[0], replacement[1], replacement[2]))
-                except Exception:
-                    pass
+                pass
 
         # Canvas text does not inherit the Canvas widget's font option.
         try:
@@ -12025,10 +12026,10 @@ class BrowserApp(BrowserFeatures):
                         repl = mapped_font(item_font)
                         if repl is None:
                             continue
-                        family, size, weight, slant, underline, overstrike = repl
+                        family, size, styles = repl
                         widget.itemconfigure(
                             item,
-                            font=(family, size, weight, slant, underline, overstrike),
+                            font=(family, size, *styles),
                         )
                     except Exception:
                         pass
