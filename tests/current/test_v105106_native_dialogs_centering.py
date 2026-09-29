@@ -219,7 +219,8 @@ def test_page_dialog_suspends_dwm_chromium_surface():
     helper_source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
     assert "not self._dwm_host_suspended_for_page_dialog" in sync_source
     assert "self._dwm_host_suspended_for_page_dialog = suspended" in helper_source
-    assert "_sync_dwm_host_geometry(show=not suspended" in helper_source
+    assert "user32.ShowWindow(hwnd, 0)" in helper_source
+    assert "_sync_dwm_host_geometry(show=True, transparent=False)" in helper_source
 
 
 def test_native_page_dialog_hides_chromium_until_cdp_answer_finishes():
