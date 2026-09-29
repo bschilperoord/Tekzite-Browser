@@ -726,7 +726,7 @@ class BrowserFeatures:
         win.geometry('940x520')
         lockdown = bool(self.preferences.get('privacy_lockdown', True))
         note = tk.StringVar(value=(
-            'Privacy Core active: extensions are saved but not loaded.'
+            'Privacy Core active. Enabled extensions still load with their declared permissions.'
             if lockdown else
             'Manifest V2 + V3 unpacked extensions are supported; restart after changes.'
         ))
@@ -741,9 +741,9 @@ class BrowserFeatures:
                 self._show_message("error", 'Extension Manager', f'Could not save extensions:\n{exc}', parent=win)
                 return False
             selected_paths = [row.get('path') for row in entries if row.get('enabled') and row.get('path')]
-            os.environ['TEKZITE_USER_EXTENSIONS'] = json.dumps([] if self.preferences.get('privacy_lockdown', True) else selected_paths)
+            os.environ['TEKZITE_USER_EXTENSIONS'] = json.dumps(selected_paths)
             note.set(
-                'Extension settings saved. Privacy Core keeps user extensions disabled.'
+                'Extension settings saved. Privacy Core remains active; restart Tekzite to apply the extension set.'
                 if self.preferences.get('privacy_lockdown', True) else
                 'Extension settings saved. Restart Tekzite to apply the new extension set.'
             )
@@ -768,10 +768,7 @@ class BrowserFeatures:
                 iid = f'user:{index}'
                 try:
                     meta = self._extension_metadata(path)
-                    if row.get('enabled') and self.preferences.get('privacy_lockdown', True):
-                        state_label = 'Blocked by Privacy Core'
-                    else:
-                        state_label = 'Enabled' if row.get('enabled') else 'Disabled'
+                    state_label = 'Enabled' if row.get('enabled') else 'Disabled'
                 except Exception as exc:
                     meta = {'name': Path(path).name or 'Missing extension', 'version': '?', 'manifest_version': '?', 'permissions': []}
                     state_label = 'Missing / invalid'
