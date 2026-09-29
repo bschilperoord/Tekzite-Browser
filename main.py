@@ -12283,6 +12283,9 @@ class BrowserApp(BrowserFeatures):
             "border_focus": "Focus border", "text": "Primary text", "muted": "Secondary text", "muted_dim": "Dim text",
             "accent": "Accent", "accent_hover": "Accent hover", "danger": "Danger / close", "success": "Status success",
         }
+        # Keep every color-setting label fully visible. Fixed width=16 clipped
+        # names such as "Window background" and "Toolbar background".
+        color_label_width = max(len(str(text)) for text in pretty.values()) + 1
 
         def choose_color(key):
             chosen = colorchooser.askcolor(color=color_vars[key].get(), parent=win, title=pretty.get(key, key))[1]
@@ -12294,7 +12297,9 @@ class BrowserApp(BrowserFeatures):
             cell = tk.Frame(colors_frame, bg=self.ui["bg"])
             cell.grid(row=idx // 2, column=idx % 2, sticky="ew", padx=(0, 14), pady=3)
             colors_frame.grid_columnconfigure(idx % 2, weight=1)
-            label(cell, pretty.get(key, key), width=16).pack(side="left")
+            label(cell, pretty.get(key, key), width=color_label_width).pack(
+                side="left", padx=(0, 8)
+            )
             entry(cell, color_vars[key], width=10).pack(side="left", padx=(0, 5), ipady=3)
             tk.Button(cell, text="●", command=lambda k=key: choose_color(k), bg=self.ui["chrome_2"], fg=color_vars[key].get(),
                       activebackground=self.ui["field_focus"], relief="flat", bd=0, padx=8).pack(side="left")
