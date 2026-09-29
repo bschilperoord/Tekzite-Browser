@@ -332,3 +332,20 @@ def test_page_dialog_keeps_dwm_destination_mapped_while_transparent():
 def test_dwm_visibility_changes_prefer_async_window_mapping():
     source = inspect.getsource(main.BrowserApp._sync_dwm_host_geometry)
     assert source.count("ShowWindowAsync") >= 2
+
+
+def test_page_dialog_uses_single_hwnd_owner_pass():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert "self._bind_native_dialog_owner(win, self.root)" in block
+    assert "self._activate_native_dialog(win)" in block
+    assert "_raise_toplevel_above_dwm(win, hold_ms=520)" not in block
+
+
+def test_native_dialog_activation_reuses_materialized_hwnd():
+    source = inspect.getsource(main.BrowserApp._activate_native_dialog)
+    cached_at = source.index('getattr(win, "_tekzite_native_dialog_hwnd", 0)')
+    idle_at = source.index("win.update_idletasks()")
+    assert cached_at < idle_at
