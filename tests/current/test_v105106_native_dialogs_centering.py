@@ -582,3 +582,18 @@ def test_close_repark_avoids_second_window_enumeration():
     assert "EnumWindows" not in helper
     assert "dwm_chromium_presenters_parked" in helper
     assert "SetWindowPos" in helper
+
+
+def test_page_dialog_click_is_acknowledged_before_cdp_close_wait():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    decide = block[
+        block.index("def decide(accept, prompt_text=None):"):
+        block.index("header = tk.Frame")
+    ]
+    disable_at = decide.index("child.configure(state='disabled', cursor='arrow')")
+    submit_at = decide.index("self._javascript_dialog_executor.submit(work)")
+    assert disable_at < submit_at
+    assert "win.configure(cursor='wait')" in decide
