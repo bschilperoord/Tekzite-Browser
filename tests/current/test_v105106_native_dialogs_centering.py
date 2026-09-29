@@ -349,3 +349,19 @@ def test_native_dialog_activation_reuses_materialized_hwnd():
     cached_at = source.index('getattr(win, "_tekzite_native_dialog_hwnd", 0)')
     idle_at = source.index("win.update_idletasks()")
     assert cached_at < idle_at
+
+
+def test_page_dialog_disables_delayed_generic_prepare():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert "auto_prepare=False" in block
+    assert "auto_center=False" in block
+
+
+def test_toplevel_factory_can_skip_delayed_prepare_callback():
+    source = inspect.getsource(main.BrowserApp._new_animated_toplevel)
+    assert "auto_prepare=True" in source
+    assert 'win._tekzite_auto_prepare = bool(auto_prepare)' in source
+    assert 'if getattr(win, "_tekzite_auto_prepare", True):' in source
