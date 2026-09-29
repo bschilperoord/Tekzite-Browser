@@ -57,7 +57,8 @@ def test_tk_owns_alert_confirm_prompt_and_beforeunload_controls():
     assert "'Leave'" in FEATURES
     assert "'Stay'" in FEATURES
     assert "win.grab_set()" in FEATURES
-    assert "_raise_toplevel_above_dwm(win, hold_ms=520, persistent_topmost=True)" in FEATURES
+    assert "_raise_toplevel_above_dwm(" in FEATURES
+    assert "win, hold_ms=520, persistent_topmost=True" in FEATURES
 
 
 def test_javascript_dialog_topmost_is_not_released_while_modal_is_open():
