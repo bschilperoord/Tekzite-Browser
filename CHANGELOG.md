@@ -1,3 +1,10 @@
+# v10.5.112 - Persistent native page dialogs
+
+- Keeps Tekzite's Tk-native JavaScript alert, confirm, prompt and before-unload dialogs above Chromium's DWM-hosted modal surface for the full lifetime of the decision.
+- Prevents Chromium's hidden synchronous dialog UI from reclaiming z-order after the previous temporary 520 ms TOPMOST window expired.
+- Preserves the existing browser-level CDP dialog bridge and answers Chromium through Page.handleJavaScriptDialog after the user chooses in Tekzite.
+- Adds regression coverage for persistent dialog z-order while leaving normal Tekzite dialogs on their existing temporary TOPMOST behavior.
+
 # v10.5.111 - Extensions, Privacy Core and global fonts
 
 - Allows explicitly enabled user extensions to run while Privacy Core remains active, instead of silently disabling every user-installed extension.

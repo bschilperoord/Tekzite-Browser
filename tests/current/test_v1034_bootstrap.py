@@ -15,7 +15,7 @@ def _page(target_id, url):
 
 
 def test_release_is_v1034():
-    assert main.BROWSER_VERSION == "10.5.111"
+    assert main.BROWSER_VERSION == "10.5.112"
 
 
 def test_cold_native_start_always_uses_blank_bootstrap():
