@@ -7246,7 +7246,9 @@ class BrowserApp(BrowserFeatures):
             self._apply_dwm_host_rounding(hwnd, w, h)
 
             LWA_ALPHA = 0x00000002
-            target_alpha = 0 if transparent else 255
+            target_alpha = 0 if (
+                transparent or self._dwm_host_suspended_for_page_dialog
+            ) else 255
             if target_alpha != self._dwm_host_alpha:
                 try:
                     user32.SetLayeredWindowAttributes.argtypes = [
@@ -7293,15 +7295,41 @@ class BrowserApp(BrowserFeatures):
             return None
 
     def _set_dwm_page_dialog_suspended(self, suspended):
-        """Hide only the DWM Chromium presentation while a native page dialog is open."""
+        """Instantly suppress Chromium's DWM mirror while Tekzite owns a page dialog."""
         suspended = bool(suspended)
         self._dwm_host_suspended_for_page_dialog = suspended
         if not (self._embedded_mode and self._chromium_dwm_mode):
             return False
+
+        # Dialog suppression is latency-sensitive. The normal DWM hide path is
+        # intentionally asynchronous for tab/window transitions, but that can
+        # leave Chromium's own dialog visible for one compositor frame. Make
+        # this path synchronous and force alpha to zero first, then restore via
+        # the normal geometry path after Page.handleJavaScriptDialog completes.
+        if suspended and os.name == "nt" and self._dwm_host:
+            try:
+                import ctypes
+                from ctypes import wintypes
+                user32 = self._dwm_user32 or ctypes.WinDLL("user32", use_last_error=True)
+                self._dwm_user32 = user32
+                hwnd = wintypes.HWND(int(self._dwm_host))
+                LWA_ALPHA = 0x00000002
+                user32.SetLayeredWindowAttributes.argtypes = [
+                    wintypes.HWND, wintypes.COLORREF, ctypes.c_ubyte, wintypes.DWORD
+                ]
+                user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+                user32.SetLayeredWindowAttributes(
+                    hwnd, wintypes.COLORREF(0), ctypes.c_ubyte(0), LWA_ALPHA
+                )
+                self._dwm_host_alpha = 0
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE, synchronous on purpose.
+                self._dwm_host_visible = False
+                return True
+            except Exception:
+                pass
+
         try:
-            # _sync_dwm_host_geometry owns the visibility bookkeeping and also
-            # respects minimize/restore suspension, so it is safe to call here.
-            self._sync_dwm_host_geometry(show=not suspended, transparent=False)
+            self._sync_dwm_host_geometry(show=not suspended, transparent=suspended)
             return True
         except Exception:
             return False
