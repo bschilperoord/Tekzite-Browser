@@ -8740,6 +8740,43 @@ def _park_chromium_top_level_presenters(session, source_hwnd=0, passes=1, settle
 
 
 
+def _repark_known_chromium_presenters_fast(session):
+    """Re-park already discovered Chromium top-level presenters without enumeration."""
+    if os.name != "nt" or not session:
+        return 0
+    rows = list(session.get("dwm_chromium_presenters_parked") or [])
+    if not rows:
+        return 0
+    try:
+        user32 = _typed_user32()
+        HWND_BOTTOM = 1
+        SWP_NOSIZE = 0x0001
+        SWP_NOACTIVATE = 0x0010
+        count = 0
+        for index, row in enumerate(rows):
+            hwnd_i = _hwnd_int((row or {}).get("hwnd") or 0)
+            if not hwnd_i:
+                continue
+            hwnd = _as_hwnd(hwnd_i)
+            if not user32.IsWindow(hwnd):
+                continue
+            # Keep every known presenter parked. The DWM source is intentionally
+            # mapped off-screen and mirrored into Tekzite.
+            user32.SetWindowPos(
+                hwnd, _as_hwnd(HWND_BOTTOM),
+                -32000 - (index * 32), -32000 - (index * 32),
+                0, 0, SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+            count += 1
+        session["dwm_dialog_fast_repark_count"] = int(
+            session.get("dwm_dialog_fast_repark_count") or 0
+        ) + count
+        return count
+    except Exception as exc:
+        session["dwm_dialog_fast_repark_error"] = f"{type(exc).__name__}: {exc}"
+        return 0
+
+
 def _dwm_input_offset_for_crop(crop_left, crop_top, render_offset):
     """Translate DWM destination pixels into the RenderWidgetHost origin.
 
@@ -12198,9 +12235,10 @@ def _record_javascript_dialog_browser_event(channel, payload):
                     or session.get('embedded_hwnd')
                     or 0
                 )
-                _park_chromium_top_level_presenters(
-                    session, source_hwnd=source, passes=1, settle_delay=0.0
-                )
+                # Opening already discovered any new dialog presenter. On close,
+                # avoid a second process/window enumeration in the latency-critical
+                # Cancel/OK path and just re-park the cached HWNDs.
+                _repark_known_chromium_presenters_fast(session)
                 channel['dialog_presenters_parked_on_close'] = True
         except Exception:
             channel['dialog_presenters_parked_on_close'] = False
