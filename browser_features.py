@@ -1225,8 +1225,17 @@ class BrowserFeatures:
         except Exception:
             pass
 
-        state = {'done': False}
+        state = {'done': False, 'presentation_restored': False}
         prompt_var = tk.StringVar(value=default_prompt)
+
+        def restore_chromium_presentation():
+            if state['presentation_restored']:
+                return
+            state['presentation_restored'] = True
+            try:
+                self._set_dwm_page_dialog_suspended(False)
+            except Exception:
+                pass
 
         def decide(accept, prompt_text=None):
             if state['done']:
@@ -1252,6 +1261,7 @@ class BrowserFeatures:
                 dialog_executor = getattr(self, '_javascript_dialog_executor', self._executor)
                 future = dialog_executor.submit(work)
             except Exception as exc:
+                restore_chromium_presentation()
                 self.status_var.set(f'Could not answer page dialog: {exc}')
                 return
 
@@ -1267,8 +1277,10 @@ class BrowserFeatures:
                 try:
                     ok = bool(future.result())
                 except Exception as exc:
+                    restore_chromium_presentation()
                     self.status_var.set(f'Could not answer page dialog: {exc}')
                     return
+                restore_chromium_presentation()
                 if ok:
                     self.status_var.set(
                         f'Page dialog {"accepted" if accept else "cancelled"}'
@@ -1373,6 +1385,10 @@ class BrowserFeatures:
         # Windows systems. The Tekzite dialog must be made visible/foreground
         # first, then the Tk grab is attempted independently.
         try:
+            # Keep Chromium's own browser-level modal out of the DWM mirror while
+            # Tekzite presents the native replacement. Do not manipulate Chromium
+            # HWNDs; the page remains synchronously blocked until the CDP answer.
+            self._set_dwm_page_dialog_suspended(True)
             win.deiconify()
             win.lift()
         except Exception:

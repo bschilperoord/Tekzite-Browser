@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches-ignore:
+      - "dev/v10.5.114-dialog-alpha"
   pull_request:
 
 permissions:

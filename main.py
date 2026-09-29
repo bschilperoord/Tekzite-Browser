@@ -2438,6 +2438,10 @@ class BrowserApp(BrowserFeatures):
         # restore.  Keep this separate from _dwm_surface_ready so Chromium does
         # not have to re-bootstrap after every minimize/restore cycle.
         self._dwm_host_suspended_for_minimize = False
+        # Temporarily hide the DWM Chromium presentation while Tekzite owns a
+        # native JavaScript dialog. Chromium's synchronous dialog remains open
+        # internally until the CDP answer is sent.
+        self._dwm_host_suspended_for_page_dialog = False
         # v10.5.50: taskbar restore is a cold DWM recovery, not merely a popup
         # remap.  Windows can retain the destination HWND while silently dropping
         # the live thumbnail composition after an override-redirect/iconify cycle.
@@ -3534,7 +3538,7 @@ class BrowserApp(BrowserFeatures):
         win._tekzite_motion_duration = int(duration)
         win._tekzite_motion_slide = int(slide)
         try:
-            win.attributes("-alpha", 0.0 if self._motion_enabled() else 1.0)
+            win.attributes("-alpha", 0.0 if (auto_animate and self._motion_enabled()) else 1.0)
         except Exception:
             pass
 
@@ -7268,6 +7272,7 @@ class BrowserApp(BrowserFeatures):
             should_show = bool(
                 show and self._dwm_surface_ready
                 and not self._dwm_host_suspended_for_minimize
+                and not self._dwm_host_suspended_for_page_dialog
                 and not root_iconic
             )
             if should_show and not self._dwm_host_visible:
@@ -7286,6 +7291,18 @@ class BrowserApp(BrowserFeatures):
             return (w, h)
         except Exception:
             return None
+
+    def _set_dwm_page_dialog_suspended(self, suspended):
+        """Hide only the DWM Chromium presentation while a native page dialog is open."""
+        suspended = bool(suspended)
+        self._dwm_host_suspended_for_page_dialog = suspended
+        if not (self._embedded_mode and self._chromium_dwm_mode):
+            return False
+        try:
+            self._sync_dwm_host_geometry(show=not suspended, transparent=False)
+            return True
+        except Exception:
+            return False
 
     def _cancel_dwm_host_reveal(self):
         if self._dwm_reveal_after_id is not None:

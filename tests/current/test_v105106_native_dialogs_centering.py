@@ -88,6 +88,33 @@ def test_javascript_dialog_raise_happens_before_best_effort_tk_grab():
     assert "win.after(220, reassert_dialog_z_order)" in block
 
 
+def test_non_animated_toplevel_is_visible_immediately():
+    source = inspect.getsource(main.BrowserApp._new_animated_toplevel)
+    assert '0.0 if (auto_animate and self._motion_enabled()) else 1.0' in source
+
+
+def test_page_dialog_suspends_only_dwm_presentation():
+    sync_source = inspect.getsource(main.BrowserApp._sync_dwm_host_geometry)
+    helper_source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
+    assert "not self._dwm_host_suspended_for_page_dialog" in sync_source
+    assert "self._dwm_host_suspended_for_page_dialog = suspended" in helper_source
+    assert "_sync_dwm_host_geometry(show=not suspended" in helper_source
+
+
+def test_page_dialog_restores_dwm_only_after_cdp_answer_finishes():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
+    show_at = block.index("win.deiconify()", hide_at)
+    answer_at = block.index("future.result()")
+    restore_at = block.index("restore_chromium_presentation()", answer_at)
+    assert hide_at < show_at
+    assert restore_at > answer_at
+    assert "suppress_embedded_chromium_javascript_dialog_ui" not in block
+
+
 class _FakeRoot:
     def winfo_screenwidth(self):
         return 1920
