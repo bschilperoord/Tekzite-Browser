@@ -219,8 +219,9 @@ def test_page_dialog_suspends_dwm_chromium_surface():
     helper_source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
     assert "not self._dwm_host_suspended_for_page_dialog" in sync_source
     assert "self._dwm_host_suspended_for_page_dialog = suspended" in helper_source
-    assert "user32.ShowWindow(hwnd, 0)" in helper_source
-    assert "_sync_dwm_host_geometry(show=True, transparent=False)" in helper_source
+    assert "user32.ShowWindow(hwnd, 0)" not in helper_source
+    assert "ShowWindowAsync" in helper_source
+    assert "_sync_dwm_host_geometry(show=True, transparent=suspended)" in helper_source
 
 
 def test_native_page_dialog_hides_chromium_until_cdp_answer_finishes():
@@ -248,12 +249,12 @@ def test_javascript_dialog_watcher_has_no_large_polling_blind_spot():
     assert "90 if rows else 140" not in block
 
 
-def test_page_dialog_suppression_is_synchronous_and_transparent_first():
+def test_page_dialog_suppression_never_blocks_tk_on_dwm_hide():
     source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
     assert "SetLayeredWindowAttributes" in source
-    assert "ctypes.c_ubyte(0)" in source
-    assert "user32.ShowWindow(hwnd, 0)" in source
-    assert source.index("SetLayeredWindowAttributes") < source.index("user32.ShowWindow(hwnd, 0)")
+    assert "target_alpha = 0 if suspended else 255" in source
+    assert "ShowWindowAsync" in source
+    assert "user32.ShowWindow(hwnd, 0)" not in source
 
 
 def test_page_dialog_hides_chromium_before_tk_window_is_built():
@@ -318,3 +319,16 @@ def test_page_dialog_closes_without_generic_fade_callback_churn():
         FEATURES.index("def _schedule_permission_prompt_poll")
     ]
     assert 'getattr(win, "_tekzite_original_destroy", None)' in block
+
+
+def test_page_dialog_keeps_dwm_destination_mapped_while_transparent():
+    source = inspect.getsource(main.BrowserApp._sync_dwm_host_geometry)
+    should_show = source[source.index("should_show = bool("):source.index("if should_show", source.index("should_show = bool("))]
+    assert "_dwm_host_suspended_for_minimize" in should_show
+    assert "_dwm_host_suspended_for_page_dialog" not in should_show
+    assert "transparent or self._dwm_host_suspended_for_page_dialog" in source
+
+
+def test_dwm_visibility_changes_prefer_async_window_mapping():
+    source = inspect.getsource(main.BrowserApp._sync_dwm_host_geometry)
+    assert source.count("ShowWindowAsync") >= 2
