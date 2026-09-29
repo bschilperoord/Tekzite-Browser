@@ -250,9 +250,9 @@ def test_javascript_dialog_watcher_has_no_large_polling_blind_spot():
 
 
 def test_page_dialog_suppression_never_blocks_tk_on_dwm_hide():
-    source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_suspended)
+    source = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_visual_fast)
     assert "SetLayeredWindowAttributes" in source
-    assert "target_alpha = 0 if suspended else 255" in source
+    assert "target_alpha = 0 if hidden else 255" in source
     assert "ShowWindowAsync" in source
     assert "user32.ShowWindow(hwnd, 0)" not in source
 
@@ -383,3 +383,31 @@ def test_native_page_dialog_path_is_prewarmed_before_first_real_dialog():
     assert "self._bind_native_dialog_owner(win, self.root)" in warmup
     assert "button.event_generate('<Enter>')" in warmup
     assert "win.deiconify()" not in warmup
+
+
+def test_cdp_worker_preblocks_chromium_before_tk_completion_poll():
+    block = FEATURES[
+        FEATURES.index("def _javascript_dialog_tick"):
+        FEATURES.index("def _show_native_javascript_dialog")
+    ]
+    wait_at = block.index("def wait_for_dialog()")
+    poll_at = block.index("poll_embedded_chromium_javascript_dialogs", wait_at)
+    preblock_at = block.index("_set_dwm_page_dialog_visual_fast(True)", poll_at)
+    submit_at = block.index("self._javascript_dialog_executor.submit(wait_for_dialog)", preblock_at)
+    tk_finish_at = block.index("def finish():", submit_at)
+    assert wait_at < poll_at < preblock_at < submit_at < tk_finish_at
+
+
+def test_geometry_refresh_cannot_resurrect_chromium_during_preblock_gap():
+    source = inspect.getsource(main.BrowserApp._sync_dwm_host_geometry)
+    assert "or self._dwm_page_dialog_visual_preblocked" in source
+    fast = inspect.getsource(main.BrowserApp._set_dwm_page_dialog_visual_fast)
+    assert "self._dwm_page_dialog_visual_preblocked = hidden" in fast
+
+
+def test_native_dialog_failure_releases_worker_visual_preblock():
+    block = FEATURES[
+        FEATURES.index("def _javascript_dialog_tick"):
+        FEATURES.index("def _show_native_javascript_dialog")
+    ]
+    assert "_set_dwm_page_dialog_visual_fast(False)" in block
