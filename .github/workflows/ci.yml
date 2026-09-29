@@ -21,6 +21,13 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
+      - name: Synchronize preview version metadata
+        if: github.ref == 'refs/heads/dev/v10.5.108-dialog-hwnd'
+        shell: pwsh
+        run: |
+          python tools\sync_version.py 10.5.108
+          python tools\sync_version.py 10.5.108 --check
+
       - name: Install Python dependencies
         shell: pwsh
         run: |
