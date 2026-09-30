@@ -62,6 +62,49 @@ def test_tk_owns_alert_confirm_prompt_and_beforeunload_controls():
     assert "'Stay'" in FEATURES
 
 
+def test_page_dialog_modal_fastlane_stops_chromium_background_input():
+    assert "_javascript_dialog_modal_active" in inspect.getsource(
+        main.BrowserApp._chromium_input_surface_active
+    )
+    assert "_javascript_dialog_modal_active" in inspect.getsource(
+        main.BrowserApp._poll_dwm_keyboard
+    )
+    assert "_javascript_dialog_modal_active" in inspect.getsource(
+        main.BrowserApp._schedule_dwm_pointer_bridge
+    )
+    assert "_javascript_dialog_modal_active" in inspect.getsource(
+        main.BrowserApp._on_root_chromium_key
+    )
+    assert "_javascript_dialog_modal_active" in inspect.getsource(
+        main.BrowserApp._poll_chromium_cursor_probe
+    )
+
+
+def test_page_dialog_modal_fastlane_pauses_periodic_browser_polls():
+    page_tick = inspect.getsource(main.BrowserApp._page_state_tick)
+    zoom_tick = inspect.getsource(main.BrowserApp._zoom_watchdog_tick)
+    page_one = inspect.getsource(main.BrowserApp._poll_one_tab_state)
+    assert "_javascript_dialog_modal_active" in page_tick
+    assert "root.after(600, self._page_state_tick)" in page_tick
+    assert "_javascript_dialog_modal_active" in zoom_tick
+    assert "1200, self._zoom_watchdog_tick" in zoom_tick
+    assert "_javascript_dialog_modal_active" in page_one
+    assert "root.after(250, finish)" in page_one
+
+
+def test_page_dialog_sets_and_clears_modal_fastlane_around_cdp_answer():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    enter_at = block.index("self._javascript_dialog_modal_active = True")
+    hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
+    answer_at = block.index("future.result()")
+    clear_at = block.index("self._javascript_dialog_modal_active = False")
+    assert enter_at < hide_at < answer_at < clear_at
+    assert "_schedule_dwm_pointer_bridge(delay=40)" in block
+
+
 def test_page_dialog_uses_content_overlay_not_native_toplevel():
     block = FEATURES[
         FEATURES.index("def _show_native_javascript_dialog"):
@@ -72,6 +115,7 @@ def test_page_dialog_uses_content_overlay_not_native_toplevel():
     assert "overlay.place(x=0, y=0, relwidth=1, relheight=1)" in block
     assert "card.place(relx=0.5, rely=0.5, anchor='center')" in block
     assert "_javascript_dialog_last_mode = 'content-overlay'" in block
+    assert "self._javascript_dialog_modal_active = True" in block
 
     assert "tk.Toplevel" not in block
     assert "_new_animated_toplevel" not in block

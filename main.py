@@ -2430,6 +2430,9 @@ class BrowserApp(BrowserFeatures):
         self._dwm_keyboard_poll_last = None
         self._dwm_keyboard_poll_error = None
         self._dwm_keyboard_poll_foreground = False
+        # Page-dialog modal fast lane. While true, the Tk overlay exclusively
+        # owns interaction and Chromium background input/watchdogs back off.
+        self._javascript_dialog_modal_active = False
         self._dwm_user32 = None
         # v6.1: keep the raw DWM destination hidden until Chromium has a
         # verified frame, and coalesce move/resize traffic while the user drags
@@ -5227,6 +5230,9 @@ class BrowserApp(BrowserFeatures):
         )
 
         def finish():
+            if getattr(self, "_javascript_dialog_modal_active", False):
+                self.root.after(250, finish)
+                return
             if not future.done():
                 self.root.after(35, finish)
                 return
@@ -5312,6 +5318,12 @@ class BrowserApp(BrowserFeatures):
 
     def _page_state_tick(self):
         self._page_state_after_id = None
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            try:
+                self._page_state_after_id = self.root.after(600, self._page_state_tick)
+            except Exception:
+                self._page_state_after_id = None
+            return
         if getattr(self, "_window_drag_active", False):
             try:
                 self._page_state_after_id = self.root.after(250, self._page_state_tick)
@@ -6545,7 +6557,9 @@ class BrowserApp(BrowserFeatures):
 
     def _schedule_dwm_keyboard_poll(self, delay=0):
         """Start the safe foreground-only native keyboard fallback."""
-        if os.name != "nt" or not (self._embedded_mode and self._chromium_dwm_mode):
+        if (getattr(self, "_javascript_dialog_modal_active", False)
+                or os.name != "nt"
+                or not (self._embedded_mode and self._chromium_dwm_mode)):
             return False
         self._dwm_keyboard_poll_active = True
         if self._dwm_keyboard_poll_after_id is None:
@@ -6700,7 +6714,8 @@ class BrowserApp(BrowserFeatures):
     def _poll_dwm_keyboard(self):
         """Poll physical keys only while Tekzite's DWM webpage owns input."""
         self._dwm_keyboard_poll_after_id = None
-        if not (os.name == "nt" and self._embedded_mode and self._chromium_dwm_mode
+        if not (not getattr(self, "_javascript_dialog_modal_active", False)
+                and os.name == "nt" and self._embedded_mode and self._chromium_dwm_mode
                 and self._dwm_surface_ready and self._chromium_page_keyboard_active
                 and not self._address_focus_active):
             self._dwm_keyboard_poll_active = False
@@ -8007,6 +8022,8 @@ class BrowserApp(BrowserFeatures):
         )
 
     def _chromium_input_surface_active(self):
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            return False
         return bool(self._chromium_software_mode or self._chromium_dwm_mode)
 
     def _dwm_local_to_chromium_xy(self, x, y):
@@ -8269,7 +8286,9 @@ class BrowserApp(BrowserFeatures):
 
     def _schedule_dwm_pointer_bridge(self, delay=8):
         """Arm the Windows pointer fallback for the visible DWM destination."""
-        if os.name != "nt" or not (self._embedded_mode and self._chromium_dwm_mode and self._dwm_surface_ready):
+        if (getattr(self, "_javascript_dialog_modal_active", False)
+                or os.name != "nt"
+                or not (self._embedded_mode and self._chromium_dwm_mode and self._dwm_surface_ready)):
             return False
         if self._dwm_pointer_after_id is not None:
             return True
@@ -8419,7 +8438,9 @@ class BrowserApp(BrowserFeatures):
         return future
 
     def _poll_chromium_input_refresh(self, future, generation):
-        if generation != self._chromium_frame_generation or not self._chromium_software_mode:
+        if (getattr(self, "_javascript_dialog_modal_active", False)
+                or generation != self._chromium_frame_generation
+                or not self._chromium_software_mode):
             return
         if future is not None and not future.done():
             self.root.after(4, self._poll_chromium_input_refresh, future, generation)
@@ -8570,6 +8591,9 @@ class BrowserApp(BrowserFeatures):
         self.root.after(4, self._poll_chromium_cursor_probe)
 
     def _poll_chromium_cursor_probe(self):
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            self._chromium_cursor_future = None
+            return
         future = self._chromium_cursor_future
         if future is None:
             return
@@ -8709,6 +8733,8 @@ class BrowserApp(BrowserFeatures):
         DWM host. When the last pointer click belonged to the page, keep routing
         keys to Chromium unless Tekzite's address bar is actively editing.
         """
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            return None
         if not (self._chromium_dwm_mode and self._chromium_page_keyboard_active):
             return None
         if getattr(self, "_dwm_keyboard_poll_active", False):
@@ -9058,6 +9084,14 @@ class BrowserApp(BrowserFeatures):
 
     def _poll_embedded_pointer_focus(self):
         self._embedded_focus_watch_after_id = None
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            try:
+                self._embedded_focus_watch_after_id = self.root.after(
+                    250, self._poll_embedded_pointer_focus
+                )
+            except Exception:
+                self._embedded_focus_watch_after_id = None
+            return
         pressed = False
         try:
             if os.name == "nt" and self._embedded_mode and not self._chromium_dwm_mode and self.edge_host.winfo_ismapped():
@@ -11480,6 +11514,14 @@ class BrowserApp(BrowserFeatures):
     def _zoom_watchdog_tick(self):
         """Backup verifier for Chromium-native zoom with adaptive idle cadence."""
         self._zoom_watchdog_after_id = None
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            try:
+                self._zoom_watchdog_after_id = self.root.after(
+                    1200, self._zoom_watchdog_tick
+                )
+            except Exception:
+                self._zoom_watchdog_after_id = None
+            return
         if getattr(self, "_window_drag_active", False):
             try:
                 self._zoom_watchdog_after_id = self.root.after(300, self._zoom_watchdog_tick)
@@ -13708,6 +13750,7 @@ class BrowserApp(BrowserFeatures):
             f"dwm_keyboard_poll_chars: {getattr(self, '_dwm_keyboard_poll_chars', 0)}",
             f"dwm_keyboard_poll_last: {getattr(self, '_dwm_keyboard_poll_last', None)}",
             f"dwm_keyboard_poll_error: {getattr(self, '_dwm_keyboard_poll_error', None)}",
+            f"javascript_dialog_modal_active: {getattr(self, '_javascript_dialog_modal_active', False)}",
             f"javascript_dialog_last_mode: {getattr(self, '_javascript_dialog_last_mode', None)}",
             f"javascript_dialog_last_show_ms: {getattr(self, '_javascript_dialog_last_show_ms', None)}",
         ]))

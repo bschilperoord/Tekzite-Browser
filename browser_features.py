@@ -1141,7 +1141,7 @@ class BrowserFeatures:
         if win is not None:
             try:
                 if win.winfo_exists():
-                    self._schedule_javascript_dialog_poll(120)
+                    self._schedule_javascript_dialog_poll(500)
                     return
             except Exception:
                 pass
@@ -1222,6 +1222,7 @@ class BrowserFeatures:
 
         started = time.perf_counter()
         state = {'done': False, 'presentation_restored': False}
+        self._javascript_dialog_modal_active = True
 
         try:
             # Hide the mirrored Chromium page before exposing the Tk overlay.
@@ -1259,6 +1260,14 @@ class BrowserFeatures:
             state['presentation_restored'] = True
             try:
                 self._set_dwm_page_dialog_suspended(False)
+            except Exception:
+                pass
+            self._javascript_dialog_modal_active = False
+            try:
+                if self._chromium_dwm_mode and self._dwm_surface_ready:
+                    self._schedule_dwm_pointer_bridge(delay=40)
+                    if getattr(self, '_chromium_page_keyboard_active', False):
+                        self._schedule_dwm_keyboard_poll(60)
             except Exception:
                 pass
 
@@ -1466,6 +1475,9 @@ class BrowserFeatures:
     def _permission_prompt_tick(self):
         self._permission_prompt_after_id = None
         if self._closing:
+            return
+        if getattr(self, '_javascript_dialog_modal_active', False):
+            self._schedule_permission_prompt_poll(700)
             return
         prompt = getattr(self, '_permission_prompt_window', None)
         if prompt is not None:
