@@ -990,7 +990,8 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 def main(argv=None):
     global LOG_LEVEL, ALLOW_BROWSER_TELEMETRY, ADBLOCK_ENABLED, ADBLOCK_POLICY
-    global TRACKER_BLOCKING, HTTPS_FIRST, PRIVACY_STATS_PATH, _PRIVACY_STATS
+    global TRACKER_BLOCKING, HTTPS_FIRST, HAGEZI_ENABLED, HAGEZI_LIST_PATH
+    global HAGEZI_ALLOWLIST_PATH, PRIVACY_STATS_PATH, _PRIVACY_STATS
     global INSTANCE_TOKEN, _CONNECTION_OVERVIEW_STARTED_AT, _CONNECTION_OVERVIEW_ROWS, _ACTIVE_UPSTREAMS
     # The helper accepts Chromium on loopback, but it never needs to initiate
     # a loopback connection itself. Its public upstream TCP connections remain
@@ -1022,6 +1023,9 @@ def main(argv=None):
     TRACKER_BLOCKING = not bool(args.disable_tracker_blocking)
     HTTPS_FIRST = not bool(args.disable_https_first)
     ADBLOCK_POLICY = args.adblock_policy
+    HAGEZI_ENABLED = not bool(args.disable_hagezi)
+    HAGEZI_LIST_PATH = args.hagezi_list
+    HAGEZI_ALLOWLIST_PATH = args.hagezi_allowlist
     PRIVACY_STATS_PATH = args.privacy_stats
     INSTANCE_TOKEN = str(args.instance_token or "")
     _CONNECTION_OVERVIEW_STARTED_AT = time.time()
