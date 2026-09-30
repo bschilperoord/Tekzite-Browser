@@ -1153,7 +1153,20 @@ class BrowserFeatures:
         tab = self._active_tab() or {}
         target_id = str(tab.get('chromium_target_id') or '')
         if not target_id:
-            self._schedule_javascript_dialog_poll(350)
+            # First-page JavaScript dialogs can block Chromium before the
+            # navigation future has committed its target id into the Tk tab.
+            # The engine already knows that target, so use its in-memory hint
+            # instead of waiting for navigation completion and deadlocking the
+            # very dialog that needs to unblock it.
+            try:
+                target_id = str(
+                    features.net.get_embedded_chromium_javascript_dialog_target_hint()
+                    or ''
+                )
+            except Exception:
+                target_id = ''
+        if not target_id:
+            self._schedule_javascript_dialog_poll(70)
             return
 
         self._javascript_dialog_poll_busy = True
