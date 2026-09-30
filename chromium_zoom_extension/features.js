@@ -19,6 +19,11 @@ async function tekziteFeature(action, payload) {
     await chrome.declarativeNetRequest.updateEnabledRulesets({enableRulesetIds, disableRulesetIds});
     return true;
   }
+  if (action === "privacyStats") {
+    if (typeof globalThis.tekziteGetPrivacyCounters !== "function")
+      return {ads_blocked: 0, trackers_blocked: 0};
+    return await globalThis.tekziteGetPrivacyCounters();
+  }
   if (action === "downloads") {
     return await chrome.downloads.search({orderBy: ["-startTime"], limit: 200});
   }
