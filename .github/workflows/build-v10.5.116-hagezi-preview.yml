@@ -93,19 +93,15 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $exeName = "Tekzite-Browser-v10.5.116-HaGeZi-Preview-Windows-x64.exe"
-          $zipName = "Tekzite-Browser-v10.5.116-HaGeZi-Preview-Windows-x64.zip"
           Copy-Item ".\dist\TekziteBrowser.exe" ".\$exeName" -Force
-          Compress-Archive -Path ".\$exeName" -DestinationPath ".\$zipName" -CompressionLevel Optimal -Force
           $exeHash = (Get-FileHash ".\$exeName" -Algorithm SHA256).Hash.ToLowerInvariant()
-          $zipHash = (Get-FileHash ".\$zipName" -Algorithm SHA256).Hash.ToLowerInvariant()
-          @("$exeHash  $exeName", "$zipHash  $zipName") | Set-Content ".\SHA256SUMS-HaGeZi-Preview.txt" -Encoding ascii
+          @("$exeHash  $exeName") | Set-Content ".\SHA256SUMS-HaGeZi-Preview.txt" -Encoding ascii
       - name: Upload Windows preview
         uses: actions/upload-artifact@v4
         with:
           name: Tekzite-Browser-v10.5.116-HaGeZi-Preview-Windows-x64
           path: |
             Tekzite-Browser-v10.5.116-HaGeZi-Preview-Windows-x64.exe
-            Tekzite-Browser-v10.5.116-HaGeZi-Preview-Windows-x64.zip
             SHA256SUMS-HaGeZi-Preview.txt
           if-no-files-found: error
           retention-days: 14
