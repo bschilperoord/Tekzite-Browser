@@ -171,10 +171,14 @@ def _download(source_url, headers, timeout):
         },
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=float(timeout)) as response:
+    try:
+        response = urllib.request.urlopen(request, timeout=float(timeout))
+    except urllib.error.HTTPError as exc:
+        if int(getattr(exc, "code", 0) or 0) == 304:
+            return 304, b"", exc.headers
+        raise
+    with response:
         code = int(getattr(response, "status", 200) or 200)
-        if code == 304:
-            return code, b"", response.headers
         length = response.headers.get("Content-Length")
         if length and int(length) > MAX_DOWNLOAD_BYTES:
             raise ValueError("HaGeZi response is larger than the safety limit")
