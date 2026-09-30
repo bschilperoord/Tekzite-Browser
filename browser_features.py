@@ -249,6 +249,8 @@ class BrowserFeatures:
         self._network_health_after_id = None
         self._network_health_future = None
         self._network_health_failures = 0
+        self._privacy_extension_stats = {'ads_blocked': 0, 'trackers_blocked': 0}
+        self._privacy_extension_stats_future = None
         self._hagezi_update_future = None
         self._hagezi_update_after_id = None
         self._hagezi_force_pending = False
@@ -448,6 +450,67 @@ class BrowserFeatures:
                 self.status_var.set('Network engine recovery pending…')
 
         self._schedule_network_health_watch(2500 if self._network_health_failures else 4000)
+
+    def _combined_privacy_stats(self):
+        try:
+            proxy = dict(features.net.privacy_stats() or {})
+        except Exception:
+            proxy = {}
+        extension = dict(getattr(self, '_privacy_extension_stats', {}) or {})
+        for key in ('ads_blocked', 'trackers_blocked'):
+            proxy[key] = int(proxy.get(key, 0) or 0) + int(extension.get(key, 0) or 0)
+        proxy.setdefault('telemetry_blocked', 0)
+        proxy.setdefault('hagezi_blocked', 0)
+        proxy.setdefault('https_upgrades', 0)
+        return proxy
+
+    def _refresh_privacy_extension_stats_async(self, callback=None, parent=None):
+        if self._closing:
+            return False
+        future = getattr(self, '_privacy_extension_stats_future', None)
+        if future is None:
+            try:
+                self._privacy_extension_stats_future = self._executor.submit(
+                    features.privacy_stats
+                )
+                future = self._privacy_extension_stats_future
+            except Exception:
+                return False
+
+        def finish():
+            if self._closing or (parent is not None and not parent.winfo_exists()):
+                return
+            current = getattr(self, '_privacy_extension_stats_future', None)
+            if current is None:
+                return
+            if not current.done():
+                try:
+                    self.root.after(60, finish)
+                except Exception:
+                    pass
+                return
+            self._privacy_extension_stats_future = None
+            try:
+                value = current.result() or {}
+                self._privacy_extension_stats = {
+                    'ads_blocked': max(0, int(value.get('ads_blocked', 0) or 0)),
+                    'trackers_blocked': max(0, int(value.get('trackers_blocked', 0) or 0)),
+                }
+            except Exception:
+                # Extension counters are supplemental. Proxy and HaGeZi stats
+                # remain valid if the extension worker is unavailable.
+                pass
+            if callable(callback):
+                try:
+                    callback()
+                except Exception:
+                    pass
+
+        try:
+            self.root.after(0, finish)
+            return True
+        except Exception:
+            return False
 
     def _checkpoint_features(self):
         if self._closing or getattr(self, '_private_mode', False):
