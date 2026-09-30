@@ -8,7 +8,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert 'BROWSER_VERSION = "10.5.116"' in MAIN
+    assert 'BROWSER_VERSION = "10.5.118"' in MAIN
 
 
 def test_dwm_input_metrics_prefer_visible_pixel_contract(monkeypatch):

@@ -90,10 +90,10 @@ UI_COLOR_DEFAULTS = {
     "success": "#4ad594",
 }
 
-TOOLBAR_ITEM_IDS = ("back", "forward", "reload", "home", "address", "downloads", "menu")
+TOOLBAR_ITEM_IDS = ("back", "forward", "reload", "home", "address", "downloads", "extensions", "menu")
 TOOLBAR_ITEM_NAMES = {
     "back": "Back", "forward": "Forward", "reload": "Reload / Stop",
-    "home": "Home", "address": "Address bar", "downloads": "Downloads", "menu": "Main menu",
+    "home": "Home", "address": "Address bar", "downloads": "Downloads", "extensions": "Extensions", "menu": "Main menu",
 }
 
 CUSTOMIZATION_PRESETS = {
@@ -843,7 +843,11 @@ def _normalized_extension_entries(value):
         if key in seen:
             continue
         seen.add(key)
-        result.append({"path": normalized, "enabled": bool(item.get("enabled", True))})
+        result.append({
+            "path": normalized,
+            "enabled": bool(item.get("enabled", True)),
+            "pinned": bool(item.get("pinned", True)),
+        })
     return result
 
 
@@ -932,7 +936,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.116"
+BROWSER_VERSION = "10.5.118"
 
 
 
@@ -2773,11 +2777,20 @@ class BrowserApp(BrowserFeatures):
         self.address.bind("<Control-Shift-v>", lambda event: self._paste_and_go())
 
         self.downloads_button = chrome_button(self.toolbar, self._toolbar_text("downloads"), self._show_downloads, width=None)
+        self.extensions_toolbar_frame = tk.Frame(self.toolbar, bg=self.ui["chrome"], bd=0, highlightthickness=0)
+        self._extension_toolbar_photos = {}
+        self._extension_toolbar_buttons = {}
+        self.extensions_manage_button = chrome_button(
+            self.extensions_toolbar_frame, self._toolbar_text("extensions"), self._show_extension_manager, width=None
+        )
+        self.extensions_manage_button.pack(side="left")
         self.main_menu_button = chrome_button(self.toolbar, self._toolbar_text("menu"), self._show_main_menu, width=None)
         self._toolbar_widgets = {
             "back": self.back_button, "forward": self.forward_button, "reload": self.reload_button, "home": self.home_button,
-            "address": self.address_shell, "downloads": self.downloads_button, "menu": self.main_menu_button,
+            "address": self.address_shell, "downloads": self.downloads_button, "extensions": self.extensions_toolbar_frame,
+            "menu": self.main_menu_button,
         }
+        self._refresh_extension_toolbar()
         self._apply_toolbar_layout()
 
         # Debug actions remain available from Tools, but they no longer occupy
@@ -7656,13 +7669,26 @@ class BrowserApp(BrowserFeatures):
                 )
 
                 url = str(item.get("url") or "")
+                def release_blank_tab_omnibox():
+                    # Blank/new tabs intentionally focus the omnibox so typing
+                    # can begin immediately. A site-card click is a different
+                    # navigation gesture: relinquish that focus before changing
+                    # url_var, otherwise the URL update reopens suggestions.
+                    self._release_address_focus_for_navigation()
+                    try:
+                        self.canvas.focus_set()
+                    except Exception:
+                        pass
+
                 def open_current(_event=None, target=url):
                     if target and self._empty_tab_is_active():
+                        release_blank_tab_omnibox()
                         self.navigate_to(target, reuse_existing=False)
                     return "break"
 
                 def open_new(_event=None, target=url):
                     if target:
+                        release_blank_tab_omnibox()
                         self._new_tab(url=target, switch=True, navigate=True)
                     return "break"
 
@@ -11727,8 +11753,8 @@ class BrowserApp(BrowserFeatures):
             return max(6, int(base))
 
     def _toolbar_text(self, item, *, loading=False):
-        icons = {"back": "‹", "forward": "›", "reload": "×" if loading else "↻", "home": "⌂", "downloads": "⇩", "menu": "⋮"}
-        words = {"back": "Back", "forward": "Forward", "reload": "Stop" if loading else "Reload", "home": "Home", "downloads": "Downloads", "menu": "Menu"}
+        icons = {"back": "‹", "forward": "›", "reload": "×" if loading else "↻", "home": "⌂", "downloads": "⇩", "extensions": "🧩", "menu": "⋮"}
+        words = {"back": "Back", "forward": "Forward", "reload": "Stop" if loading else "Reload", "home": "Home", "downloads": "Downloads", "extensions": "Extensions", "menu": "Menu"}
         mode = str(self._custom("toolbar_label_style", "icons"))
         if mode == "text":
             return words.get(item, item.title())

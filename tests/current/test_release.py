@@ -10,7 +10,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_current_version():
-    assert main.BROWSER_VERSION == "10.5.116"
+    assert main.BROWSER_VERSION == "10.5.118"
 
 
 def test_zoom_normalization():
@@ -48,6 +48,7 @@ def test_native_zoom_bridge_is_minimally_privileged():
         # Required only to count rules matched by Tekzite's own unpacked DNR
         # rulesets so Privacy Shield can report real ad/tracker block totals.
         "declarativeNetRequestFeedback",
+        "management",
     }
     assert set(manifest.get("host_permissions", [])) == {"http://*/*", "https://*/*"}
     assert manifest.get("content_scripts")

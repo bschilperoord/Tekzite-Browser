@@ -85,6 +85,32 @@ def configure(session=None):
     return True
 
 
+def extension_inventory(session=None):
+    value = call('extensionInventory', {}, session)
+    if not isinstance(value, list):
+        return []
+    rows = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        extension_id = str(item.get('id') or '').strip()
+        if not extension_id:
+            continue
+        rows.append({
+            'id': extension_id,
+            'name': str(item.get('name') or ''),
+            'shortName': str(item.get('shortName') or item.get('name') or ''),
+            'version': str(item.get('version') or ''),
+            'enabled': bool(item.get('enabled', True)),
+            'installType': str(item.get('installType') or ''),
+            'optionsUrl': str(item.get('optionsUrl') or ''),
+            'homepageUrl': str(item.get('homepageUrl') or ''),
+            'mayDisable': bool(item.get('mayDisable', True)),
+            'icons': list(item.get('icons') or []),
+        })
+    return rows
+
+
 def privacy_stats(session=None):
     value = call('privacyStats', {}, session)
     if not isinstance(value, dict):
