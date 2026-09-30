@@ -201,3 +201,68 @@ def test_privacy_shield_merges_extension_proxy_and_hagezi_counters():
     assert "callback=finished" in main
     assert "hagezi_last_error:" in main
     assert "hagezi_updating:" in main
+
+
+
+def test_live_helper_privacy_stats_endpoint_reads_ram(monkeypatch):
+    token = "0123456789abcdef0123456789abcdef"
+    monkeypatch.setattr(tekzite_network, "INSTANCE_TOKEN", token)
+    monkeypatch.setattr(
+        tekzite_network,
+        "_PRIVACY_STATS",
+        {
+            "started_at": 123.0,
+            "telemetry_blocked": 2,
+            "trackers_blocked": 3,
+            "ads_blocked": 4,
+            "hagezi_blocked": 5,
+            "https_upgrades": 6,
+        },
+    )
+    monkeypatch.setattr(tekzite_network, "_HAGEZI_DOMAINS", frozenset({"one.test", "two.test"}))
+    monkeypatch.setattr(tekzite_network, "_HAGEZI_ALLOWLIST", frozenset({"safe.test"}))
+    monkeypatch.setattr(tekzite_network, "_refresh_hagezi_sets", lambda: None)
+
+    class Client:
+        def __init__(self):
+            self.data = b""
+        def sendall(self, value):
+            self.data += value
+
+    client = Client()
+    handled = tekzite_network._serve_internal_privacy_stats(
+        client,
+        "GET",
+        "http://tekzite.internal/__privacy_stats",
+        [("X-Tekzite-Instance-Token", token)],
+    )
+    assert handled is True
+    head, body = client.data.split(b"\r\n\r\n", 1)
+    assert head.startswith(b"HTTP/1.1 200")
+    payload = json.loads(body.decode("utf-8"))
+    assert payload["ads_blocked"] == 4
+    assert payload["trackers_blocked"] == 3
+    assert payload["hagezi_blocked"] == 5
+    assert payload["hagezi_domains_loaded"] == 2
+    assert payload["hagezi_allowlist_loaded"] == 1
+
+
+def test_extension_privacy_stats_heals_from_chromium_matched_rules():
+    root = Path(__file__).resolve().parents[2]
+    features = (root / "chromium_zoom_extension" / "features.js").read_text(encoding="utf-8")
+    assert "getMatchedRules()" in features
+    assert "rulesMatchedInfo" in features
+    assert 'ruleset === "ads"' in features
+    assert 'ruleset === "trackers"' in features
+    assert "Math.max" in features
+
+
+def test_privacy_shield_exposes_live_counter_source_and_hagezi_runtime():
+    root = Path(__file__).resolve().parents[2]
+    main = (root / "main.py").read_text(encoding="utf-8")
+    net = (root / "engine" / "net.py").read_text(encoding="utf-8")
+    assert "Counter source" in main
+    assert "HaGeZi runtime" in main
+    assert "Total blocked" in main
+    assert "__privacy_stats" in net
+    assert '"source": "live-helper"' in net
