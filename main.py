@@ -37,6 +37,7 @@ from engine.net import (
     get_embedded_chromium_page_state, find_embedded_chromium_text,
     set_embedded_chromium_presentation, set_embedded_chromium_zoom, check_embedded_chromium_zoom,
     validate_and_recover_embedded_chromium_frame, record_embedded_surface_probe, record_embedded_native_recovery, sync_embedded_chromium_native_geometry,
+    wait_for_embedded_chromium_native_frame,
     warm_embedded_chromium_io_channels, stop_embedded_chromium_loading,
     request_embedded_chromium_dwm_recrop, request_embedded_chromium_dwm_reregister, detach_embedded_chromium_dwm_thumbnail, network_engine_debug, privacy_stats,
     cleanup_abandoned_temporary_profiles, remove_profile_tree,
@@ -936,7 +937,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.118"
+BROWSER_VERSION = "10.5.119"
 
 
 
@@ -9608,6 +9609,74 @@ class BrowserApp(BrowserFeatures):
             self._show_chromium_software_surface(target_id)
         return True
 
+    def _defer_native_dwm_reveal(self, generation, target_id, url):
+        """Keep the raw DWM destination hidden until a real Chromium frame exists."""
+        tab = self._active_tab()
+        if tab is None or tab.get("chromium_target_id") != target_id:
+            return False
+        self._show_native_canvas()
+        self.status_var.set(f"Waiting for Chromium frame | {url}…")
+        try:
+            future = self._executor.submit(
+                wait_for_embedded_chromium_native_frame, target_id, 5.0
+            )
+        except Exception:
+            tab["presentation"] = "software"
+            tab["software_fallback_reason"] = "visible-surface"
+            self._show_chromium_software_surface(target_id)
+            return False
+
+        def finish():
+            if generation != self._navigation_generation:
+                return
+            current = self._active_tab()
+            if current is None or current.get("chromium_target_id") != target_id:
+                return
+            if not future.done():
+                try:
+                    self.root.after(20, finish)
+                except Exception:
+                    pass
+                return
+            try:
+                ready = bool(future.result())
+            except Exception:
+                ready = False
+            if ready:
+                current["presentation"] = "native"
+                current.pop("software_fallback_reason", None)
+                current.pop("native_recovery_viewport", None)
+                self._show_embedded_host()
+                for delay_index, delay_ms in enumerate((60, 180, 420, 850)):
+                    self.root.after(
+                        delay_ms, self._refresh_dwm_crop_after_navigation,
+                        generation, delay_index,
+                    )
+                self.root.after(
+                    260, self._probe_visible_embedded_surface,
+                    generation, target_id, True,
+                )
+                self.status_var.set(f"Embedded Chromium compatibility | {url}")
+                return
+
+            # Never reveal an unproven native destination. The software surface
+            # remains interactive and can later hand back to native presentation
+            # through the existing visible-surface recovery path.
+            current["presentation"] = "software"
+            current["software_fallback_reason"] = "visible-surface"
+            current["native_recovery_viewport"] = (
+                max(1, int(self.content_frame.winfo_width())),
+                max(1, int(self.content_frame.winfo_height())),
+            )
+            self._show_chromium_software_surface(target_id)
+            self.status_var.set("Native Chromium frame delayed; using light surface")
+
+        try:
+            self.root.after(1, finish)
+        except Exception:
+            finish()
+        return True
+
     def _poll_embedded_navigation(self, generation, future, url, add_history,
                                   owner_tab_id=None, owner_page_epoch=0):
         """Finish one Chromium navigation without letting it escape its tab.
@@ -9713,35 +9782,44 @@ class BrowserApp(BrowserFeatures):
             tab["presentation"] = "software"
             self._show_chromium_software_surface(target_id)
         else:
-            tab["presentation"] = "native"
-            tab.pop("software_fallback_reason", None)
-            tab.pop("native_recovery_viewport", None)
-            if (hot_native_reuse and self._embedded_mode
-                    and self._chromium_dwm_mode and self._dwm_host):
-                self._set_chromium_presentation_fast("native", target_id)
-                self._chromium_frame_target_id = target_id
-                self._chromium_software_mode = False
-                self._dwm_surface_ready = True
-                self._dwm_reveal_pending = False
-                self._cancel_dwm_host_reveal()
-                self._sync_dwm_host_geometry(show=True, transparent=False)
-                self._schedule_dwm_geometry_sync(resize=True, delay=1)
+            native_frame_ready = bool(
+                hot_native_reuse
+                or session.get("native_frame_gate_ready")
+                or session.get("first_frame_ready")
+            )
+            if not native_frame_ready:
+                tab["presentation"] = "native-wait"
+                self._defer_native_dwm_reveal(generation, target_id, url)
             else:
-                self._show_embedded_host()
-            recrop_delays = (260, 700, 1250) if hot_native_reuse else (60, 180, 420, 850)
-            for delay_index, delay_ms in enumerate(recrop_delays):
-                self.root.after(
-                    delay_ms, self._refresh_dwm_crop_after_navigation,
-                    generation, delay_index,
-                )
-            if not hot_native_reuse:
-                visible_probe_expected = bool(
-                    session.get("attached_frame_visual")
-                    or int(session.get("attached_frame_text_len") or 0) >= 8
-                    or int(session.get("first_frame_text_len") or 0) >= 8
-                )
-                self.root.after(260, self._probe_visible_embedded_surface,
-                                generation, target_id, visible_probe_expected)
+                tab["presentation"] = "native"
+                tab.pop("software_fallback_reason", None)
+                tab.pop("native_recovery_viewport", None)
+                if (hot_native_reuse and self._embedded_mode
+                        and self._chromium_dwm_mode and self._dwm_host):
+                    self._set_chromium_presentation_fast("native", target_id)
+                    self._chromium_frame_target_id = target_id
+                    self._chromium_software_mode = False
+                    self._dwm_surface_ready = True
+                    self._dwm_reveal_pending = False
+                    self._cancel_dwm_host_reveal()
+                    self._sync_dwm_host_geometry(show=True, transparent=False)
+                    self._schedule_dwm_geometry_sync(resize=True, delay=1)
+                else:
+                    self._show_embedded_host()
+                recrop_delays = (260, 700, 1250) if hot_native_reuse else (60, 180, 420, 850)
+                for delay_index, delay_ms in enumerate(recrop_delays):
+                    self.root.after(
+                        delay_ms, self._refresh_dwm_crop_after_navigation,
+                        generation, delay_index,
+                    )
+                if not hot_native_reuse:
+                    visible_probe_expected = bool(
+                        session.get("attached_frame_visual")
+                        or int(session.get("attached_frame_text_len") or 0) >= 8
+                        or int(session.get("first_frame_text_len") or 0) >= 8
+                    )
+                    self.root.after(260, self._probe_visible_embedded_surface,
+                                    generation, target_id, visible_probe_expected)
         self.root.after(1000, lambda current=session: self._start_optional_services(current))
 
         self.history = list(tab.get("history") or [])
@@ -9750,7 +9828,8 @@ class BrowserApp(BrowserFeatures):
         self.url_var.set(url)
         self._current_document = None
         self.js_runtime = None
-        self.status_var.set(f"Embedded Chromium compatibility | {url}")
+        if tab.get("presentation") != "native-wait":
+            self.status_var.set(f"Embedded Chromium compatibility | {url}")
 
     def _navigate_embedded(self, url, add_history, generation,
                            owner_tab_id=None, owner_page_epoch=0):

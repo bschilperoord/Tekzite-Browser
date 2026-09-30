@@ -7278,6 +7278,33 @@ def _wait_for_attached_first_frame(session, timeout: float = 2.0):
     session["attached_frame_attempts"] = attempts
     return False
 
+
+def wait_for_embedded_chromium_native_frame(target_id: str = None, timeout: float = 5.0):
+    """Wait for a paintable native Chromium frame without exposing the DWM host.
+
+    Used after the normal hidden first-frame gate times out. The caller keeps
+    Tekzite's native canvas visible while this bounded retry runs off the UI
+    thread, so the raw DWM destination can never become the user's fallback.
+    """
+    session = _CHROMIUM_SESSION
+    if not session or session.get("presentation_mode") != "native":
+        return False
+    target_id = str(target_id or session.get("target_id") or "")
+    if not target_id or target_id != str(session.get("target_id") or ""):
+        return False
+    try:
+        size = session.get("embedded_size") or session.get("embedded_parent_client_size") or (1, 1)
+        width = max(1, int(size[0] or 1))
+        height = max(1, int(size[1] or 1))
+        session["dwm_force_full_recrop"] = True
+        resize_embedded_chromium(width, height)
+    except Exception as exc:
+        session["deferred_frame_retry_resize_error"] = type(exc).__name__
+    ready = bool(_wait_for_attached_first_frame(session, timeout=max(0.5, float(timeout))))
+    session["deferred_native_frame_ready"] = ready
+    return ready
+
+
 def stop_embedded_chromium_loading(target_id: str = None, timeout: float = 2.0):
     """Stop the active network/document load for one Tekzite Chromium tab."""
     session = _start_persistent_chromium_session(timeout=min(float(timeout), 2.0))
@@ -9856,6 +9883,8 @@ def open_embedded_chromium(parent_hwnd: int, width: int, height: int, url: str, 
         else:
             session["attached_frame_retry_attempted"] = False
             session["attached_frame_retry_succeeded"] = True
+        session["native_frame_gate_ready"] = bool(attached_ready)
+        session["native_frame_gate_deferred"] = not bool(attached_ready)
         if attached_ready:
             session["first_frame_ready"] = True
             session["first_frame_committed"] = True

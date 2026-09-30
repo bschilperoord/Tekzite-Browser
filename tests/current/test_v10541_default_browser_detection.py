@@ -5,7 +5,7 @@ import main
 
 
 def test_release_version_is_10541():
-    assert main.BROWSER_VERSION == "10.5.118"
+    assert main.BROWSER_VERSION == "10.5.119"
 
 
 class _Key:
