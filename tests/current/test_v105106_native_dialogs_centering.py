@@ -332,6 +332,46 @@ class _DirectPageDialogWs:
         return self.responses.pop(0)
 
 
+def test_dialog_target_hint_breaks_first_navigation_target_commit_cycle(monkeypatch):
+    target_id = "cold-start-target"
+    session = {
+        "target_id": target_id,
+        "javascript_dialog_browser_channels": {},
+        "page_cdp_channels": {},
+    }
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", session)
+    assert net.get_embedded_chromium_javascript_dialog_target_hint() == target_id
+
+
+def test_dialog_target_hint_prefers_channel_with_pending_event(monkeypatch):
+    session = {
+        "target_id": "generic-target",
+        "javascript_dialog_browser_channels": {
+            "dialog-target": {
+                "target_id": "dialog-target",
+                "events": [{"type": "confirm"}],
+                "dialog_open": True,
+                "closed": False,
+            }
+        },
+        "page_cdp_channels": {},
+    }
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", session)
+    assert (
+        net.get_embedded_chromium_javascript_dialog_target_hint()
+        == "dialog-target"
+    )
+
+
+def test_tk_dialog_poll_uses_engine_target_before_tab_commit():
+    block = FEATURES[
+        FEATURES.index("def _javascript_dialog_tick"):
+        FEATURES.index("def _show_native_javascript_dialog")
+    ]
+    assert "get_embedded_chromium_javascript_dialog_target_hint" in block
+    assert "_schedule_javascript_dialog_poll(70)" in block
+
+
 def test_dialog_poll_uses_direct_page_fallback_when_browser_observer_is_silent(monkeypatch):
     target_id = "router-target"
     direct = {
