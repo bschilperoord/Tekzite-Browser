@@ -1,6 +1,6 @@
 # v10.5.119 - DWM first-frame reveal guard
 
-- Prevents an unproven Chromium native frame from exposing Tekzite's raw white DWM destination during navigation.
+- Prevents an unproven Chromium native frame from exposing Tekzite's raw white DWM destination during navigation, including renderer-heavy transitions such as opening YouTube.
 - Keeps the native Tekzite canvas visible when the hidden DWM first-frame gate times out, then retries frame readiness asynchronously.
 - Reveals the native DWM surface only after Chromium proves a paintable frame for the active target.
 - Falls back to Tekzite's interactive light Chromium surface when the deferred native frame still cannot be proven, instead of showing a blank white surface.
