@@ -64,6 +64,39 @@ def test_hagezi_update_is_atomic_and_last_known_good_survives_failure(tmp_path, 
     assert hagezi_privacy.list_path(tmp_path).read_text(encoding="utf-8") == original
 
 
+def test_hagezi_failed_update_retries_on_short_interval(tmp_path, monkeypatch):
+    monkeypatch.setattr(hagezi_privacy, "MIN_VALID_ENTRIES", 3)
+
+    def broken(_url, _headers, _timeout):
+        raise OSError("offline")
+
+    first = hagezi_privacy.update_if_due(
+        tmp_path, force=True, now=1000, downloader=broken
+    )
+    assert first["result"] == "error"
+    assert first["next_check_seconds"] == hagezi_privacy.RETRY_INTERVAL_SECONDS
+
+    waiting = hagezi_privacy.update_if_due(
+        tmp_path, now=1000 + 60, downloader=broken
+    )
+    assert waiting["result"] == "retry-wait"
+    assert waiting["next_check_seconds"] < hagezi_privacy.RETRY_INTERVAL_SECONDS
+
+    calls = {"count": 0}
+
+    def recovered(_url, _headers, _timeout):
+        calls["count"] += 1
+        return 200, _domain_blob(3).encode(), {}
+
+    result = hagezi_privacy.update_if_due(
+        tmp_path,
+        now=1000 + hagezi_privacy.RETRY_INTERVAL_SECONDS + 1,
+        downloader=recovered,
+    )
+    assert calls["count"] == 1
+    assert result["result"] == "updated"
+
+
 def test_hagezi_conditional_update_uses_etag(tmp_path, monkeypatch):
     monkeypatch.setattr(hagezi_privacy, "MIN_VALID_ENTRIES", 3)
 
