@@ -53,6 +53,12 @@ def test_empty_tab_panel_is_local_and_bound_to_blank_paths():
     assert "no network request is made to build this panel" in block
     assert "self.navigate_to(target, reuse_existing=False)" in block
     assert 'self._new_tab(url=target, switch=True, navigate=True)' in block
+    assert "def release_blank_tab_omnibox():" in block
+    assert "self._release_address_focus_for_navigation()" in block
+    assert "self.canvas.focus_set()" in block
+    assert block.index("release_blank_tab_omnibox()") < block.index(
+        "self.navigate_to(target, reuse_existing=False)"
+    )
 
     new_tab = MAIN[MAIN.index("def _new_tab(self"):MAIN.index("def _capture_active_tab_state")]
     assert "self._render_empty_tab_panel()" in new_tab
