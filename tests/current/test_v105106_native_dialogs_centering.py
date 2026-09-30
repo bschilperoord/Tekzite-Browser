@@ -80,6 +80,22 @@ def test_page_dialog_modal_fastlane_stops_chromium_background_input():
     )
 
 
+def test_page_dialog_modal_fastlane_defers_synchronous_zoom_settle_work():
+    zoom_apply = inspect.getsource(main.BrowserApp._run_scheduled_chromium_zoom_apply)
+    dwm_refresh = inspect.getsource(main.BrowserApp._run_scheduled_dwm_zoom_refresh)
+    resume = inspect.getsource(
+        main.BrowserApp._resume_deferred_chromium_ui_work_after_page_dialog
+    )
+
+    assert "_javascript_dialog_modal_active" in zoom_apply
+    assert "_javascript_dialog_deferred_zoom_all" in zoom_apply
+    assert "_javascript_dialog_deferred_zoom_targets" in zoom_apply
+    assert "_javascript_dialog_modal_active" in dwm_refresh
+    assert "_javascript_dialog_deferred_dwm_zoom_refresh" in dwm_refresh
+    assert "_run_scheduled_chromium_zoom_apply" in resume
+    assert "_run_scheduled_dwm_zoom_refresh" in resume
+
+
 def test_page_dialog_modal_fastlane_pauses_periodic_browser_polls():
     page_tick = inspect.getsource(main.BrowserApp._page_state_tick)
     zoom_tick = inspect.getsource(main.BrowserApp._zoom_watchdog_tick)
@@ -109,6 +125,7 @@ def test_page_dialog_sets_and_clears_modal_fastlane_around_cdp_answer():
     ]
     assert "self._javascript_dialog_modal_active = False" in restore_helper
     assert "_schedule_dwm_pointer_bridge(delay=40)" in restore_helper
+    assert "_resume_deferred_chromium_ui_work_after_page_dialog()" in restore_helper
 
 
 def test_page_dialog_uses_content_overlay_not_native_toplevel():
