@@ -100,9 +100,15 @@ def test_page_dialog_sets_and_clears_modal_fastlane_around_cdp_answer():
     enter_at = block.index("self._javascript_dialog_modal_active = True")
     hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
     answer_at = block.index("future.result()")
-    clear_at = block.index("self._javascript_dialog_modal_active = False")
-    assert enter_at < hide_at < answer_at < clear_at
-    assert "_schedule_dwm_pointer_bridge(delay=40)" in block
+    restore_call_at = block.index("restore_chromium_presentation()", answer_at)
+    assert enter_at < hide_at < answer_at < restore_call_at
+
+    restore_helper = block[
+        block.index("def restore_chromium_presentation"):
+        block.index("def cleanup_overlay")
+    ]
+    assert "self._javascript_dialog_modal_active = False" in restore_helper
+    assert "_schedule_dwm_pointer_bridge(delay=40)" in restore_helper
 
 
 def test_page_dialog_uses_content_overlay_not_native_toplevel():
