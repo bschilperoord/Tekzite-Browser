@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from pathlib import Path
 from browser_state import read_json, write_json, valid_url, session_snapshot
 from engine import features
+import hagezi_privacy
 
 
 def site_host(url):
@@ -248,6 +249,9 @@ class BrowserFeatures:
         self._network_health_after_id = None
         self._network_health_future = None
         self._network_health_failures = 0
+        self._hagezi_update_future = None
+        self._hagezi_update_after_id = None
+        self._hagezi_force_pending = False
         self._closing = False
         self._configure_feature_preferences()
 
@@ -268,6 +272,119 @@ class BrowserFeatures:
             strip_referrer=self.preferences.get('strip_referrer', True),
             https_first=self.preferences.get('https_first', True),
         )
+        try:
+            hagezi_privacy.configure_runtime(
+                self._state_directory,
+                enabled=bool(self.preferences.get('hagezi_enabled', True)),
+                allowlist=self.preferences.get('hagezi_allowlist', []),
+            )
+        except Exception:
+            # The built-in privacy rules remain available even if the local
+            # HaGeZi state directory cannot be prepared.
+            pass
+
+    def _hagezi_status_snapshot(self):
+        try:
+            return hagezi_privacy.status(self._state_directory)
+        except Exception:
+            return {
+                'name': hagezi_privacy.HAGEZI_NAME,
+                'entries': 0,
+                'available': False,
+                'last_checked': None,
+                'last_updated': None,
+                'last_error': '',
+            }
+
+    def _schedule_hagezi_update(self, delay_ms=1500, force=False):
+        if self._closing or getattr(self, '_private_mode', False):
+            return False
+        if not self.preferences.get('hagezi_enabled', True):
+            return False
+        if force:
+            self._hagezi_force_pending = True
+        try:
+            if self._hagezi_update_after_id is not None:
+                self.root.after_cancel(self._hagezi_update_after_id)
+        except Exception:
+            pass
+        try:
+            self._hagezi_update_after_id = self.root.after(
+                max(0, int(delay_ms)), self._start_hagezi_update
+            )
+            return True
+        except Exception:
+            self._hagezi_update_after_id = None
+            return False
+
+    def _start_hagezi_update(self):
+        self._hagezi_update_after_id = None
+        if self._closing or getattr(self, '_private_mode', False):
+            return
+        future = self._hagezi_update_future
+        if future is not None and not future.done():
+            return
+
+        force = bool(self._hagezi_force_pending)
+        self._hagezi_force_pending = False
+        try:
+            self._hagezi_update_future = self._executor.submit(
+                hagezi_privacy.update_if_due,
+                self._state_directory,
+                enabled=bool(self.preferences.get('hagezi_enabled', True)),
+                auto_update=bool(self.preferences.get('hagezi_auto_update', True)),
+                force=force,
+            )
+        except Exception:
+            self._hagezi_update_future = None
+            return
+        try:
+            self.root.after(80, self._poll_hagezi_update)
+        except Exception:
+            pass
+
+    def _poll_hagezi_update(self):
+        future = self._hagezi_update_future
+        if future is None or self._closing:
+            return
+        if not future.done():
+            try:
+                self.root.after(80, self._poll_hagezi_update)
+            except Exception:
+                pass
+            return
+
+        self._hagezi_update_future = None
+        try:
+            result = future.result() or {}
+        except Exception as exc:
+            result = {
+                'result': 'error',
+                'last_error': f'{type(exc).__name__}: {exc}',
+                'next_check_seconds': hagezi_privacy.RETRY_INTERVAL_SECONDS,
+            }
+
+        state = str(result.get('result') or '')
+        entries = int(result.get('entries', 0) or 0)
+        if state == 'updated':
+            self.status_var.set(f'Privacy Core: HaGeZi updated • {entries:,} domains')
+        elif state == 'error' and not result.get('available'):
+            self.status_var.set('Privacy Core: HaGeZi update failed; built-in rules remain active')
+
+        if (
+            self.preferences.get('hagezi_enabled', True)
+            and self.preferences.get('hagezi_auto_update', True)
+            and not getattr(self, '_private_mode', False)
+        ):
+            seconds = max(
+                60,
+                min(
+                    hagezi_privacy.UPDATE_INTERVAL_SECONDS,
+                    int(result.get('next_check_seconds') or hagezi_privacy.UPDATE_INTERVAL_SECONDS),
+                ),
+            )
+            self._schedule_hagezi_update(seconds * 1000)
+
 
     def _feature_startup(self, action):
         action()
@@ -277,6 +394,7 @@ class BrowserFeatures:
         self._schedule_network_health_watch(3000)
         self._schedule_permission_prompt_poll(450)
         self._schedule_javascript_dialog_poll(140)
+        self._schedule_hagezi_update(1800)
         scheduler = getattr(self, '_schedule_sleeping_tabs', None)
         if callable(scheduler):
             scheduler(15000)
