@@ -1,3 +1,10 @@
+# v10.5.115 - Reliable native JavaScript dialogs
+
+- Fixes the first native Tk JavaScript dialog sometimes failing to appear while Chromium navigation is still committing its target.
+- Lets the dialog bridge use Chromium's already-live in-memory target before the Tk tab model receives its target ID, breaking the first-navigation modal deadlock.
+- Keeps JavaScript alert, confirm, prompt and before-unload dialogs responsive by deferring synchronous Chromium zoom and DWM settle work until after the dialog is answered.
+- Retains the dual browser-target/direct-page CDP observer fallback introduced in v10.5.114.
+
 # v10.5.114 - Dual-path native JavaScript dialogs
 
 - Adds an independent direct-page CDP observer alongside the browser-level flattened Target observer for alert, confirm, prompt and before-unload dialogs.
