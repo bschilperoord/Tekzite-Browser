@@ -210,6 +210,52 @@ def _serve_internal_connection_overview(client: socket.socket, method: str, targ
     )
     return True
 
+
+def _privacy_stats_payload():
+    """Return current helper counters directly from RAM."""
+    try:
+        _refresh_hagezi_sets()
+    except Exception:
+        pass
+    with _PRIVACY_STATS_LOCK:
+        payload = dict(_PRIVACY_STATS)
+    payload["hagezi_domains_loaded"] = len(_HAGEZI_DOMAINS)
+    payload["hagezi_allowlist_loaded"] = len(_HAGEZI_ALLOWLIST)
+    return payload
+
+
+def _serve_internal_privacy_stats(client: socket.socket, method: str, target: str, headers) -> bool:
+    """Serve live Privacy Core counters to Tekzite over authenticated loopback."""
+    if str(method or "").upper() != "GET":
+        return False
+    try:
+        parts = urlsplit(str(target or ""))
+        host = (parts.hostname or "").lower().rstrip(".")
+        path = parts.path or "/"
+    except Exception:
+        return False
+    if host != "tekzite.internal" or path != "/__privacy_stats":
+        return False
+    supplied = _header_value(headers, "X-Tekzite-Instance-Token") or ""
+    expected = str(INSTANCE_TOKEN or "")
+    if not expected or not hmac.compare_digest(str(supplied), expected):
+        client.sendall(
+            b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n"
+            b"Content-Length: 0\r\n\r\n"
+        )
+        return True
+    payload = json.dumps(_privacy_stats_payload(), separators=(",", ":")).encode("utf-8")
+    client.sendall(
+        b"HTTP/1.1 200 OK\r\n"
+        b"Connection: close\r\n"
+        b"Cache-Control: no-store\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii")
+        + payload
+    )
+    return True
+
+
 # v4.54: browser telemetry is denied in the proxy before DNS or an upstream
 # socket is opened.  This list is deliberately limited to browser/vendor
 # diagnostics endpoints; arbitrary website analytics are a separate concern.
@@ -805,6 +851,8 @@ class ProxyHandler(socketserver.BaseRequestHandler):
                 raise ValueError("invalid HTTP request target")
             method_upper = method.upper()
             if _serve_internal_connection_overview(client, method_upper, target, headers):
+                return
+            if _serve_internal_privacy_stats(client, method_upper, target, headers):
                 return
             if method_upper == "CONNECT":
                 self._connect_tunnel(client, target)
