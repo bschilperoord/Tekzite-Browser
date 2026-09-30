@@ -10,7 +10,8 @@
     "downloads",
     "declarativeNetRequest",
     "declarativeNetRequestFeedback",
-    "downloads.open"
+    "downloads.open",
+    "management"
   ],
   "background": {
     "service_worker": "background.js"
