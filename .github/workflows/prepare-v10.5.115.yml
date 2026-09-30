@@ -27,22 +27,23 @@ jobs:
           python tools/sync_version.py 10.5.115 --check
 
       - name: Add release notes
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           from pathlib import Path
           p = Path("CHANGELOG.md")
           text = p.read_text(encoding="utf-8")
           heading = "# v10.5.115 - Reliable native JavaScript dialogs"
+          notes = (
+              heading + "\n\n"
+              "- Fixes the first native Tk JavaScript dialog sometimes failing to appear while Chromium navigation is still committing its target.\n"
+              "- Lets the dialog bridge use Chromium's already-live in-memory target before the Tk tab model receives its target ID, breaking the first-navigation modal deadlock.\n"
+              "- Keeps JavaScript alert, confirm, prompt and before-unload dialogs responsive by deferring synchronous Chromium zoom and DWM settle work until after the dialog is answered.\n"
+              "- Retains the dual browser-target/direct-page CDP observer fallback introduced in v10.5.114.\n\n"
+          )
           if not text.startswith(heading):
-              notes = """# v10.5.115 - Reliable native JavaScript dialogs
-
-- Fixes the first native Tk JavaScript dialog sometimes failing to appear while Chromium navigation is still committing its target.
-- Lets the dialog bridge use Chromium's already-live in-memory target before the Tk tab model receives its target ID, breaking the first-navigation modal deadlock.
-- Keeps JavaScript alert, confirm, prompt and before-unload dialogs responsive by deferring synchronous Chromium zoom and DWM settle work until after the dialog is answered.
-- Retains the dual browser-target/direct-page CDP observer fallback introduced in v10.5.114.
-
-"""
               p.write_text(notes + text, encoding="utf-8")
+          PY
 
       - name: Remove one-shot release prep workflow
         run: git rm .github/workflows/prepare-v10.5.115.yml
