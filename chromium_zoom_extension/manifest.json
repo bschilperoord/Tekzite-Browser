@@ -9,6 +9,7 @@
     "storage",
     "downloads",
     "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
     "downloads.open"
   ],
   "background": {
