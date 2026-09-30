@@ -33,13 +33,23 @@ ADBLOCK_ENABLED = True
 ADBLOCK_POLICY = None
 TRACKER_BLOCKING = True
 HTTPS_FIRST = True
+HAGEZI_ENABLED = True
+HAGEZI_LIST_PATH = None
+HAGEZI_ALLOWLIST_PATH = None
 PRIVACY_STATS_PATH = None
+
+_HAGEZI_LOCK = threading.RLock()
+_HAGEZI_LIST_SIGNATURE = None
+_HAGEZI_ALLOWLIST_SIGNATURE = None
+_HAGEZI_DOMAINS = frozenset()
+_HAGEZI_ALLOWLIST = frozenset()
 _PRIVACY_STATS_LOCK = threading.RLock()
 _PRIVACY_STATS = {
     "started_at": time.time(),
     "telemetry_blocked": 0,
     "trackers_blocked": 0,
     "ads_blocked": 0,
+    "hagezi_blocked": 0,
     "https_upgrades": 0,
 }
 
@@ -313,6 +323,104 @@ TRACKER_SUFFIXES = (
     ".heapanalytics.com",
     ".app-measurement.com",
 )
+
+
+def _domain_file_signature(path):
+    if not path:
+        return None
+    try:
+        stat = os.stat(path)
+        return (int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        return None
+
+
+def _read_domain_set(path, max_entries=300000):
+    if not path:
+        return frozenset()
+    result = set()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw in handle:
+                value = raw.strip().lower().rstrip(".")
+                if not value or value.startswith(("#", "!", "[")):
+                    continue
+                if value.startswith("*."):
+                    value = value[2:]
+                if "/" in value or ":" in value or " " in value or "." not in value:
+                    continue
+                try:
+                    value = value.encode("idna").decode("ascii")
+                except (UnicodeError, ValueError):
+                    continue
+                result.add(value)
+                if len(result) >= int(max_entries):
+                    break
+    except OSError:
+        return frozenset()
+    return frozenset(result)
+
+
+def _refresh_hagezi_sets():
+    global _HAGEZI_LIST_SIGNATURE, _HAGEZI_ALLOWLIST_SIGNATURE
+    global _HAGEZI_DOMAINS, _HAGEZI_ALLOWLIST
+
+    list_sig = _domain_file_signature(HAGEZI_LIST_PATH)
+    allow_sig = _domain_file_signature(HAGEZI_ALLOWLIST_PATH)
+    if list_sig == _HAGEZI_LIST_SIGNATURE and allow_sig == _HAGEZI_ALLOWLIST_SIGNATURE:
+        return
+
+    with _HAGEZI_LOCK:
+        list_sig = _domain_file_signature(HAGEZI_LIST_PATH)
+        allow_sig = _domain_file_signature(HAGEZI_ALLOWLIST_PATH)
+        if list_sig != _HAGEZI_LIST_SIGNATURE:
+            _HAGEZI_DOMAINS = _read_domain_set(HAGEZI_LIST_PATH)
+            _HAGEZI_LIST_SIGNATURE = list_sig
+        if allow_sig != _HAGEZI_ALLOWLIST_SIGNATURE:
+            _HAGEZI_ALLOWLIST = _read_domain_set(HAGEZI_ALLOWLIST_PATH, max_entries=4096)
+            _HAGEZI_ALLOWLIST_SIGNATURE = allow_sig
+
+
+def _domain_tree_matches(host, domains):
+    host = (host or "").strip().rstrip(".").lower()
+    if not host or "." not in host or not domains:
+        return False
+    labels = host.split(".")
+    # Do not test the public-suffix/TLD-only label.
+    for index in range(max(1, len(labels) - 1)):
+        candidate = ".".join(labels[index:])
+        if candidate in domains:
+            return True
+    return host in domains
+
+
+def _is_hagezi_host(host: str) -> bool:
+    if not HAGEZI_ENABLED:
+        return False
+    host = (host or "").strip().rstrip(".").lower()
+    if not host:
+        return False
+    _refresh_hagezi_sets()
+    if _domain_tree_matches(host, _HAGEZI_ALLOWLIST):
+        return False
+    return _domain_tree_matches(host, _HAGEZI_DOMAINS)
+
+
+def _deny_hagezi(client: socket.socket, host: str, method: str, port: int | None = None):
+    _privacy_stat("hagezi_blocked")
+    _record_connection(
+        host,
+        port or (443 if str(method).upper() == "CONNECT" else 80),
+        "HTTPS" if str(method).upper() == "CONNECT" else "HTTP",
+        "blocked-hagezi",
+    )
+    _log("hagezi_blocked", host=host, method=method)
+    client.sendall(
+        b"HTTP/1.1 403 Forbidden\r\n"
+        b"Connection: close\r\n"
+        b"Content-Length: 0\r\n"
+        b"X-Tekzite-Blocked: hagezi\r\n\r\n"
+    )
 
 
 def _write_privacy_stats():
@@ -720,6 +828,9 @@ class ProxyHandler(socketserver.BaseRequestHandler):
         if _is_ad_host(host):
             _deny_ad(client, host, "CONNECT", port)
             return
+        if _is_hagezi_host(host):
+            _deny_hagezi(client, host, "CONNECT", port)
+            return
         _log("connect", host=host, port=port)
         try:
             upstream = _open_upstream_connection(host, port, timeout=CONNECT_TIMEOUT)
@@ -763,6 +874,9 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             return
         if _is_ad_host(host):
             _deny_ad(client, host, method.upper(), port)
+            return
+        if _is_hagezi_host(host):
+            _deny_hagezi(client, host, method.upper(), port)
             return
         if HTTPS_FIRST and int(port) == 80 and not _is_local_network_host(host):
             _privacy_stat("https_upgrades")
@@ -895,6 +1009,9 @@ def main(argv=None):
     ap.add_argument("--disable-tracker-blocking", action="store_true")
     ap.add_argument("--disable-https-first", action="store_true")
     ap.add_argument("--adblock-policy")
+    ap.add_argument("--hagezi-list")
+    ap.add_argument("--hagezi-allowlist")
+    ap.add_argument("--disable-hagezi", action="store_true")
     ap.add_argument("--privacy-stats")
     args = ap.parse_args(argv)
     if args.instance_token and (len(args.instance_token) < 16 or not all(ch in "0123456789abcdefABCDEF" for ch in args.instance_token)):
@@ -915,6 +1032,7 @@ def main(argv=None):
         "telemetry_blocked": 0,
         "trackers_blocked": 0,
         "ads_blocked": 0,
+        "hagezi_blocked": 0,
         "https_upgrades": 0,
     }
     _write_privacy_stats()
