@@ -915,6 +915,260 @@ class BrowserFeatures:
             'permissions': permissions,
         }
 
+    def _save_extension_entries(self, entries):
+        """Persist the canonical user-extension set used at Chromium launch."""
+        normalized = []
+        for row in list(entries or []):
+            if not isinstance(row, dict):
+                continue
+            path = str(row.get('path') or '').strip()
+            if not path:
+                continue
+            normalized.append({
+                'path': path,
+                'enabled': bool(row.get('enabled', True)),
+            })
+        self.preferences['extensions'] = normalized
+        self._persist_preferences()
+        selected_paths = [
+            row['path'] for row in normalized
+            if row.get('enabled') and row.get('path')
+        ]
+        os.environ['TEKZITE_USER_EXTENSIONS'] = json.dumps(selected_paths)
+        return normalized
+
+    def _show_extensions_toolbar_popup(self):
+        """Show a compact Chrome-style extension control beside the toolbar."""
+        previous = getattr(self, '_extensions_toolbar_popup', None)
+        try:
+            if previous is not None and previous.winfo_exists():
+                previous.destroy()
+                self._extensions_toolbar_popup = None
+                return 'break'
+        except Exception:
+            pass
+
+        popup = tk.Toplevel(self.root)
+        self._extensions_toolbar_popup = popup
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.configure(bg=self.ui['bg'])
+        popup.attributes('-topmost', True)
+        try:
+            popup.transient(self.root)
+        except Exception:
+            pass
+
+        outer = tk.Frame(
+            popup, bg=self.ui['bg'],
+            highlightthickness=1, highlightbackground=self.ui['border'],
+            bd=0,
+        )
+        outer.pack(fill='both', expand=True)
+
+        header = tk.Frame(outer, bg=self.ui['bg'])
+        header.pack(fill='x', padx=14, pady=(12, 8))
+        tk.Label(
+            header, text='Extensions', bg=self.ui['bg'], fg=self.ui['text'],
+            font=(self._ui_font_family, self._font_size(12), 'bold'),
+        ).pack(side='left')
+        tk.Button(
+            header, text='⚙', command=lambda: (popup.destroy(), self._show_extension_manager()),
+            bg=self.ui['bg'], fg=self.ui['muted'], activebackground=self.ui['chrome_hover'],
+            activeforeground=self.ui['text'], relief='flat', bd=0, cursor='hand2',
+            font=(self._ui_font_family, self._font_size(10)),
+        ).pack(side='right')
+
+        separator = tk.Frame(outer, height=1, bg=self.ui['border_soft'])
+        separator.pack(fill='x')
+
+        list_frame = tk.Frame(outer, bg=self.ui['bg'])
+        list_frame.pack(fill='both', expand=True, padx=8, pady=7)
+
+        note = tk.StringVar(value='')
+        entries = [dict(row) for row in self.preferences.get('extensions', []) if isinstance(row, dict)]
+
+        def save_and_mark():
+            try:
+                saved = self._save_extension_entries(entries)
+                entries[:] = [dict(row) for row in saved]
+                note.set('Saved • Restart Tekzite to apply extension changes')
+                return True
+            except OSError as exc:
+                note.set(f'Could not save: {exc}')
+                return False
+
+        def toggle(index, variable):
+            if not (0 <= index < len(entries)):
+                return
+            entries[index]['enabled'] = bool(variable.get())
+            save_and_mark()
+
+        def show_details(index):
+            if not (0 <= index < len(entries)):
+                return
+            row = entries[index]
+            path = str(row.get('path') or '')
+            try:
+                meta = self._extension_metadata(path)
+                permissions = meta.get('permissions') or []
+                message = (
+                    f'{meta.get("name", "Extension")}\n'
+                    f'Version: {meta.get("version", "?")}\n'
+                    f'Manifest: V{meta.get("manifest_version", "?")}\n'
+                    f'State: {"Enabled" if row.get("enabled") else "Disabled"}\n'
+                    f'Folder: {path}\n\n'
+                    'Declared permissions:\n'
+                    + ('\n'.join(f'• {p}' for p in permissions) if permissions else 'None declared')
+                )
+            except Exception as exc:
+                message = f'Extension folder: {path}\n\nValidation error:\n{exc}'
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+            self._show_message('info', 'Extension details', message, parent=self.root)
+
+        def row_menu(event, index):
+            if not (0 <= index < len(entries)):
+                return 'break'
+            row = entries[index]
+            menu = self._make_modern_menu(self.root)
+            menu.add_command(label='Details', command=lambda i=index: show_details(i))
+            menu.add_command(
+                label='Open folder',
+                command=lambda p=str(row.get('path') or ''): os.startfile(p)
+                if hasattr(os, 'startfile') and Path(p).is_dir() else None,
+            )
+            menu.add_separator()
+            def remove():
+                path = str(entries[index].get('path') or '')
+                try:
+                    popup.destroy()
+                except Exception:
+                    pass
+                if self._ask_yes_no('Remove extension', f'Remove this extension from Tekzite?\n\n{path}', parent=self.root):
+                    current = [dict(item) for item in self.preferences.get('extensions', []) if isinstance(item, dict)]
+                    current = [item for item in current if os.path.normcase(str(item.get('path') or '')) != os.path.normcase(path)]
+                    try:
+                        self._save_extension_entries(current)
+                    except OSError as exc:
+                        self._show_message('error', 'Extensions', f'Could not save extensions:\n{exc}', parent=self.root)
+            menu.add_command(label='Remove from Tekzite', command=remove)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                try:
+                    menu.grab_release()
+                except Exception:
+                    pass
+            return 'break'
+
+        if not entries:
+            tk.Label(
+                list_frame,
+                text='No user extensions installed',
+                bg=self.ui['bg'], fg=self.ui['muted'],
+                font=(self._ui_font_family, self._font_size(9)),
+                padx=12, pady=18,
+            ).pack(fill='x')
+        else:
+            for index, row in enumerate(entries):
+                path = str(row.get('path') or '')
+                try:
+                    meta = self._extension_metadata(path)
+                    name = str(meta.get('name') or Path(path).name)
+                    subtitle = f"V{meta.get('manifest_version')} • {meta.get('version', '?')}"
+                    valid = True
+                except Exception:
+                    name = Path(path).name or 'Missing extension'
+                    subtitle = 'Missing or invalid'
+                    valid = False
+
+                card = tk.Frame(list_frame, bg=self.ui['chrome_2'])
+                card.pack(fill='x', pady=3)
+                enabled_var = tk.BooleanVar(value=bool(row.get('enabled', True)))
+                check = tk.Checkbutton(
+                    card, variable=enabled_var,
+                    command=lambda i=index, v=enabled_var: toggle(i, v),
+                    bg=self.ui['chrome_2'], activebackground=self.ui['chrome_2'],
+                    selectcolor=self.ui['field'], bd=0, highlightthickness=0,
+                    state='normal' if valid else 'disabled',
+                )
+                check.pack(side='left', padx=(8, 4), pady=9)
+
+                text_box = tk.Frame(card, bg=self.ui['chrome_2'])
+                text_box.pack(side='left', fill='x', expand=True, pady=7)
+                tk.Label(
+                    text_box, text=name, anchor='w',
+                    bg=self.ui['chrome_2'], fg=self.ui['text'],
+                    font=(self._ui_font_family, self._font_size(9), 'bold'),
+                ).pack(fill='x')
+                tk.Label(
+                    text_box, text=subtitle, anchor='w',
+                    bg=self.ui['chrome_2'], fg=self.ui['muted'],
+                    font=(self._ui_font_family, self._font_size(8)),
+                ).pack(fill='x')
+
+                more = tk.Button(
+                    card, text='⋮', bg=self.ui['chrome_2'], fg=self.ui['muted'],
+                    activebackground=self.ui['chrome_hover'], activeforeground=self.ui['text'],
+                    relief='flat', bd=0, cursor='hand2',
+                    font=(self._ui_font_family, self._font_size(11)),
+                )
+                more.configure(command=lambda b=more, i=index: row_menu(
+                    type('E', (), {'x_root': b.winfo_rootx(), 'y_root': b.winfo_rooty() + b.winfo_height()})(), i
+                ))
+                more.pack(side='right', padx=(4, 8), pady=7)
+
+        footer = tk.Frame(outer, bg=self.ui['bg'])
+        footer.pack(fill='x', padx=10, pady=(3, 10))
+        tk.Label(
+            footer, textvariable=note, bg=self.ui['bg'], fg=self.ui['muted'],
+            anchor='w', font=(self._ui_font_family, self._font_size(8)),
+        ).pack(fill='x', pady=(0, 5))
+        tk.Button(
+            footer, text='Manage extensions', command=lambda: (popup.destroy(), self._show_extension_manager()),
+            bg=self.ui['chrome_2'], fg=self.ui['text'],
+            activebackground=self.ui['chrome_hover'], activeforeground=self.ui['text'],
+            relief='flat', bd=0, cursor='hand2', padx=10, pady=6,
+            font=(self._ui_font_family, self._font_size(9)),
+        ).pack(side='left')
+        tk.Button(
+            footer, text='Restart to apply', command=self._restart_browser,
+            bg=self.ui['accent'], fg='#ffffff',
+            activebackground=self.ui['accent_hover'], activeforeground='#ffffff',
+            relief='flat', bd=0, cursor='hand2', padx=10, pady=6,
+            font=(self._ui_font_family, self._font_size(9)),
+        ).pack(side='right')
+
+        try:
+            popup.update_idletasks()
+            button = self.extensions_button
+            x = button.winfo_rootx() + button.winfo_width() - 360
+            y = button.winfo_rooty() + button.winfo_height() + 4
+            screen_w = popup.winfo_screenwidth()
+            screen_h = popup.winfo_screenheight()
+            width = 360
+            height = min(500, max(150, popup.winfo_reqheight()))
+            x = max(6, min(x, screen_w - width - 6))
+            y = max(6, min(y, screen_h - height - 6))
+            popup.geometry(f'{width}x{height}+{x}+{y}')
+            popup.deiconify()
+            popup.lift()
+            popup.focus_set()
+        except Exception:
+            popup.deiconify()
+
+        def close_if_focus_left(_event=None):
+            try:
+                popup.after(80, lambda: popup.destroy() if popup.winfo_exists() and popup.focus_displayof() is None else None)
+            except Exception:
+                pass
+        popup.bind('<FocusOut>', close_if_focus_left)
+        popup.bind('<Escape>', lambda _e: popup.destroy())
+        return 'break'
+
     def _show_extension_manager(self):
         previous = getattr(self, '_extensions_window', None)
         if previous is not None and previous.winfo_exists():
@@ -936,14 +1190,11 @@ class BrowserFeatures:
         state = {'rows': {}}
 
         def persist(entries):
-            self.preferences['extensions'] = entries
             try:
-                self._persist_preferences()
+                self._save_extension_entries(entries)
             except OSError as exc:
                 self._show_message("error", 'Extension Manager', f'Could not save extensions:\n{exc}', parent=win)
                 return False
-            selected_paths = [row.get('path') for row in entries if row.get('enabled') and row.get('path')]
-            os.environ['TEKZITE_USER_EXTENSIONS'] = json.dumps(selected_paths)
             note.set(
                 'Extension settings saved. Privacy Core remains active; restart Tekzite to apply the extension set.'
                 if self.preferences.get('privacy_lockdown', True) else
