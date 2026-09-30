@@ -60,32 +60,142 @@ def test_tk_owns_alert_confirm_prompt_and_beforeunload_controls():
     assert "'Cancel'" in FEATURES
     assert "'Leave'" in FEATURES
     assert "'Stay'" in FEATURES
-    assert "win.grab_set()" in FEATURES
-    assert "_raise_toplevel_above_dwm(" in FEATURES
-    assert "win, hold_ms=520, persistent_topmost=True" in FEATURES
 
 
-def test_javascript_dialog_topmost_is_not_released_while_modal_is_open():
-    source = inspect.getsource(main.BrowserApp._raise_toplevel_above_dwm)
-    assert "persistent_topmost=False" in source
-    assert "if not persistent_topmost:" in source
-    assert "if persistent_topmost:" in source
-    assert "flags |= SWP_NOACTIVATE" in source
-    assert "SetForegroundWindow" in source
+def test_page_dialog_modal_fastlane_stops_chromium_background_input():
+    assert "_javascript_dialog_modal_active" in inspect.getsource(
+        main.BrowserApp._chromium_input_surface_active
+    )
+    assert "_javascript_dialog_modal_active" in inspect.getsource(
+        main.BrowserApp._poll_dwm_keyboard
+    )
+    assert "_javascript_dialog_modal_active" in inspect.getsource(
+        main.BrowserApp._schedule_dwm_pointer_bridge
+    )
+    assert "_javascript_dialog_modal_active" in inspect.getsource(
+        main.BrowserApp._on_root_chromium_key
+    )
+    assert "_javascript_dialog_modal_active" in inspect.getsource(
+        main.BrowserApp._poll_chromium_cursor_probe
+    )
 
 
-def test_javascript_dialog_raise_happens_before_best_effort_tk_grab():
+def test_page_dialog_modal_fastlane_defers_synchronous_zoom_settle_work():
+    zoom_apply = inspect.getsource(main.BrowserApp._run_scheduled_chromium_zoom_apply)
+    dwm_refresh = inspect.getsource(main.BrowserApp._run_scheduled_dwm_zoom_refresh)
+    resume = inspect.getsource(
+        main.BrowserApp._resume_deferred_chromium_ui_work_after_page_dialog
+    )
+
+    assert "_javascript_dialog_modal_active" in zoom_apply
+    assert "_javascript_dialog_deferred_zoom_all" in zoom_apply
+    assert "_javascript_dialog_deferred_zoom_targets" in zoom_apply
+    assert "_javascript_dialog_modal_active" in dwm_refresh
+    assert "_javascript_dialog_deferred_dwm_zoom_refresh" in dwm_refresh
+    assert "_run_scheduled_chromium_zoom_apply" in resume
+    assert "_run_scheduled_dwm_zoom_refresh" in resume
+
+
+def test_page_dialog_modal_fastlane_pauses_periodic_browser_polls():
+    page_tick = inspect.getsource(main.BrowserApp._page_state_tick)
+    zoom_tick = inspect.getsource(main.BrowserApp._zoom_watchdog_tick)
+    page_one = inspect.getsource(main.BrowserApp._poll_one_tab_state)
+    assert "_javascript_dialog_modal_active" in page_tick
+    assert "root.after(600, self._page_state_tick)" in page_tick
+    assert "_javascript_dialog_modal_active" in zoom_tick
+    assert "1200, self._zoom_watchdog_tick" in zoom_tick
+    assert "_javascript_dialog_modal_active" in page_one
+    assert "root.after(250, finish)" in page_one
+
+
+def test_page_dialog_sets_and_clears_modal_fastlane_around_cdp_answer():
     block = FEATURES[
-        FEATURES.index("win.protocol('WM_DELETE_WINDOW', close_action)"):
+        FEATURES.index("def _show_native_javascript_dialog"):
         FEATURES.index("def _schedule_permission_prompt_poll")
     ]
-    raise_pos = block.index(
-        "_raise_toplevel_above_dwm(\n                win, hold_ms=520, persistent_topmost=True"
-    )
-    grab_pos = block.index("win.grab_set()")
-    assert raise_pos < grab_pos
-    assert "win.after(80, reassert_dialog_z_order)" in block
-    assert "win.after(220, reassert_dialog_z_order)" in block
+    enter_at = block.index("self._javascript_dialog_modal_active = True")
+    hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
+    answer_at = block.index("future.result()")
+    restore_call_at = block.index("restore_chromium_presentation()", answer_at)
+    assert enter_at < hide_at < answer_at < restore_call_at
+
+    restore_helper = block[
+        block.index("def restore_chromium_presentation"):
+        block.index("def cleanup_overlay")
+    ]
+    assert "self._javascript_dialog_modal_active = False" in restore_helper
+    assert "_schedule_dwm_pointer_bridge(delay=40)" in restore_helper
+    assert "_resume_deferred_chromium_ui_work_after_page_dialog()" in restore_helper
+
+
+def test_page_dialog_uses_content_overlay_not_native_toplevel():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert "overlay = tk.Frame(" in block
+    assert "self.content_frame" in block
+    assert "overlay.place(x=0, y=0, relwidth=1, relheight=1)" in block
+    assert "card.place(relx=0.5, rely=0.5, anchor='center')" in block
+    assert "_javascript_dialog_last_mode = 'content-overlay'" in block
+    assert "self._javascript_dialog_modal_active = True" in block
+
+    assert "tk.Toplevel" not in block
+    assert "_new_animated_toplevel" not in block
+    assert "grab_set()" not in block
+    assert "_raise_toplevel_above_dwm" not in block
+    assert "attributes('-topmost'" not in block
+    assert "SetForegroundWindow" not in block
+
+
+def test_page_dialog_has_no_prewarm_or_first_window_activation_path():
+    startup = FEATURES[
+        FEATURES.index("def _feature_startup"):
+        FEATURES.index("def _schedule_network_health_watch")
+    ]
+    assert "_prewarm_javascript_dialog_ui" not in startup
+    assert "def _prewarm_javascript_dialog_ui" not in FEATURES
+    assert "def _build_javascript_dialog_shell" not in FEATURES
+
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert "<Map>" not in block
+    assert "after_idle" not in block
+    assert "winfo_ismapped" not in block
+    assert "persistent_topmost" not in block
+
+
+def test_page_dialog_suspends_dwm_before_showing_overlay():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    hide_at = block.index("_set_dwm_page_dialog_suspended(True)")
+    overlay_at = block.index("overlay.place(x=0, y=0, relwidth=1, relheight=1)")
+    assert hide_at < overlay_at
+
+
+def test_page_dialog_restores_dwm_only_after_cdp_answer_finishes():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    answer_at = block.index("future.result()")
+    restore_at = block.index("restore_chromium_presentation()", answer_at)
+    assert restore_at > answer_at
+    assert "suppress_embedded_chromium_javascript_dialog_ui" not in block
+
+
+def test_dialog_overlay_records_visible_handoff_timing():
+    block = FEATURES[
+        FEATURES.index("def _show_native_javascript_dialog"):
+        FEATURES.index("def _schedule_permission_prompt_poll")
+    ]
+    assert "started = time.perf_counter()" in block
+    assert "_javascript_dialog_last_show_ms" in block
+
 
 
 class _FakeRoot:
@@ -220,6 +330,46 @@ class _DirectPageDialogWs:
 
     def recv(self):
         return self.responses.pop(0)
+
+
+def test_dialog_target_hint_breaks_first_navigation_target_commit_cycle(monkeypatch):
+    target_id = "cold-start-target"
+    session = {
+        "target_id": target_id,
+        "javascript_dialog_browser_channels": {},
+        "page_cdp_channels": {},
+    }
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", session)
+    assert net.get_embedded_chromium_javascript_dialog_target_hint() == target_id
+
+
+def test_dialog_target_hint_prefers_channel_with_pending_event(monkeypatch):
+    session = {
+        "target_id": "generic-target",
+        "javascript_dialog_browser_channels": {
+            "dialog-target": {
+                "target_id": "dialog-target",
+                "events": [{"type": "confirm"}],
+                "dialog_open": True,
+                "closed": False,
+            }
+        },
+        "page_cdp_channels": {},
+    }
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", session)
+    assert (
+        net.get_embedded_chromium_javascript_dialog_target_hint()
+        == "dialog-target"
+    )
+
+
+def test_tk_dialog_poll_uses_engine_target_before_tab_commit():
+    block = FEATURES[
+        FEATURES.index("def _javascript_dialog_tick"):
+        FEATURES.index("def _show_native_javascript_dialog")
+    ]
+    assert "get_embedded_chromium_javascript_dialog_target_hint" in block
+    assert "_schedule_javascript_dialog_poll(70)" in block
 
 
 def test_dialog_poll_uses_direct_page_fallback_when_browser_observer_is_silent(monkeypatch):

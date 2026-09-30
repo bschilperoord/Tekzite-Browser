@@ -1141,7 +1141,7 @@ class BrowserFeatures:
         if win is not None:
             try:
                 if win.winfo_exists():
-                    self._schedule_javascript_dialog_poll(120)
+                    self._schedule_javascript_dialog_poll(500)
                     return
             except Exception:
                 pass
@@ -1153,7 +1153,20 @@ class BrowserFeatures:
         tab = self._active_tab() or {}
         target_id = str(tab.get('chromium_target_id') or '')
         if not target_id:
-            self._schedule_javascript_dialog_poll(350)
+            # First-page JavaScript dialogs can block Chromium before the
+            # navigation future has committed its target id into the Tk tab.
+            # The engine already knows that target, so use its in-memory hint
+            # instead of waiting for navigation completion and deadlocking the
+            # very dialog that needs to unblock it.
+            try:
+                target_id = str(
+                    features.net.get_embedded_chromium_javascript_dialog_target_hint()
+                    or ''
+                )
+            except Exception:
+                target_id = ''
+        if not target_id:
+            self._schedule_javascript_dialog_poll(70)
             return
 
         self._javascript_dialog_poll_busy = True
@@ -1188,6 +1201,13 @@ class BrowserFeatures:
             self._javascript_dialog_poll_busy = False
 
     def _show_native_javascript_dialog(self, dialog):
+        """Show alert/confirm/prompt inside Tekzite's existing Tk content window.
+
+        Chromium's own synchronous JavaScript dialog remains open internally,
+        but its DWM presentation is suspended. Rendering the replacement as a
+        child Frame instead of a new Toplevel avoids any Win32 activation,
+        topmost, transient-owner or grab race on the first dialog.
+        """
         previous = getattr(self, '_javascript_dialog_window', None)
         if previous is not None:
             try:
@@ -1213,20 +1233,67 @@ class BrowserFeatures:
         except Exception:
             pass
 
-        win = self._new_animated_toplevel(
-            self.root, branded=False, auto_animate=False
-        )
-        self._javascript_dialog_window = win
-        win.title('Tekzite Page Dialog')
-        win.transient(self.root)
-        win.configure(bg=self.ui['bg'])
+        started = time.perf_counter()
+        state = {'done': False, 'presentation_restored': False}
+        self._javascript_dialog_modal_active = True
+
         try:
-            win.attributes('-topmost', True)
+            # Hide the mirrored Chromium page before exposing the Tk overlay.
+            # No Chromium HWND is manipulated and no new native Tk window exists.
+            self._set_dwm_page_dialog_suspended(True)
         except Exception:
             pass
 
-        state = {'done': False}
+        overlay = tk.Frame(
+            self.content_frame,
+            bg=self.ui['bg'],
+            bd=0,
+            highlightthickness=0,
+            takefocus=1,
+        )
+        self._javascript_dialog_window = overlay
+
+        dialog_h = 330 if kind == 'prompt' else 285
+        card = tk.Frame(
+            overlay,
+            bg=self.ui['bg'],
+            width=560,
+            height=dialog_h,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self.ui['border'],
+        )
+        card.pack_propagate(False)
+
         prompt_var = tk.StringVar(value=default_prompt)
+
+        def restore_chromium_presentation():
+            if state['presentation_restored']:
+                return
+            state['presentation_restored'] = True
+            try:
+                self._set_dwm_page_dialog_suspended(False)
+            except Exception:
+                pass
+            self._javascript_dialog_modal_active = False
+            try:
+                if self._chromium_dwm_mode and self._dwm_surface_ready:
+                    self._schedule_dwm_pointer_bridge(delay=40)
+                    if getattr(self, '_chromium_page_keyboard_active', False):
+                        self._schedule_dwm_keyboard_poll(60)
+                # Release any zoom/DWM settle work that arrived while Chromium's
+                # synchronous dialog had the renderer blocked. This happens only
+                # after the CDP answer completed, keeping Tk responsive throughout.
+                self._resume_deferred_chromium_ui_work_after_page_dialog()
+            except Exception:
+                pass
+
+        def cleanup_overlay():
+            self._javascript_dialog_window = None
+            try:
+                overlay.destroy()
+            except Exception:
+                pass
 
         def decide(accept, prompt_text=None):
             if state['done']:
@@ -1234,24 +1301,21 @@ class BrowserFeatures:
             state['done'] = True
             if prompt_text is None:
                 prompt_text = prompt_var.get() if kind == 'prompt' else ''
-            try:
-                win.grab_release()
-            except Exception:
-                pass
-            try:
-                win.destroy()
-            except Exception:
-                pass
-            self._javascript_dialog_window = None
+
+            cleanup_overlay()
 
             def work():
                 return features.net.resolve_embedded_chromium_javascript_dialog(
                     target_id, bool(accept), str(prompt_text or ''), timeout=1.0
                 )
+
             try:
-                dialog_executor = getattr(self, '_javascript_dialog_executor', self._executor)
+                dialog_executor = getattr(
+                    self, '_javascript_dialog_executor', self._executor
+                )
                 future = dialog_executor.submit(work)
             except Exception as exc:
+                restore_chromium_presentation()
                 self.status_var.set(f'Could not answer page dialog: {exc}')
                 return
 
@@ -1267,25 +1331,30 @@ class BrowserFeatures:
                 try:
                     ok = bool(future.result())
                 except Exception as exc:
+                    restore_chromium_presentation()
                     self.status_var.set(f'Could not answer page dialog: {exc}')
                     return
+                restore_chromium_presentation()
                 if ok:
                     self.status_var.set(
                         f'Page dialog {"accepted" if accept else "cancelled"}'
                     )
+
             try:
                 self.root.after(30, finish_answer)
             except Exception:
-                pass
+                restore_chromium_presentation()
 
-        header = tk.Frame(win, bg=self.ui['bg'])
+        header = tk.Frame(card, bg=self.ui['bg'])
         header.pack(fill='x', padx=18, pady=(16, 8))
+
         logo = tk.Label(
             header, text='T', bg=self.ui['accent'], fg='#ffffff',
             font=(self._ui_display_font_family, self._font_size(12), 'bold'),
             width=2, pady=4,
         )
         logo.pack(side='left', padx=(0, 10))
+
         title_text = {
             'alert': 'Message from page',
             'confirm': 'Confirm action',
@@ -1293,26 +1362,32 @@ class BrowserFeatures:
             'beforeunload': 'Leave this page?',
         }[kind]
         title = tk.Label(
-            header, text=title_text, bg=self.ui['bg'], fg=self.ui['text'],
+            header, text=title_text,
+            bg=self.ui['bg'], fg=self.ui['text'],
             font=(self._ui_display_font_family, self._font_size(13), 'bold'),
             anchor='w',
         )
         title.pack(side='left', fill='x', expand=True)
-        close_action = (lambda: decide(True)) if kind == 'alert' else (lambda: decide(False))
+
+        close_action = (
+            (lambda: decide(True))
+            if kind == 'alert'
+            else (lambda: decide(False))
+        )
         close_button = tk.Button(
             header, text='×', command=close_action,
             bg=self.ui['bg'], fg=self.ui['muted'],
-            activebackground=self.ui['chrome_hover'], activeforeground=self.ui['text'],
+            activebackground=self.ui['chrome_hover'],
+            activeforeground=self.ui['text'],
             relief='flat', bd=0, highlightthickness=0, cursor='hand2',
             font=(self._ui_display_font_family, self._font_size(14)),
             padx=9, pady=2,
         )
         close_button.pack(side='right')
 
-        self._bind_frameless_dialog_drag(win, header, logo, title)
-
-        body = tk.Frame(win, bg=self.ui['bg'])
+        body = tk.Frame(card, bg=self.ui['bg'])
         body.pack(fill='both', expand=True, padx=20, pady=(2, 10))
+
         tk.Label(
             body, text=str(host), bg=self.ui['bg'], fg=self.ui['accent'],
             font=(self._ui_font_family, self._font_size(9), 'bold'),
@@ -1320,11 +1395,13 @@ class BrowserFeatures:
         ).pack(fill='x', pady=(0, 9))
 
         shown_message = message or (
-            'This page wants to continue.' if kind != 'beforeunload'
+            'This page wants to continue.'
+            if kind != 'beforeunload'
             else 'Changes you made may not be saved.'
         )
         tk.Label(
-            body, text=shown_message, bg=self.ui['bg'], fg=self.ui['text'],
+            body, text=shown_message,
+            bg=self.ui['bg'], fg=self.ui['text'],
             justify='left', anchor='w', wraplength=520,
             font=(self._ui_font_family, self._font_size(10)),
         ).pack(fill='x', pady=(0, 12))
@@ -1335,87 +1412,72 @@ class BrowserFeatures:
                 body, textvariable=prompt_var,
                 bg=self.ui['field'], fg=self.ui['text'],
                 insertbackground=self.ui['text'], relief='flat',
-                highlightthickness=1, highlightbackground=self.ui['border'],
+                highlightthickness=1,
+                highlightbackground=self.ui['border'],
                 highlightcolor=self.ui['accent'],
                 font=(self._ui_font_family, self._font_size(10)),
             )
             entry.pack(fill='x', ipady=7, pady=(0, 8))
 
-        controls = tk.Frame(win, bg=self.ui['bg'])
+        controls = tk.Frame(card, bg=self.ui['bg'])
         controls.pack(fill='x', padx=16, pady=(4, 16))
 
         if kind == 'alert':
-            self._feature_button(controls, 'OK', lambda: decide(True))
-            win.bind('<Return>', lambda _event: decide(True))
-            win.bind('<Escape>', lambda _event: decide(True))
+            ok_button = self._feature_button(
+                controls, 'OK', lambda: decide(True)
+            )
+            ok_button.focus_set()
+            overlay.bind('<Return>', lambda _event: decide(True))
+            overlay.bind('<Escape>', lambda _event: decide(True))
         elif kind == 'beforeunload':
-            self._feature_button(controls, 'Stay', lambda: decide(False))
-            self._feature_button(controls, 'Leave', lambda: decide(True))
-            win.bind('<Return>', lambda _event: decide(True))
-            win.bind('<Escape>', lambda _event: decide(False))
-        else:
-            self._feature_button(controls, 'Cancel', lambda: decide(False))
             self._feature_button(
-                controls, 'OK',
-                lambda: decide(True, prompt_var.get() if kind == 'prompt' else '')
+                controls, 'Stay', lambda: decide(False)
             )
-            win.bind(
+            leave_button = self._feature_button(
+                controls, 'Leave', lambda: decide(True)
+            )
+            leave_button.focus_set()
+            overlay.bind('<Return>', lambda _event: decide(True))
+            overlay.bind('<Escape>', lambda _event: decide(False))
+        else:
+            cancel_button = self._feature_button(
+                controls, 'Cancel', lambda: decide(False)
+            )
+            ok_button = self._feature_button(
+                controls,
+                'OK',
+                lambda: decide(
+                    True, prompt_var.get() if kind == 'prompt' else ''
+                ),
+            )
+            cancel_button.focus_set()
+            overlay.bind(
                 '<Return>',
-                lambda _event: decide(True, prompt_var.get() if kind == 'prompt' else '')
+                lambda _event: decide(
+                    True, prompt_var.get() if kind == 'prompt' else ''
+                ),
             )
-            win.bind('<Escape>', lambda _event: decide(False))
+            overlay.bind('<Escape>', lambda _event: decide(False))
 
-        win.protocol('WM_DELETE_WINDOW', close_action)
-        dialog_h = 330 if kind == 'prompt' else 285
-        self._center_dialog_on_screen(win, 560, dialog_h, 18)
-        # Do not let a failed Tk grab short-circuit the native z-order handoff.
-        # Chromium's synchronous dialog may already own modal activation on some
-        # Windows systems. The Tekzite dialog must be made visible/foreground
-        # first, then the Tk grab is attempted independently.
-        try:
-            win.deiconify()
-            win.lift()
-        except Exception:
-            pass
-        try:
-            self._raise_toplevel_above_dwm(
-                win, hold_ms=520, persistent_topmost=True
-            )
-        except Exception:
-            pass
+        # Cover only the webpage content area. Browser chrome stays visible, but
+        # page input cannot leak through while Chromium's synchronous dialog is open.
+        overlay.place(x=0, y=0, relwidth=1, relheight=1)
+        card.place(relx=0.5, rely=0.5, anchor='center')
+        overlay.lift()
+        card.lift()
 
-        def reassert_dialog_z_order():
-            if state['done']:
-                return
-            try:
-                if not win.winfo_exists():
-                    return
-                win.lift()
-                self._raise_toplevel_above_dwm(
-                    win, hold_ms=520, persistent_topmost=True
-                )
-            except Exception:
-                pass
-
-        # Chromium can finish presenting its own modal a frame after the CDP
-        # opening event. Reassert twice after that race window.
         try:
-            win.after(80, reassert_dialog_z_order)
-            win.after(220, reassert_dialog_z_order)
-        except Exception:
-            pass
-        try:
-            win.grab_set()
-        except Exception:
-            pass
-        try:
+            overlay.focus_set()
             if entry is not None:
                 entry.focus_set()
                 entry.selection_range(0, 'end')
-            else:
-                win.focus_force()
         except Exception:
             pass
+
+        self._javascript_dialog_last_mode = 'content-overlay'
+        self._javascript_dialog_last_show_ms = round(
+            (time.perf_counter() - started) * 1000.0, 3
+        )
 
     def _schedule_permission_prompt_poll(self, delay_ms=450):
         if self._closing:
@@ -1430,6 +1492,9 @@ class BrowserFeatures:
     def _permission_prompt_tick(self):
         self._permission_prompt_after_id = None
         if self._closing:
+            return
+        if getattr(self, '_javascript_dialog_modal_active', False):
+            self._schedule_permission_prompt_poll(700)
             return
         prompt = getattr(self, '_permission_prompt_window', None)
         if prompt is not None:

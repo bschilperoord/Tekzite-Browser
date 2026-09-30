@@ -56,7 +56,7 @@ def _nav_app(tabs, active_id, generation):
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.114"
+    assert main.BROWSER_VERSION == "10.5.115"
 
 
 def test_completed_navigation_stays_bound_to_origin_tab_after_switch():

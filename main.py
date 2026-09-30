@@ -918,7 +918,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.114"
+BROWSER_VERSION = "10.5.115"
 
 
 
@@ -957,7 +957,13 @@ def _centered_startup_geometry(root, width, height, margin=24):
                     ("dwFlags", wintypes.DWORD),
                 ]
 
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            # The DWM host initializes user32 during browser startup, so reuse
+            # that handle on the dialog hot path instead of performing another
+            # first-use DLL setup while the user is waiting to click.
+            user32 = getattr(self, "_dwm_user32", None)
+            if user32 is None:
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                self._dwm_user32 = user32
             point = POINT()
             if user32.GetCursorPos(ctypes.byref(point)):
                 MONITOR_DEFAULTTONEAREST = 2
@@ -2424,6 +2430,9 @@ class BrowserApp(BrowserFeatures):
         self._dwm_keyboard_poll_last = None
         self._dwm_keyboard_poll_error = None
         self._dwm_keyboard_poll_foreground = False
+        # Page-dialog modal fast lane. While true, the Tk overlay exclusively
+        # owns interaction and Chromium background input/watchdogs back off.
+        self._javascript_dialog_modal_active = False
         self._dwm_user32 = None
         # v6.1: keep the raw DWM destination hidden until Chromium has a
         # verified frame, and coalesce move/resize traffic while the user drags
@@ -2438,6 +2447,10 @@ class BrowserApp(BrowserFeatures):
         # restore.  Keep this separate from _dwm_surface_ready so Chromium does
         # not have to re-bootstrap after every minimize/restore cycle.
         self._dwm_host_suspended_for_minimize = False
+        # Temporarily hide the DWM Chromium presentation while Tekzite owns a
+        # native JavaScript dialog. Chromium's synchronous dialog remains open
+        # internally until the CDP answer is sent.
+        self._dwm_host_suspended_for_page_dialog = False
         # v10.5.50: taskbar restore is a cold DWM recovery, not merely a popup
         # remap.  Windows can retain the destination HWND while silently dropping
         # the live thumbnail composition after an override-redirect/iconify cycle.
@@ -3344,7 +3357,11 @@ class BrowserApp(BrowserFeatures):
         the requested size to the visible screen, then center that final box.
         """
         try:
-            win.update_idletasks()
+            # Fixed-size dialogs already know their final geometry. Avoid draining
+            # the process-wide Tk idle queue just to center them; on a cold first
+            # dialog that queue can still contain startup work and stall input.
+            if width is None or height is None:
+                win.update_idletasks()
             screen_w = max(1, int(win.winfo_screenwidth()))
             screen_h = max(1, int(win.winfo_screenheight()))
             if width is None:
@@ -3534,7 +3551,7 @@ class BrowserApp(BrowserFeatures):
         win._tekzite_motion_duration = int(duration)
         win._tekzite_motion_slide = int(slide)
         try:
-            win.attributes("-alpha", 0.0 if self._motion_enabled() else 1.0)
+            win.attributes("-alpha", 0.0 if (auto_animate and self._motion_enabled()) else 1.0)
         except Exception:
             pass
 
@@ -5213,6 +5230,9 @@ class BrowserApp(BrowserFeatures):
         )
 
         def finish():
+            if getattr(self, "_javascript_dialog_modal_active", False):
+                self.root.after(250, finish)
+                return
             if not future.done():
                 self.root.after(35, finish)
                 return
@@ -5298,6 +5318,12 @@ class BrowserApp(BrowserFeatures):
 
     def _page_state_tick(self):
         self._page_state_after_id = None
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            try:
+                self._page_state_after_id = self.root.after(600, self._page_state_tick)
+            except Exception:
+                self._page_state_after_id = None
+            return
         if getattr(self, "_window_drag_active", False):
             try:
                 self._page_state_after_id = self.root.after(250, self._page_state_tick)
@@ -6531,7 +6557,9 @@ class BrowserApp(BrowserFeatures):
 
     def _schedule_dwm_keyboard_poll(self, delay=0):
         """Start the safe foreground-only native keyboard fallback."""
-        if os.name != "nt" or not (self._embedded_mode and self._chromium_dwm_mode):
+        if (getattr(self, "_javascript_dialog_modal_active", False)
+                or os.name != "nt"
+                or not (self._embedded_mode and self._chromium_dwm_mode)):
             return False
         self._dwm_keyboard_poll_active = True
         if self._dwm_keyboard_poll_after_id is None:
@@ -6686,7 +6714,8 @@ class BrowserApp(BrowserFeatures):
     def _poll_dwm_keyboard(self):
         """Poll physical keys only while Tekzite's DWM webpage owns input."""
         self._dwm_keyboard_poll_after_id = None
-        if not (os.name == "nt" and self._embedded_mode and self._chromium_dwm_mode
+        if not (not getattr(self, "_javascript_dialog_modal_active", False)
+                and os.name == "nt" and self._embedded_mode and self._chromium_dwm_mode
                 and self._dwm_surface_ready and self._chromium_page_keyboard_active
                 and not self._address_focus_active):
             self._dwm_keyboard_poll_active = False
@@ -7268,6 +7297,7 @@ class BrowserApp(BrowserFeatures):
             should_show = bool(
                 show and self._dwm_surface_ready
                 and not self._dwm_host_suspended_for_minimize
+                and not self._dwm_host_suspended_for_page_dialog
                 and not root_iconic
             )
             if should_show and not self._dwm_host_visible:
@@ -7286,6 +7316,18 @@ class BrowserApp(BrowserFeatures):
             return (w, h)
         except Exception:
             return None
+
+    def _set_dwm_page_dialog_suspended(self, suspended):
+        """Hide only the DWM Chromium presentation while a native page dialog is open."""
+        suspended = bool(suspended)
+        self._dwm_host_suspended_for_page_dialog = suspended
+        if not (self._embedded_mode and self._chromium_dwm_mode):
+            return False
+        try:
+            self._sync_dwm_host_geometry(show=not suspended, transparent=False)
+            return True
+        except Exception:
+            return False
 
     def _cancel_dwm_host_reveal(self):
         if self._dwm_reveal_after_id is not None:
@@ -7980,6 +8022,8 @@ class BrowserApp(BrowserFeatures):
         )
 
     def _chromium_input_surface_active(self):
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            return False
         return bool(self._chromium_software_mode or self._chromium_dwm_mode)
 
     def _dwm_local_to_chromium_xy(self, x, y):
@@ -8242,7 +8286,9 @@ class BrowserApp(BrowserFeatures):
 
     def _schedule_dwm_pointer_bridge(self, delay=8):
         """Arm the Windows pointer fallback for the visible DWM destination."""
-        if os.name != "nt" or not (self._embedded_mode and self._chromium_dwm_mode and self._dwm_surface_ready):
+        if (getattr(self, "_javascript_dialog_modal_active", False)
+                or os.name != "nt"
+                or not (self._embedded_mode and self._chromium_dwm_mode and self._dwm_surface_ready)):
             return False
         if self._dwm_pointer_after_id is not None:
             return True
@@ -8392,7 +8438,9 @@ class BrowserApp(BrowserFeatures):
         return future
 
     def _poll_chromium_input_refresh(self, future, generation):
-        if generation != self._chromium_frame_generation or not self._chromium_software_mode:
+        if (getattr(self, "_javascript_dialog_modal_active", False)
+                or generation != self._chromium_frame_generation
+                or not self._chromium_software_mode):
             return
         if future is not None and not future.done():
             self.root.after(4, self._poll_chromium_input_refresh, future, generation)
@@ -8543,6 +8591,9 @@ class BrowserApp(BrowserFeatures):
         self.root.after(4, self._poll_chromium_cursor_probe)
 
     def _poll_chromium_cursor_probe(self):
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            self._chromium_cursor_future = None
+            return
         future = self._chromium_cursor_future
         if future is None:
             return
@@ -8682,6 +8733,8 @@ class BrowserApp(BrowserFeatures):
         DWM host. When the last pointer click belonged to the page, keep routing
         keys to Chromium unless Tekzite's address bar is actively editing.
         """
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            return None
         if not (self._chromium_dwm_mode and self._chromium_page_keyboard_active):
             return None
         if getattr(self, "_dwm_keyboard_poll_active", False):
@@ -9031,6 +9084,14 @@ class BrowserApp(BrowserFeatures):
 
     def _poll_embedded_pointer_focus(self):
         self._embedded_focus_watch_after_id = None
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            try:
+                self._embedded_focus_watch_after_id = self.root.after(
+                    250, self._poll_embedded_pointer_focus
+                )
+            except Exception:
+                self._embedded_focus_watch_after_id = None
+            return
         pressed = False
         try:
             if os.name == "nt" and self._embedded_mode and not self._chromium_dwm_mode and self.edge_host.winfo_ismapped():
@@ -11383,6 +11444,12 @@ class BrowserApp(BrowserFeatures):
             return False
 
     def _run_scheduled_dwm_zoom_refresh(self):
+        # A synchronous page dialog deliberately blocks the renderer. Do not let
+        # a delayed DWM/zoom settle callback compete with the modal on Tk's UI
+        # thread; remember one refresh and replay it after the dialog is answered.
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            self._javascript_dialog_deferred_dwm_zoom_refresh = True
+            return False
         if getattr(self, "_window_drag_active", False):
             self._window_drag_deferred_dwm_zoom_refresh = True
             return False
@@ -11422,7 +11489,24 @@ class BrowserApp(BrowserFeatures):
         return applied
 
     def _run_scheduled_chromium_zoom_apply(self, target_id=None, all_tabs=False):
-        """Run one zoom settle pass unless top-level dragging owns the UI."""
+        """Run one zoom settle pass unless a modal or top-level drag owns the UI."""
+        # set_embedded_chromium_zoom() can spend seconds in synchronous CDP /
+        # extension bridge work. A JavaScript alert/confirm/prompt blocks the page
+        # renderer by design, so running this from root.after() while the modal is
+        # visible freezes Tk hover/click delivery. Coalesce the settle work instead.
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            if all_tabs:
+                self._javascript_dialog_deferred_zoom_all = True
+                targets = getattr(self, "_javascript_dialog_deferred_zoom_targets", None)
+                if targets is not None:
+                    targets.clear()
+            else:
+                targets = getattr(self, "_javascript_dialog_deferred_zoom_targets", None)
+                if targets is None:
+                    targets = set()
+                    self._javascript_dialog_deferred_zoom_targets = targets
+                targets.add(target_id)
+            return False
         if getattr(self, "_window_drag_active", False):
             if all_tabs:
                 self._window_drag_deferred_zoom_all = True
@@ -11432,6 +11516,44 @@ class BrowserApp(BrowserFeatures):
         if all_tabs:
             return self._apply_chromium_zoom_to_all_tabs()
         return self._apply_chromium_zoom(target_id)
+
+    def _resume_deferred_chromium_ui_work_after_page_dialog(self):
+        """Replay modal-deferred Chromium settle work once Tk is interactive again."""
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            return False
+
+        all_tabs = bool(getattr(self, "_javascript_dialog_deferred_zoom_all", False))
+        targets = set(getattr(self, "_javascript_dialog_deferred_zoom_targets", set()) or set())
+        refresh_dwm = bool(
+            getattr(self, "_javascript_dialog_deferred_dwm_zoom_refresh", False)
+        )
+
+        self._javascript_dialog_deferred_zoom_all = False
+        self._javascript_dialog_deferred_zoom_targets = set()
+        self._javascript_dialog_deferred_dwm_zoom_refresh = False
+
+        scheduled = False
+        try:
+            if all_tabs:
+                self.root.after(
+                    90, self._run_scheduled_chromium_zoom_apply, None, True
+                )
+                scheduled = True
+            else:
+                for index, deferred_target in enumerate(targets):
+                    self.root.after(
+                        90 + (index * 15),
+                        self._run_scheduled_chromium_zoom_apply,
+                        deferred_target,
+                        False,
+                    )
+                    scheduled = True
+            if refresh_dwm:
+                self.root.after(140, self._run_scheduled_dwm_zoom_refresh)
+                scheduled = True
+        except Exception:
+            pass
+        return scheduled
 
     def _schedule_chromium_zoom_apply(self, target_id=None, all_tabs=False):
         """Re-apply zoom across the short redirect/renderer-settle window.
@@ -11453,6 +11575,14 @@ class BrowserApp(BrowserFeatures):
     def _zoom_watchdog_tick(self):
         """Backup verifier for Chromium-native zoom with adaptive idle cadence."""
         self._zoom_watchdog_after_id = None
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            try:
+                self._zoom_watchdog_after_id = self.root.after(
+                    1200, self._zoom_watchdog_tick
+                )
+            except Exception:
+                self._zoom_watchdog_after_id = None
+            return
         if getattr(self, "_window_drag_active", False):
             try:
                 self._zoom_watchdog_after_id = self.root.after(300, self._zoom_watchdog_tick)
@@ -13225,7 +13355,8 @@ class BrowserApp(BrowserFeatures):
         win.after_idle(fit_and_center_preferences)
         win.protocol("WM_DELETE_WINDOW", cancel_preferences)
 
-    def _raise_toplevel_above_dwm(self, win, hold_ms=420, persistent_topmost=False):
+    def _raise_toplevel_above_dwm(
+            self, win, hold_ms=420, persistent_topmost=False, prepare_tk=True):
         """Force an app dialog above the separate native DWM presentation HWND.
 
         Tk ``lift``/``-topmost`` is usually enough, but the Chromium page is
@@ -13237,13 +13368,14 @@ class BrowserApp(BrowserFeatures):
         replacement is destroyed, preventing Chromium's modal surface from
         reclaiming the z-order while the user is deciding.
         """
-        try:
-            win.update_idletasks()
-            win.deiconify()
-            win.lift()
-            win.focus_force()
-        except Exception:
-            pass
+        if prepare_tk:
+            try:
+                win.update_idletasks()
+                win.deiconify()
+                win.lift()
+                win.focus_force()
+            except Exception:
+                pass
         if os.name != "nt":
             try:
                 win.attributes("-topmost", True)
@@ -13679,6 +13811,9 @@ class BrowserApp(BrowserFeatures):
             f"dwm_keyboard_poll_chars: {getattr(self, '_dwm_keyboard_poll_chars', 0)}",
             f"dwm_keyboard_poll_last: {getattr(self, '_dwm_keyboard_poll_last', None)}",
             f"dwm_keyboard_poll_error: {getattr(self, '_dwm_keyboard_poll_error', None)}",
+            f"javascript_dialog_modal_active: {getattr(self, '_javascript_dialog_modal_active', False)}",
+            f"javascript_dialog_last_mode: {getattr(self, '_javascript_dialog_last_mode', None)}",
+            f"javascript_dialog_last_show_ms: {getattr(self, '_javascript_dialog_last_show_ms', None)}",
         ]))
         try:
             add("CHROMIUM / DWM DEBUG", embedded_chromium_debug_report())
