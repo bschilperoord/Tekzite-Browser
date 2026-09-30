@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "dev/v10.5.114-dialog-alpha"
+      - "dev/v10.5.114-dialog-freeze-fix"
 
 permissions:
   contents: read
