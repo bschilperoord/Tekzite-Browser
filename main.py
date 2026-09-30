@@ -90,10 +90,10 @@ UI_COLOR_DEFAULTS = {
     "success": "#4ad594",
 }
 
-TOOLBAR_ITEM_IDS = ("back", "forward", "reload", "home", "address", "downloads", "menu")
+TOOLBAR_ITEM_IDS = ("back", "forward", "reload", "home", "address", "downloads", "extensions", "menu")
 TOOLBAR_ITEM_NAMES = {
     "back": "Back", "forward": "Forward", "reload": "Reload / Stop",
-    "home": "Home", "address": "Address bar", "downloads": "Downloads", "menu": "Main menu",
+    "home": "Home", "address": "Address bar", "downloads": "Downloads", "extensions": "Extensions", "menu": "Main menu",
 }
 
 CUSTOMIZATION_PRESETS = {
@@ -2773,10 +2773,11 @@ class BrowserApp(BrowserFeatures):
         self.address.bind("<Control-Shift-v>", lambda event: self._paste_and_go())
 
         self.downloads_button = chrome_button(self.toolbar, self._toolbar_text("downloads"), self._show_downloads, width=None)
+        self.extensions_button = chrome_button(self.toolbar, self._toolbar_text("extensions"), self._show_extensions_toolbar_popup, width=None)
         self.main_menu_button = chrome_button(self.toolbar, self._toolbar_text("menu"), self._show_main_menu, width=None)
         self._toolbar_widgets = {
             "back": self.back_button, "forward": self.forward_button, "reload": self.reload_button, "home": self.home_button,
-            "address": self.address_shell, "downloads": self.downloads_button, "menu": self.main_menu_button,
+            "address": self.address_shell, "downloads": self.downloads_button, "extensions": self.extensions_button, "menu": self.main_menu_button,
         }
         self._apply_toolbar_layout()
 
@@ -11740,8 +11741,8 @@ class BrowserApp(BrowserFeatures):
             return max(6, int(base))
 
     def _toolbar_text(self, item, *, loading=False):
-        icons = {"back": "‹", "forward": "›", "reload": "×" if loading else "↻", "home": "⌂", "downloads": "⇩", "menu": "⋮"}
-        words = {"back": "Back", "forward": "Forward", "reload": "Stop" if loading else "Reload", "home": "Home", "downloads": "Downloads", "menu": "Menu"}
+        icons = {"back": "‹", "forward": "›", "reload": "×" if loading else "↻", "home": "⌂", "downloads": "⇩", "extensions": "🧩", "menu": "⋮"}
+        words = {"back": "Back", "forward": "Forward", "reload": "Stop" if loading else "Reload", "home": "Home", "downloads": "Downloads", "extensions": "Extensions", "menu": "Menu"}
         mode = str(self._custom("toolbar_label_style", "icons"))
         if mode == "text":
             return words.get(item, item.title())
