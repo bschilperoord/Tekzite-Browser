@@ -207,11 +207,14 @@ def update_if_due(
 
     last_checked = float(meta.get("last_checked", 0) or 0)
     age = max(0.0, now - last_checked)
-    if not force and last_checked and age < UPDATE_INTERVAL_SECONDS:
+    due_interval = (
+        RETRY_INTERVAL_SECONDS if meta.get("last_error") else UPDATE_INTERVAL_SECONDS
+    )
+    if not force and last_checked and age < due_interval:
         return {
             **status(state_directory),
-            "result": "fresh",
-            "next_check_seconds": max(60, int(UPDATE_INTERVAL_SECONDS - age)),
+            "result": "retry-wait" if meta.get("last_error") else "fresh",
+            "next_check_seconds": max(60, int(due_interval - age)),
         }
 
     headers = {}
