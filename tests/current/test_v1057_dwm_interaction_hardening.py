@@ -8,7 +8,7 @@ NET = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.115"
+    assert main.BROWSER_VERSION == "10.5.116"
 
 
 def test_click_count_progresses_and_resets():

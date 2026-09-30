@@ -19,6 +19,35 @@ async function tekziteFeature(action, payload) {
     await chrome.declarativeNetRequest.updateEnabledRulesets({enableRulesetIds, disableRulesetIds});
     return true;
   }
+  if (action === "privacyStats") {
+    let counters = {ads_blocked: 0, trackers_blocked: 0};
+    if (typeof globalThis.tekziteGetPrivacyCounters === "function") {
+      try {
+        counters = await globalThis.tekziteGetPrivacyCounters();
+      } catch (_) {}
+    }
+
+    // Heal missed service-worker events from Chromium's own recent matched-rule
+    // history. The event counters keep the full session total when available;
+    // this snapshot makes Privacy Shield robust when the worker slept through
+    // a match or restarted.
+    try {
+      const details = await chrome.declarativeNetRequest.getMatchedRules();
+      const snapshot = {ads_blocked: 0, trackers_blocked: 0};
+      for (const info of (details?.rulesMatchedInfo || [])) {
+        const ruleset = String(info?.rule?.rulesetId || "");
+        if (ruleset === "ads") snapshot.ads_blocked += 1;
+        else if (ruleset === "trackers") snapshot.trackers_blocked += 1;
+      }
+      counters.ads_blocked = Math.max(Number(counters.ads_blocked || 0), snapshot.ads_blocked);
+      counters.trackers_blocked = Math.max(Number(counters.trackers_blocked || 0), snapshot.trackers_blocked);
+    } catch (_) {}
+
+    return {
+      ads_blocked: Number(counters.ads_blocked || 0),
+      trackers_blocked: Number(counters.trackers_blocked || 0),
+    };
+  }
   if (action === "downloads") {
     return await chrome.downloads.search({orderBy: ["-startTime"], limit: 200});
   }

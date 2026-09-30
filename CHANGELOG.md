@@ -1,3 +1,12 @@
+# v10.5.116 - HaGeZi Privacy Core and live privacy counters
+
+- Adds auto-updating HaGeZi Multi PRO Mini protection with official-mirror fallback, background updates, validation, atomic replacement, last-known-good retention and a local allowlist.
+- Keeps browsing-time HaGeZi blocking fully local inside Tekzite Network, with no visited URLs sent to the list provider.
+- Adds Settings controls for HaGeZi enablement, automatic eight-hour refreshes, manual updates, update result visibility and exceptions.
+- Fixes Privacy Shield counters that could remain at zero by reading proxy counters directly from the running helper and recovering Chromium DNR counts from matched-rule history.
+- Shows the live counter source, active HaGeZi domain count and combined blocked total so downloaded and actually-loaded protection are clearly distinguished.
+- Preserves the v10.5.115 native JavaScript dialog responsiveness and first-dialog fixes.
+
 # v10.5.115 - Reliable native JavaScript dialogs
 
 - Fixes the first native Tk JavaScript dialog sometimes failing to appear while Chromium navigation is still committing its target.

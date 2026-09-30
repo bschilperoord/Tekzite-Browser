@@ -392,9 +392,18 @@ def _ensure_network_engine_locked():
     adblock_enabled = str(os.environ.get("TEKZITE_ADBLOCK_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
     tracker_blocking = str(os.environ.get("TEKZITE_TRACKER_BLOCKING", "1")).strip().lower() not in {"0", "false", "no", "off"}
     https_first = str(os.environ.get("TEKZITE_HTTPS_FIRST", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    hagezi_enabled = str(os.environ.get("TEKZITE_HAGEZI_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    hagezi_list = str(os.environ.get("TEKZITE_HAGEZI_LIST", "") or "").strip()
+    hagezi_allowlist = str(os.environ.get("TEKZITE_HAGEZI_ALLOWLIST", "") or "").strip()
     # Retain proxy protection until the optional extension confirms its rules.
     _set_adblock_fallback(adblock_enabled)
     command += ["--adblock-policy", str(state_dir / "adblock-policy.json")]
+    if hagezi_list:
+        command += ["--hagezi-list", hagezi_list]
+    if hagezi_allowlist:
+        command += ["--hagezi-allowlist", hagezi_allowlist]
+    if not hagezi_enabled:
+        command.append("--disable-hagezi")
     if not adblock_enabled:
         command.append("--disable-adblock")
     if not tracker_blocking:
@@ -472,27 +481,87 @@ def network_engine_debug(start=True):
     }
 
 
-def privacy_stats():
-    """Return aggregate counters for the currently running helper only."""
+def privacy_stats(timeout=0.25):
+    """Return live counters from the running helper, with disk fallback."""
     state = _NETWORK_ENGINE or {}
     proc = state.get("process") if state else None
+    empty = {
+        "telemetry_blocked": 0,
+        "trackers_blocked": 0,
+        "ads_blocked": 0,
+        "hagezi_blocked": 0,
+        "https_upgrades": 0,
+        "hagezi_domains_loaded": 0,
+        "hagezi_allowlist_loaded": 0,
+        "started_at": None,
+        "source": "none",
+    }
     if proc is None or proc.poll() is not None:
-        return {"telemetry_blocked": 0, "trackers_blocked": 0, "ads_blocked": 0, "https_upgrades": 0, "started_at": None}
+        return dict(empty)
+
+    host = str(state.get("host") or "127.0.0.1")
+    port = int(state.get("port") or 0)
+    token = str(state.get("instance_token") or "")
+    if port and token:
+        request = (
+            "GET http://tekzite.internal/__privacy_stats HTTP/1.1\r\n"
+            "Host: tekzite.internal\r\n"
+            f"X-Tekzite-Instance-Token: {token}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        try:
+            with socket.create_connection(
+                (host, port), timeout=max(0.05, float(timeout))
+            ) as sock:
+                sock.settimeout(max(0.05, float(timeout)))
+                sock.sendall(request)
+                chunks = []
+                total = 0
+                while total < 128 * 1024:
+                    chunk = sock.recv(min(32768, 128 * 1024 - total))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+            raw = b"".join(chunks)
+            head, body = raw.split(b"\r\n\r\n", 1)
+            if not head.startswith(b"HTTP/1.1 200"):
+                raise ValueError("privacy stats endpoint unavailable")
+            data = json.loads(body.decode("utf-8"))
+            if isinstance(data, dict):
+                return {
+                    "telemetry_blocked": max(0, int(data.get("telemetry_blocked", 0) or 0)),
+                    "trackers_blocked": max(0, int(data.get("trackers_blocked", 0) or 0)),
+                    "ads_blocked": max(0, int(data.get("ads_blocked", 0) or 0)),
+                    "hagezi_blocked": max(0, int(data.get("hagezi_blocked", 0) or 0)),
+                    "https_upgrades": max(0, int(data.get("https_upgrades", 0) or 0)),
+                    "hagezi_domains_loaded": max(0, int(data.get("hagezi_domains_loaded", 0) or 0)),
+                    "hagezi_allowlist_loaded": max(0, int(data.get("hagezi_allowlist_loaded", 0) or 0)),
+                    "started_at": data.get("started_at"),
+                    "source": "live-helper",
+                }
+        except Exception:
+            pass
+
+    # Compatibility fallback for an older helper or transient loopback read.
     path = _network_engine_state_dir() / "privacy-stats.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             return {
-                "telemetry_blocked": int(data.get("telemetry_blocked", 0) or 0),
-                "trackers_blocked": int(data.get("trackers_blocked", 0) or 0),
-                "ads_blocked": int(data.get("ads_blocked", 0) or 0),
-                "https_upgrades": int(data.get("https_upgrades", 0) or 0),
+                "telemetry_blocked": max(0, int(data.get("telemetry_blocked", 0) or 0)),
+                "trackers_blocked": max(0, int(data.get("trackers_blocked", 0) or 0)),
+                "ads_blocked": max(0, int(data.get("ads_blocked", 0) or 0)),
+                "hagezi_blocked": max(0, int(data.get("hagezi_blocked", 0) or 0)),
+                "https_upgrades": max(0, int(data.get("https_upgrades", 0) or 0)),
+                "hagezi_domains_loaded": 0,
+                "hagezi_allowlist_loaded": 0,
                 "started_at": data.get("started_at"),
+                "source": "checkpoint-file",
             }
     except Exception:
         pass
-    return {"telemetry_blocked": 0, "trackers_blocked": 0, "ads_blocked": 0, "https_upgrades": 0, "started_at": None}
-
+    return dict(empty)
 
 def connection_overview(start=False, timeout=0.25):
     """Return the current helper session's RAM-only destination ledger."""

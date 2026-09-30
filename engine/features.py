@@ -85,6 +85,16 @@ def configure(session=None):
     return True
 
 
+def privacy_stats(session=None):
+    value = call('privacyStats', {}, session)
+    if not isinstance(value, dict):
+        return {'ads_blocked': 0, 'trackers_blocked': 0}
+    return {
+        'ads_blocked': max(0, int(value.get('ads_blocked', 0) or 0)),
+        'trackers_blocked': max(0, int(value.get('trackers_blocked', 0) or 0)),
+    }
+
+
 def initialize_optional(session):
     """Never promote an optional-service failure into a browser launch failure."""
     try:

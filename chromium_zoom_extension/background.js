@@ -1,5 +1,52 @@
 try { importScripts("features.js"); } catch (error) { console.error("Tekzite services:", error); }
 const KEY = "tekziteDesiredZoom";
+const PRIVACY_COUNTER_KEY = "tekzitePrivacyCounters";
+let privacyCounters = {ads_blocked: 0, trackers_blocked: 0};
+let privacyCounterFlushTimer = null;
+
+async function loadPrivacyCounters() {
+  try {
+    const data = await chrome.storage.session.get(PRIVACY_COUNTER_KEY);
+    const saved = data[PRIVACY_COUNTER_KEY] || {};
+    privacyCounters = {
+      ads_blocked: Number(saved.ads_blocked || 0),
+      trackers_blocked: Number(saved.trackers_blocked || 0),
+    };
+  } catch (_) {}
+  return {...privacyCounters};
+}
+
+function schedulePrivacyCounterFlush() {
+  if (privacyCounterFlushTimer !== null) return;
+  privacyCounterFlushTimer = setTimeout(async () => {
+    privacyCounterFlushTimer = null;
+    try {
+      await chrome.storage.session.set({[PRIVACY_COUNTER_KEY]: privacyCounters});
+    } catch (_) {}
+  }, 200);
+}
+
+globalThis.tekziteGetPrivacyCounters = async function() {
+  if (privacyCounterFlushTimer !== null) {
+    clearTimeout(privacyCounterFlushTimer);
+    privacyCounterFlushTimer = null;
+    try { await chrome.storage.session.set({[PRIVACY_COUNTER_KEY]: privacyCounters}); } catch (_) {}
+  }
+  return {...privacyCounters};
+};
+
+if (chrome.declarativeNetRequest?.onRuleMatchedDebug) {
+  chrome.declarativeNetRequest.onRuleMatchedDebug.addListener(info => {
+    const ruleset = String(info?.rule?.rulesetId || "");
+    if (ruleset === "ads") privacyCounters.ads_blocked += 1;
+    else if (ruleset === "trackers") privacyCounters.trackers_blocked += 1;
+    else return;
+    schedulePrivacyCounterFlush();
+  });
+}
+
+loadPrivacyCounters();
+
 let desiredZoom = 1.0;
 const applying = new Set();
 

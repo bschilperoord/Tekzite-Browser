@@ -19,6 +19,7 @@ from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, quote_plus, urlsplit, urlunsplit, parse_qsl, urlencode
 from privacy_core import strip_tracking_parameters, upgrade_to_https
+import hagezi_privacy
 import loopback_policy
 
 from engine.net import (
@@ -331,6 +332,9 @@ DEFAULT_PREFERENCES = {
     "clear_browsing_data_on_exit": False,
     "page_zoom_percent": 100,
     "adblock_enabled": True,
+    "hagezi_enabled": True,
+    "hagezi_auto_update": True,
+    "hagezi_allowlist": [],
     # User-managed unpacked Chromium extensions. Tekzite's built-in local
     # services extension is always loaded separately and cannot be removed.
     "extensions": [],
@@ -872,6 +876,11 @@ def load_preferences():
     prefs["omnibox_suggestions_enabled"] = bool(prefs.get("omnibox_suggestions_enabled", True))
     prefs["download_prompt"] = bool(prefs.get("download_prompt", False))
     prefs["strict_python_loopback"] = bool(prefs.get("strict_python_loopback", True))
+    prefs["hagezi_enabled"] = bool(prefs.get("hagezi_enabled", True))
+    prefs["hagezi_auto_update"] = bool(prefs.get("hagezi_auto_update", True))
+    prefs["hagezi_allowlist"] = hagezi_privacy.normalize_allowlist(
+        prefs.get("hagezi_allowlist", [])
+    )
     if not isinstance(prefs.get("tab_groups"), dict):
         prefs["tab_groups"] = {}
     if not isinstance(prefs.get("site_permissions"), dict):
@@ -896,6 +905,11 @@ def save_preferences(prefs):
         payload.get("page_zoom_percent", 100)
     )
     payload["extensions"] = _normalized_extension_entries(payload.get("extensions", []))
+    payload["hagezi_enabled"] = bool(payload.get("hagezi_enabled", True))
+    payload["hagezi_auto_update"] = bool(payload.get("hagezi_auto_update", True))
+    payload["hagezi_allowlist"] = hagezi_privacy.normalize_allowlist(
+        payload.get("hagezi_allowlist", [])
+    )
     payload["homepage"] = str(payload.get("homepage") or START_URL).strip()[:32768] or START_URL
     payload["search_url_template"] = str(payload.get("search_url_template") or DEFAULT_SEARCH_URL_TEMPLATE).strip()[:500]
     if "{query}" not in payload["search_url_template"]:
@@ -918,7 +932,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.115"
+BROWSER_VERSION = "10.5.116"
 
 
 
@@ -2177,6 +2191,7 @@ class BrowserApp(BrowserFeatures):
         os.environ["TEKZITE_STRICT_PYTHON_LOOPBACK"] = "1" if strict_python_loopback else "0"
         os.environ["TEKZITE_PRIVACY_LOCKDOWN"] = "1" if self.preferences.get("privacy_lockdown", True) else "0"
         os.environ["TEKZITE_TRACKER_BLOCKING"] = "1" if self.preferences.get("tracker_blocking_enabled", True) else "0"
+        os.environ["TEKZITE_HAGEZI_ENABLED"] = "1" if self.preferences.get("hagezi_enabled", True) else "0"
         os.environ["TEKZITE_STRIP_REFERRER"] = "1" if self.preferences.get("strip_referrer", True) else "0"
         os.environ["TEKZITE_HTTPS_FIRST"] = "1" if self.preferences.get("https_first", True) else "0"
         os.environ["TEKZITE_LOOPBACK_ROLE"] = "browser"
@@ -12756,16 +12771,28 @@ class BrowserApp(BrowserFeatures):
         def yes(value):
             return "ACTIVE" if value else "OFF"
 
-        def refresh():
+        def refresh(query_extension=True):
             try:
                 net = network_engine_debug(start=False)
             except Exception as exc:
                 net = {"alive": False, "proxy": None, "error": str(exc)}
             try:
-                stats = privacy_stats()
+                stats = self._combined_privacy_stats()
             except Exception:
                 stats = {}
+            try:
+                hagezi = self._hagezi_status_snapshot()
+            except Exception:
+                hagezi = {}
             prefs = self.preferences
+            total_blocked = sum(
+                max(0, int(stats.get(key, 0) or 0))
+                for key in ("telemetry_blocked", "trackers_blocked", "ads_blocked", "hagezi_blocked")
+            )
+            enabled_extensions = [
+                item for item in list(prefs.get("extensions") or [])
+                if isinstance(item, dict) and item.get("enabled", True)
+            ]
             rows = [
                 "TEKZITE PRIVACY",
                 "=" * 46,
@@ -12774,6 +12801,8 @@ class BrowserApp(BrowserFeatures):
                 f"Tracking params ..... {yes(prefs.get('strip_tracking_parameters', True))}",
                 f"Referer stripping ... {yes(prefs.get('strip_referrer', True))}",
                 f"HTTPS-first ......... {yes(prefs.get('https_first', True))}",
+                f"HaGeZi PRO Mini ..... {yes(prefs.get('hagezi_enabled', True))}",
+                f"HaGeZi domains ...... {int(hagezi.get('entries', 0) or 0):,}",
                 "Third-party cookies . BLOCKED",
                 "GPC + DNT ........... SENT",
                 "WebRTC / QUIC / DoH . BLOCKED",
@@ -12785,6 +12814,8 @@ class BrowserApp(BrowserFeatures):
                 "=" * 46,
                 f"Local proxy ......... {'RUNNING' if net.get('alive') else 'NOT STARTED'}",
                 f"Proxy endpoint ...... {net.get('proxy') or 'starts with first webpage'}",
+                f"Counter source ...... {stats.get('source') or 'none'}",
+                f"HaGeZi runtime ...... {int(stats.get('hagezi_domains_loaded', 0) or 0):,} domains loaded",
                 "HTTPS inspection .... NONE",
                 "DNS ................. Windows/router resolver",
                 "",
@@ -12793,15 +12824,25 @@ class BrowserApp(BrowserFeatures):
                 f"Telemetry blocked ... {int(stats.get('telemetry_blocked', 0))}",
                 f"Trackers blocked .... {int(stats.get('trackers_blocked', 0))}",
                 f"Ads blocked ......... {int(stats.get('ads_blocked', 0))}",
+                f"HaGeZi blocked ...... {int(stats.get('hagezi_blocked', 0))}",
+                f"Total blocked ....... {total_blocked}",
                 f"HTTPS upgrades ...... {int(stats.get('https_upgrades', 0))}",
                 f"Params removed ...... {int(getattr(self, '_privacy_tracking_params_stripped', 0))}",
                 "",
+                *(
+                    ["Enabled user extensions can block a request before Privacy Core sees it."]
+                    if enabled_extensions else []
+                ),
                 "Sites still see your public IP unless you use an upstream privacy layer.",
             ]
             body.configure(state="normal")
             body.delete("1.0", "end")
             body.insert("1.0", "\n".join(rows))
             body.configure(state="disabled")
+            if query_extension:
+                self._refresh_privacy_extension_stats_async(
+                    lambda: refresh(False), parent=win
+                )
 
         footer = tk.Frame(outer, bg=self.ui["bg"]); footer.pack(fill="x", pady=(10, 0))
         tk.Button(footer, text="Local Ports", command=self._show_local_ports, bg=self.ui["chrome_2"], fg=self.ui["text"],
@@ -12946,6 +12987,15 @@ class BrowserApp(BrowserFeatures):
         https_first = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("https_first", True)))
         clear_on_exit = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("clear_browsing_data_on_exit", False)))
         adblock_enabled = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("adblock_enabled", True)))
+        hagezi_enabled = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("hagezi_enabled", True)))
+        hagezi_auto_update = tk.BooleanVar(value=bool(getattr(self, "preferences", DEFAULT_PREFERENCES).get("hagezi_auto_update", True)))
+        hagezi_allowlist = tk.StringVar(
+            value=", ".join(
+                hagezi_privacy.normalize_allowlist(
+                    getattr(self, "preferences", DEFAULT_PREFERENCES).get("hagezi_allowlist", [])
+                )
+            )
+        )
         page_zoom = tk.StringVar(value=f"{self._page_zoom_percent()}%")
         sleeping_tabs_enabled = tk.BooleanVar(value=bool(self.preferences.get("sleeping_tabs_enabled", True)))
         sleeping_tabs_minutes = tk.StringVar(value=str(self.preferences.get("sleeping_tabs_minutes", 30)))
@@ -13095,6 +13145,84 @@ class BrowserApp(BrowserFeatures):
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
         tk.Label(outer, text="Block ad hosts; restart applies.",
                  fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)), wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
+
+        tk.Checkbutton(outer, text="HaGeZi Multi PRO Mini protection",
+                       variable=hagezi_enabled, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
+                       activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=(5, 3))
+        tk.Checkbutton(outer, text="Auto-update HaGeZi every 8 hours",
+                       variable=hagezi_auto_update, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
+                       activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
+
+        hagezi_state = self._hagezi_status_snapshot()
+        hagezi_status_var = tk.StringVar(
+            value=(
+                f"Local list: {int(hagezi_state.get('entries', 0) or 0):,} domains"
+                if hagezi_state.get("available")
+                else "Local list: not downloaded yet"
+            )
+        )
+        hagezi_row = tk.Frame(outer, bg=self.ui["bg"])
+        hagezi_row.pack(fill="x", pady=(2, 4))
+        tk.Label(hagezi_row, textvariable=hagezi_status_var, fg=self.ui["muted"], bg=self.ui["bg"],
+                 font=(self._ui_font_family, self._font_size(8))).pack(side="left")
+
+        def update_hagezi_now():
+            if not hagezi_enabled.get():
+                hagezi_status_var.set("Enable HaGeZi protection first")
+                return
+
+            hagezi_status_var.set("HaGeZi: checking official mirrors…")
+
+            def finished(result):
+                try:
+                    if not win.winfo_exists():
+                        return
+                except Exception:
+                    return
+                state = str(result.get("result") or "unknown")
+                entries = int(result.get("entries", 0) or 0)
+                source = str(result.get("source") or "")
+                source_host = urlsplit(source).hostname or source or "unknown source"
+                if state == "updated":
+                    hagezi_status_var.set(
+                        f"Updated: {entries:,} domains • {source_host}"
+                    )
+                elif state in {"not-modified", "fresh"}:
+                    hagezi_status_var.set(
+                        f"Up to date: {entries:,} domains • {source_host}"
+                    )
+                elif state == "retry-wait":
+                    hagezi_status_var.set(
+                        f"Retry scheduled; local list has {entries:,} domains"
+                    )
+                elif state == "error":
+                    error = str(result.get("last_error") or "download failed")
+                    if len(error) > 170:
+                        error = error[:167] + "..."
+                    hagezi_status_var.set(f"Update failed: {error}")
+                else:
+                    hagezi_status_var.set(
+                        f"HaGeZi: {state} • {entries:,} domains"
+                    )
+
+            if self._schedule_hagezi_update(0, force=True, callback=finished):
+                self.status_var.set("Privacy Core: checking HaGeZi Multi PRO Mini…")
+            else:
+                hagezi_status_var.set("HaGeZi update could not be scheduled")
+
+        tk.Button(hagezi_row, text="Update now", command=update_hagezi_now,
+                  bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat",
+                  padx=10, pady=4).pack(side="right")
+
+        tk.Label(outer, text="HaGeZi allowlist (comma-separated domains)",
+                 fg=self.ui["muted"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8))).pack(anchor="w", pady=(3, 1))
+        tk.Entry(outer, textvariable=hagezi_allowlist, bg=self.ui["field"], fg=self.ui["text"],
+                 insertbackground=self.ui["text"], relief="flat",
+                 font=(self._ui_font_family, self._font_size(9))).pack(fill="x", ipady=5, pady=(0, 3))
+        tk.Label(outer, text="Updates are downloaded in the background; blocking uses only the local validated copy.",
+                 fg=self.ui["muted_dim"], bg=self.ui["bg"], font=(self._ui_font_family, self._font_size(8)),
+                 wraplength=560, justify="left").pack(anchor="w", pady=(0, 4))
+
         tk.Checkbutton(outer, text="Clear cookies, storage, cache and history on exit",
                        variable=clear_on_exit, bg=self.ui["bg"], fg=self.ui["text"], selectcolor=self.ui["field"],
                        activebackground=self.ui["bg"], activeforeground=self.ui["text"]).pack(anchor="w", pady=3)
@@ -13244,6 +13372,9 @@ class BrowserApp(BrowserFeatures):
                 "https_first": bool(https_first.get()),
                 "clear_browsing_data_on_exit": bool(clear_on_exit.get()),
                 "adblock_enabled": bool(adblock_enabled.get()),
+                "hagezi_enabled": bool(hagezi_enabled.get()),
+                "hagezi_auto_update": bool(hagezi_auto_update.get()),
+                "hagezi_allowlist": hagezi_privacy.normalize_allowlist(hagezi_allowlist.get()),
                 "page_zoom_percent": selected_zoom,
                 "sleeping_tabs_enabled": bool(sleeping_tabs_enabled.get()),
                 "sleeping_tabs_minutes": max(5, min(240, int(sleeping_tabs_minutes.get() or 30))),
@@ -13262,6 +13393,7 @@ class BrowserApp(BrowserFeatures):
             self._schedule_chromium_zoom_apply(all_tabs=True)
             os.environ["TEKZITE_NETWORK_LOG_LEVEL"] = str(self.preferences.get("network_diagnostics", "off"))
             os.environ["TEKZITE_ADBLOCK_ENABLED"] = "1" if self.preferences.get("adblock_enabled", True) else "0"
+            os.environ["TEKZITE_HAGEZI_ENABLED"] = "1" if self.preferences.get("hagezi_enabled", True) else "0"
             os.environ["TEKZITE_PRIVACY_LOCKDOWN"] = "1" if self.preferences.get("privacy_lockdown", True) else "0"
             os.environ["TEKZITE_TRACKER_BLOCKING"] = "1" if self.preferences.get("tracker_blocking_enabled", True) else "0"
             os.environ["TEKZITE_STRIP_REFERRER"] = "1" if self.preferences.get("strip_referrer", True) else "0"
@@ -13793,6 +13925,16 @@ class BrowserApp(BrowserFeatures):
         sections = []
         def add(title, text):
             sections.append("=" * 80 + "\n" + title + "\n" + "=" * 80 + "\n" + (text or "(no data)"))
+        try:
+            hagezi_debug = self._hagezi_status_snapshot()
+        except Exception as exc:
+            hagezi_debug = {"last_error": f"{type(exc).__name__}: {exc}"}
+        hagezi_future = getattr(self, "_hagezi_update_future", None)
+        hagezi_updating = bool(hagezi_future is not None and not hagezi_future.done())
+        try:
+            hagezi_list_file = str(hagezi_privacy.list_path(self._state_directory))
+        except Exception:
+            hagezi_list_file = None
         add("TEKZITE", "\n".join([
             f"version: {BROWSER_VERSION}",
             "web_engine: Chromium only",
@@ -13814,6 +13956,18 @@ class BrowserApp(BrowserFeatures):
             f"javascript_dialog_modal_active: {getattr(self, '_javascript_dialog_modal_active', False)}",
             f"javascript_dialog_last_mode: {getattr(self, '_javascript_dialog_last_mode', None)}",
             f"javascript_dialog_last_show_ms: {getattr(self, '_javascript_dialog_last_show_ms', None)}",
+            f"hagezi_enabled: {self.preferences.get('hagezi_enabled', True)}",
+            f"hagezi_auto_update: {self.preferences.get('hagezi_auto_update', True)}",
+            f"hagezi_updating: {hagezi_updating}",
+            f"hagezi_available: {hagezi_debug.get('available', False)}",
+            f"hagezi_entries: {hagezi_debug.get('entries', 0)}",
+            f"hagezi_source: {hagezi_debug.get('source')}",
+            f"hagezi_preferred_source: {hagezi_debug.get('preferred_source')}",
+            f"hagezi_last_checked: {hagezi_debug.get('last_checked')}",
+            f"hagezi_last_updated: {hagezi_debug.get('last_updated')}",
+            f"hagezi_last_error: {hagezi_debug.get('last_error')}",
+            f"hagezi_last_result: {getattr(self, '_hagezi_last_result', None)}",
+            f"hagezi_list_path: {hagezi_list_file}",
         ]))
         try:
             add("CHROMIUM / DWM DEBUG", embedded_chromium_debug_report())
