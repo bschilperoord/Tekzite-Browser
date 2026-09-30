@@ -39,7 +39,16 @@ def test_fast_target_activation_path_is_present():
 def test_native_zoom_bridge_is_minimally_privileged():
     manifest = json.loads((ROOT / "chromium_zoom_extension" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifest_version"] == 3
-    assert set(manifest.get("permissions", [])) <= {"tabs", "storage", "downloads", "downloads.open", "declarativeNetRequest"}
+    assert set(manifest.get("permissions", [])) <= {
+        "tabs",
+        "storage",
+        "downloads",
+        "downloads.open",
+        "declarativeNetRequest",
+        # Required only to count rules matched by Tekzite's own unpacked DNR
+        # rulesets so Privacy Shield can report real ad/tracker block totals.
+        "declarativeNetRequestFeedback",
+    }
     assert set(manifest.get("host_permissions", [])) == {"http://*/*", "https://*/*"}
     assert manifest.get("content_scripts")
     assert not manifest.get("externally_connectable")
