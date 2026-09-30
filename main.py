@@ -7656,13 +7656,26 @@ class BrowserApp(BrowserFeatures):
                 )
 
                 url = str(item.get("url") or "")
+                def release_blank_tab_omnibox():
+                    # Blank/new tabs intentionally focus the omnibox so typing
+                    # can begin immediately. A site-card click is a different
+                    # navigation gesture: relinquish that focus before changing
+                    # url_var, otherwise the URL update reopens suggestions.
+                    self._release_address_focus_for_navigation()
+                    try:
+                        self.canvas.focus_set()
+                    except Exception:
+                        pass
+
                 def open_current(_event=None, target=url):
                     if target and self._empty_tab_is_active():
+                        release_blank_tab_omnibox()
                         self.navigate_to(target, reuse_existing=False)
                     return "break"
 
                 def open_new(_event=None, target=url):
                     if target:
+                        release_blank_tab_omnibox()
                         self._new_tab(url=target, switch=True, navigate=True)
                     return "break"
 
