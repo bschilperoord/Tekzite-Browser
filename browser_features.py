@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 from urllib.parse import urlsplit
 from pathlib import Path
+from PIL import Image, ImageTk
 from browser_state import read_json, write_json, valid_url, session_snapshot
 from engine import features
 import hagezi_privacy
@@ -908,12 +909,231 @@ class BrowserFeatures:
             values = data.get(field) or []
             if isinstance(values, list):
                 permissions.extend(str(value) for value in values)
+        action = data.get('action') or data.get('browser_action') or data.get('page_action') or {}
+        if not isinstance(action, dict):
+            action = {}
+        options_ui = data.get('options_ui') if isinstance(data.get('options_ui'), dict) else {}
+        icons = data.get('icons') if isinstance(data.get('icons'), dict) else {}
         return {
             'name': name,
             'version': str(data.get('version') or '?'),
             'manifest_version': manifest_version,
             'permissions': permissions,
+            'action_popup': str(action.get('default_popup') or '').strip(),
+            'options_page': str(options_ui.get('page') or data.get('options_page') or '').strip(),
+            'icons': {str(k): str(v) for k, v in icons.items() if str(v).strip()},
         }
+
+    def _extension_runtime_match(self, path, inventory):
+        try:
+            meta = self._extension_metadata(path)
+        except Exception:
+            return None
+        name = str(meta.get('name') or '').casefold()
+        version = str(meta.get('version') or '')
+        candidates = [
+            row for row in list(inventory or [])
+            if isinstance(row, dict)
+            and str(row.get('name') or '').casefold() == name
+            and str(row.get('version') or '') == version
+        ]
+        if not candidates:
+            candidates = [
+                row for row in list(inventory or [])
+                if isinstance(row, dict)
+                and str(row.get('name') or '').casefold() == name
+            ]
+        return dict(candidates[0]) if candidates else None
+
+    def _extension_icon_photo(self, path, size=18):
+        cache = getattr(self, '_extension_toolbar_photos', None)
+        if cache is None:
+            cache = {}
+            self._extension_toolbar_photos = cache
+        key = (os.path.normcase(str(path)), int(size))
+        if key in cache:
+            return cache[key]
+        try:
+            meta = self._extension_metadata(path)
+            icons = dict(meta.get('icons') or {})
+            choices = []
+            for declared, relative in icons.items():
+                try:
+                    declared_size = int(declared)
+                except Exception:
+                    declared_size = 0
+                icon_path = Path(path) / relative
+                if icon_path.is_file():
+                    choices.append((declared_size, icon_path))
+            if not choices:
+                return None
+            choices.sort(key=lambda item: (abs(item[0] - int(size)), -item[0]))
+            image = Image.open(choices[0][1]).convert('RGBA')
+            image.thumbnail((int(size), int(size)), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+            cache[key] = photo
+            return photo
+        except Exception:
+            return None
+
+    def _set_extension_pinned(self, path, pinned):
+        rows = [dict(row) for row in self.preferences.get('extensions', []) if isinstance(row, dict)]
+        changed = False
+        for row in rows:
+            if os.path.normcase(str(row.get('path') or '')) == os.path.normcase(str(path or '')):
+                row['pinned'] = bool(pinned)
+                changed = True
+                break
+        if not changed:
+            return False
+        self.preferences['extensions'] = rows
+        self._persist_preferences()
+        self._refresh_extension_toolbar()
+        return True
+
+    def _open_actual_extension_settings(self, path, *, prefer_popup=False):
+        """Open the extension's own Chromium UI, never a Tekzite recreation."""
+        path = str(path or '')
+        try:
+            meta = self._extension_metadata(path)
+        except Exception as exc:
+            self._show_message('error', 'Extensions', f'Extension is unavailable:\n{exc}', parent=self.root)
+            return 'break'
+
+        self.status_var.set(f'Opening {meta.get("name", "extension")}…')
+
+        def resolve():
+            return features.extension_inventory()
+
+        def opened(inventory):
+            runtime = self._extension_runtime_match(path, inventory)
+            if not runtime:
+                self.status_var.set('Extension is not loaded in Chromium; restart Tekzite after enabling it.')
+                self._show_message(
+                    'info', 'Extension not loaded',
+                    'This extension is saved in Tekzite but is not currently loaded in Chromium.\n\n'
+                    'Enable it in Extension Manager and restart Tekzite.',
+                    parent=self.root,
+                )
+                return
+            extension_id = str(runtime.get('id') or '').strip()
+            options_url = str(runtime.get('optionsUrl') or '').strip()
+            popup_page = str(meta.get('action_popup') or '').lstrip('/')
+            options_page = str(meta.get('options_page') or '').lstrip('/')
+
+            if prefer_popup and popup_page and extension_id:
+                target = f'chrome-extension://{extension_id}/{popup_page}'
+            elif options_url:
+                target = options_url
+            elif options_page and extension_id:
+                target = f'chrome-extension://{extension_id}/{options_page}'
+            elif popup_page and extension_id:
+                target = f'chrome-extension://{extension_id}/{popup_page}'
+            elif extension_id:
+                target = f'chrome://extensions/?id={extension_id}'
+            else:
+                self._show_message(
+                    'info', 'Extension options',
+                    'This extension does not expose an options or popup page.',
+                    parent=self.root,
+                )
+                return
+
+            # The destination is the real chrome-extension:// page supplied by
+            # the extension itself. Tekzite only creates the browser tab.
+            self._new_tab(url=target, switch=True, navigate=True)
+            self.status_var.set(f'Opened {meta.get("name", "extension")} configuration')
+
+        self._feature_async(resolve, opened, self.root)
+        return 'break'
+
+    def _show_extension_toolbar_context_menu(self, event, path):
+        try:
+            meta = self._extension_metadata(path)
+            name = str(meta.get('name') or Path(path).name)
+        except Exception:
+            meta = {}
+            name = Path(path).name or 'Extension'
+        rows = [row for row in self.preferences.get('extensions', []) if isinstance(row, dict)]
+        current = next(
+            (row for row in rows if os.path.normcase(str(row.get('path') or '')) == os.path.normcase(str(path or ''))),
+            {},
+        )
+        pinned = bool(current.get('pinned', True))
+        menu = self._make_modern_menu(self.root)
+        menu.add_command(
+            label=f'Open {name} options',
+            command=lambda p=path: self._open_actual_extension_settings(p),
+        )
+        if meta.get('action_popup'):
+            menu.add_command(
+                label='Open extension popup page',
+                command=lambda p=path: self._open_actual_extension_settings(p, prefer_popup=True),
+            )
+        menu.add_separator()
+        menu.add_command(
+            label='Unpin from toolbar' if pinned else 'Pin to toolbar',
+            command=lambda p=path, value=not pinned: self._set_extension_pinned(p, value),
+        )
+        menu.add_command(label='Manage extensions', command=self._show_extension_manager)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+        return 'break'
+
+    def _refresh_extension_toolbar(self):
+        frame = getattr(self, 'extensions_toolbar_frame', None)
+        if frame is None:
+            return False
+        buttons = getattr(self, '_extension_toolbar_buttons', {})
+        for button in list(buttons.values()):
+            try:
+                button.destroy()
+            except Exception:
+                pass
+        self._extension_toolbar_buttons = {}
+
+        manage = getattr(self, 'extensions_manage_button', None)
+        try:
+            if manage is not None:
+                manage.pack_forget()
+        except Exception:
+            pass
+
+        for row in list(self.preferences.get('extensions', []) or []):
+            if not isinstance(row, dict) or not row.get('enabled', True) or not row.get('pinned', True):
+                continue
+            path = str(row.get('path') or '')
+            if not path:
+                continue
+            try:
+                meta = self._extension_metadata(path)
+                name = str(meta.get('name') or Path(path).name)
+            except Exception:
+                continue
+            photo = self._extension_icon_photo(path, size=max(16, self._font_size(16)))
+            button = tk.Button(
+                frame,
+                text='' if photo is not None else (name[:1].upper() or '◆'),
+                image=photo or '',
+                command=lambda p=path: self._open_actual_extension_settings(p),
+                bg=self.ui['chrome'], fg=self.ui['text'],
+                activebackground=self.ui['chrome_hover'], activeforeground=self.ui['text'],
+                relief='flat', bd=0, highlightthickness=0, cursor='hand2',
+                padx=self._ui_padding(7), pady=self._ui_padding(4),
+                font=(self._ui_font_family, self._font_size(9), 'bold'),
+            )
+            button.pack(side='left', padx=(0, self._ui_padding(2)))
+            button.bind('<Button-3>', lambda event, p=path: self._show_extension_toolbar_context_menu(event, p))
+            self._extension_toolbar_buttons[path] = button
+
+        if manage is not None:
+            manage.pack(side='left')
+        return True
 
     def _show_extension_manager(self):
         previous = getattr(self, '_extensions_window', None)
@@ -949,6 +1169,10 @@ class BrowserFeatures:
                 if self.preferences.get('privacy_lockdown', True) else
                 'Extension settings saved. Restart Tekzite to apply the new extension set.'
             )
+            try:
+                self._refresh_extension_toolbar()
+            except Exception:
+                pass
             return True
 
         def refresh(select_path=None):
@@ -1074,8 +1298,21 @@ class BrowserFeatures:
 
         tree.bind('<Double-1>', show_details)
         tree.bind('<Return>', show_details)
+        def pin_selected():
+            item = selected()
+            if not item or item.get('builtin'):
+                note.set('The built-in Tekzite service extension is not shown as a user toolbar item.')
+                return
+            entries = [dict(row) for row in self.preferences.get('extensions', [])]
+            index = item['index']
+            entries[index]['pinned'] = not bool(entries[index].get('pinned', True))
+            if persist(entries):
+                refresh(entries[index].get('path'))
+                self._refresh_extension_toolbar()
+
         self._feature_button(controls, 'Add unpacked…', add_unpacked)
         self._feature_button(controls, 'Enable / Disable', toggle_selected)
+        self._feature_button(controls, 'Pin / Unpin', pin_selected)
         self._feature_button(controls, 'Remove', remove_selected)
         self._feature_button(controls, 'Details', show_details)
         self._feature_button(controls, 'Open folder', open_folder)
