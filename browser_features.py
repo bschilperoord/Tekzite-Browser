@@ -1268,6 +1268,10 @@ class BrowserFeatures:
                     self._schedule_dwm_pointer_bridge(delay=40)
                     if getattr(self, '_chromium_page_keyboard_active', False):
                         self._schedule_dwm_keyboard_poll(60)
+                # Release any zoom/DWM settle work that arrived while Chromium's
+                # synchronous dialog had the renderer blocked. This happens only
+                # after the CDP answer completed, keeping Tk responsive throughout.
+                self._resume_deferred_chromium_ui_work_after_page_dialog()
             except Exception:
                 pass
 
