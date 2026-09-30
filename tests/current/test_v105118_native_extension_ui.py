@@ -34,7 +34,10 @@ def test_existing_extensions_migrate_to_pinned():
 def test_real_chromium_extension_inventory_bridge_is_used():
     assert "management" in MANIFEST["permissions"]
     assert 'action === "extensionInventory"' in EXTENSION_JS
+    assert "chrome.management.getSelf()" in EXTENSION_JS
     assert "chrome.management.getAll()" in EXTENSION_JS
+    assert "chrome.management.setEnabled" not in EXTENSION_JS
+    assert "chrome.management.uninstall" not in EXTENSION_JS
     assert "optionsUrl" in EXTENSION_JS
     assert "def extension_inventory" in ENGINE
 
