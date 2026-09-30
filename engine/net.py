@@ -12479,6 +12479,46 @@ def _poll_javascript_dialog_page_fallback(
     return None
 
 
+def get_embedded_chromium_javascript_dialog_target_hint():
+    """Return a zero-I/O target hint for an early JavaScript dialog.
+
+    Cold navigation can create/claim Chromium's target before BrowserApp has
+    committed that target id into the Tk tab model. If the destination opens a
+    synchronous alert/confirm/prompt during that window, waiting for the
+    navigation future creates a circular dependency: the renderer is blocked by
+    the dialog while Tk is waiting for the renderer before it knows what target
+    to poll. Read only already-known in-memory session/channel state here so the
+    UI can break that cycle without any DevTools round trip.
+    """
+    session = _CHROMIUM_SESSION or {}
+    if not session:
+        return ""
+
+    # Prefer a target whose dedicated dialog lane already observed an event.
+    for target_id, channel in list(
+            (session.get('javascript_dialog_browser_channels') or {}).items()):
+        if not isinstance(channel, dict) or channel.get('closed'):
+            continue
+        if channel.get('events') or channel.get('dialog_open'):
+            return str(target_id or channel.get('target_id') or '')
+
+    for channel in list((session.get('page_cdp_channels') or {}).values()):
+        if not isinstance(channel, dict) or channel.get('closed'):
+            continue
+        if str(channel.get('purpose') or '') != 'dialog-fallback':
+            continue
+        if channel.get('javascript_dialog_events') or channel.get('javascript_dialog_open'):
+            return str(channel.get('target_id') or '')
+
+    # During first navigation BrowserApp may not own the target id yet, but the
+    # Chromium session does as soon as the bootstrap target is claimed.
+    for key in ('active_target_id', 'target_id', 'native_app_target_id'):
+        target_id = str(session.get(key) or '').strip()
+        if target_id:
+            return target_id
+    return ""
+
+
 def poll_embedded_chromium_javascript_dialogs(
         target_id: str, *, timeout: float = 0.08):
     """Return one Chromium JavaScript dialog from either independent CDP path."""
