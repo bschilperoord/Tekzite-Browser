@@ -11444,6 +11444,12 @@ class BrowserApp(BrowserFeatures):
             return False
 
     def _run_scheduled_dwm_zoom_refresh(self):
+        # A synchronous page dialog deliberately blocks the renderer. Do not let
+        # a delayed DWM/zoom settle callback compete with the modal on Tk's UI
+        # thread; remember one refresh and replay it after the dialog is answered.
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            self._javascript_dialog_deferred_dwm_zoom_refresh = True
+            return False
         if getattr(self, "_window_drag_active", False):
             self._window_drag_deferred_dwm_zoom_refresh = True
             return False
@@ -11483,7 +11489,24 @@ class BrowserApp(BrowserFeatures):
         return applied
 
     def _run_scheduled_chromium_zoom_apply(self, target_id=None, all_tabs=False):
-        """Run one zoom settle pass unless top-level dragging owns the UI."""
+        """Run one zoom settle pass unless a modal or top-level drag owns the UI."""
+        # set_embedded_chromium_zoom() can spend seconds in synchronous CDP /
+        # extension bridge work. A JavaScript alert/confirm/prompt blocks the page
+        # renderer by design, so running this from root.after() while the modal is
+        # visible freezes Tk hover/click delivery. Coalesce the settle work instead.
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            if all_tabs:
+                self._javascript_dialog_deferred_zoom_all = True
+                targets = getattr(self, "_javascript_dialog_deferred_zoom_targets", None)
+                if targets is not None:
+                    targets.clear()
+            else:
+                targets = getattr(self, "_javascript_dialog_deferred_zoom_targets", None)
+                if targets is None:
+                    targets = set()
+                    self._javascript_dialog_deferred_zoom_targets = targets
+                targets.add(target_id)
+            return False
         if getattr(self, "_window_drag_active", False):
             if all_tabs:
                 self._window_drag_deferred_zoom_all = True
@@ -11493,6 +11516,44 @@ class BrowserApp(BrowserFeatures):
         if all_tabs:
             return self._apply_chromium_zoom_to_all_tabs()
         return self._apply_chromium_zoom(target_id)
+
+    def _resume_deferred_chromium_ui_work_after_page_dialog(self):
+        """Replay modal-deferred Chromium settle work once Tk is interactive again."""
+        if getattr(self, "_javascript_dialog_modal_active", False):
+            return False
+
+        all_tabs = bool(getattr(self, "_javascript_dialog_deferred_zoom_all", False))
+        targets = set(getattr(self, "_javascript_dialog_deferred_zoom_targets", set()) or set())
+        refresh_dwm = bool(
+            getattr(self, "_javascript_dialog_deferred_dwm_zoom_refresh", False)
+        )
+
+        self._javascript_dialog_deferred_zoom_all = False
+        self._javascript_dialog_deferred_zoom_targets = set()
+        self._javascript_dialog_deferred_dwm_zoom_refresh = False
+
+        scheduled = False
+        try:
+            if all_tabs:
+                self.root.after(
+                    90, self._run_scheduled_chromium_zoom_apply, None, True
+                )
+                scheduled = True
+            else:
+                for index, deferred_target in enumerate(targets):
+                    self.root.after(
+                        90 + (index * 15),
+                        self._run_scheduled_chromium_zoom_apply,
+                        deferred_target,
+                        False,
+                    )
+                    scheduled = True
+            if refresh_dwm:
+                self.root.after(140, self._run_scheduled_dwm_zoom_refresh)
+                scheduled = True
+        except Exception:
+            pass
+        return scheduled
 
     def _schedule_chromium_zoom_apply(self, target_id=None, all_tabs=False):
         """Re-apply zoom across the short redirect/renderer-settle window.
