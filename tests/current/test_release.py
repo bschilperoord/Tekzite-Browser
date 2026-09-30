@@ -48,6 +48,7 @@ def test_native_zoom_bridge_is_minimally_privileged():
         # Required only to count rules matched by Tekzite's own unpacked DNR
         # rulesets so Privacy Shield can report real ad/tracker block totals.
         "declarativeNetRequestFeedback",
+        "management",
     }
     assert set(manifest.get("host_permissions", [])) == {"http://*/*", "https://*/*"}
     assert manifest.get("content_scripts")
