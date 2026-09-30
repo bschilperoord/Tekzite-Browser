@@ -48,6 +48,27 @@ async function tekziteFeature(action, payload) {
       trackers_blocked: Number(counters.trackers_blocked || 0),
     };
   }
+  if (action === "extensionInventory") {
+    const own = await chrome.management.getSelf();
+    const items = await chrome.management.getAll();
+    return items
+      .filter(item => item && item.type === "extension" && item.id !== own.id)
+      .map(item => ({
+        id: String(item.id || ""),
+        name: String(item.name || ""),
+        shortName: String(item.shortName || item.name || ""),
+        version: String(item.version || ""),
+        enabled: item.enabled !== false,
+        installType: String(item.installType || ""),
+        optionsUrl: String(item.optionsUrl || ""),
+        homepageUrl: String(item.homepageUrl || ""),
+        mayDisable: item.mayDisable !== false,
+        icons: Array.isArray(item.icons) ? item.icons.map(icon => ({
+          size: Number(icon.size || 0),
+          url: String(icon.url || ""),
+        })) : [],
+      }));
+  }
   if (action === "downloads") {
     return await chrome.downloads.search({orderBy: ["-startTime"], limit: 200});
   }
