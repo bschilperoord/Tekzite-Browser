@@ -480,6 +480,9 @@ class BrowserFeatures:
         proxy.setdefault('telemetry_blocked', 0)
         proxy.setdefault('hagezi_blocked', 0)
         proxy.setdefault('https_upgrades', 0)
+        proxy.setdefault('hagezi_domains_loaded', 0)
+        proxy.setdefault('hagezi_allowlist_loaded', 0)
+        proxy.setdefault('source', 'none')
         return proxy
 
     def _refresh_privacy_extension_stats_async(self, callback=None, parent=None):
