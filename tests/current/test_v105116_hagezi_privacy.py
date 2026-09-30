@@ -97,6 +97,30 @@ def test_hagezi_failed_update_retries_on_short_interval(tmp_path, monkeypatch):
     assert result["result"] == "updated"
 
 
+def test_hagezi_update_falls_back_to_next_official_source(tmp_path, monkeypatch):
+    monkeypatch.setattr(hagezi_privacy, "MIN_VALID_ENTRIES", 3)
+    calls = []
+
+    def downloader(url, _headers, _timeout):
+        calls.append(url)
+        if len(calls) == 1:
+            raise OSError("primary mirror unavailable")
+        return 200, _domain_blob(3).encode(), {"ETag": '"fallback"'}
+
+    result = hagezi_privacy.update_if_due(
+        tmp_path,
+        force=True,
+        now=1500,
+        downloader=downloader,
+    )
+    assert result["result"] == "updated"
+    assert result["entries"] == 3
+    assert len(calls) == 2
+    assert calls[0] == hagezi_privacy.HAGEZI_SOURCE_URLS[0]
+    assert calls[1] == hagezi_privacy.HAGEZI_SOURCE_URLS[1]
+    assert result["source"] == hagezi_privacy.HAGEZI_SOURCE_URLS[1]
+
+
 def test_hagezi_conditional_update_uses_etag(tmp_path, monkeypatch):
     monkeypatch.setattr(hagezi_privacy, "MIN_VALID_ENTRIES", 3)
 
@@ -174,3 +198,6 @@ def test_privacy_shield_merges_extension_proxy_and_hagezi_counters():
     assert "_refresh_privacy_extension_stats_async" in browser_features
     assert "HaGeZi blocked" in main
     assert "_combined_privacy_stats()" in main
+    assert "callback=finished" in main
+    assert "hagezi_last_error:" in main
+    assert "hagezi_updating:" in main
