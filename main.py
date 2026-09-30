@@ -13152,9 +13152,48 @@ class BrowserApp(BrowserFeatures):
                  font=(self._ui_font_family, self._font_size(8))).pack(side="left")
 
         def update_hagezi_now():
-            hagezi_status_var.set("HaGeZi update scheduled…")
-            if self._schedule_hagezi_update(0, force=True):
+            if not hagezi_enabled.get():
+                hagezi_status_var.set("Enable HaGeZi protection first")
+                return
+
+            hagezi_status_var.set("HaGeZi: checking official mirrors…")
+
+            def finished(result):
+                try:
+                    if not win.winfo_exists():
+                        return
+                except Exception:
+                    return
+                state = str(result.get("result") or "unknown")
+                entries = int(result.get("entries", 0) or 0)
+                source = str(result.get("source") or "")
+                source_host = urlsplit(source).hostname or source or "unknown source"
+                if state == "updated":
+                    hagezi_status_var.set(
+                        f"Updated: {entries:,} domains • {source_host}"
+                    )
+                elif state in {"not-modified", "fresh"}:
+                    hagezi_status_var.set(
+                        f"Up to date: {entries:,} domains • {source_host}"
+                    )
+                elif state == "retry-wait":
+                    hagezi_status_var.set(
+                        f"Retry scheduled; local list has {entries:,} domains"
+                    )
+                elif state == "error":
+                    error = str(result.get("last_error") or "download failed")
+                    if len(error) > 170:
+                        error = error[:167] + "..."
+                    hagezi_status_var.set(f"Update failed: {error}")
+                else:
+                    hagezi_status_var.set(
+                        f"HaGeZi: {state} • {entries:,} domains"
+                    )
+
+            if self._schedule_hagezi_update(0, force=True, callback=finished):
                 self.status_var.set("Privacy Core: checking HaGeZi Multi PRO Mini…")
+            else:
+                hagezi_status_var.set("HaGeZi update could not be scheduled")
 
         tk.Button(hagezi_row, text="Update now", command=update_hagezi_now,
                   bg=self.ui["chrome_2"], fg=self.ui["text"], relief="flat",
@@ -13871,6 +13910,16 @@ class BrowserApp(BrowserFeatures):
         sections = []
         def add(title, text):
             sections.append("=" * 80 + "\n" + title + "\n" + "=" * 80 + "\n" + (text or "(no data)"))
+        try:
+            hagezi_debug = self._hagezi_status_snapshot()
+        except Exception as exc:
+            hagezi_debug = {"last_error": f"{type(exc).__name__}: {exc}"}
+        hagezi_future = getattr(self, "_hagezi_update_future", None)
+        hagezi_updating = bool(hagezi_future is not None and not hagezi_future.done())
+        try:
+            hagezi_list_file = str(hagezi_privacy.list_path(self._state_directory))
+        except Exception:
+            hagezi_list_file = None
         add("TEKZITE", "\n".join([
             f"version: {BROWSER_VERSION}",
             "web_engine: Chromium only",
@@ -13892,6 +13941,18 @@ class BrowserApp(BrowserFeatures):
             f"javascript_dialog_modal_active: {getattr(self, '_javascript_dialog_modal_active', False)}",
             f"javascript_dialog_last_mode: {getattr(self, '_javascript_dialog_last_mode', None)}",
             f"javascript_dialog_last_show_ms: {getattr(self, '_javascript_dialog_last_show_ms', None)}",
+            f"hagezi_enabled: {self.preferences.get('hagezi_enabled', True)}",
+            f"hagezi_auto_update: {self.preferences.get('hagezi_auto_update', True)}",
+            f"hagezi_updating: {hagezi_updating}",
+            f"hagezi_available: {hagezi_debug.get('available', False)}",
+            f"hagezi_entries: {hagezi_debug.get('entries', 0)}",
+            f"hagezi_source: {hagezi_debug.get('source')}",
+            f"hagezi_preferred_source: {hagezi_debug.get('preferred_source')}",
+            f"hagezi_last_checked: {hagezi_debug.get('last_checked')}",
+            f"hagezi_last_updated: {hagezi_debug.get('last_updated')}",
+            f"hagezi_last_error: {hagezi_debug.get('last_error')}",
+            f"hagezi_last_result: {getattr(self, '_hagezi_last_result', None)}",
+            f"hagezi_list_path: {hagezi_list_file}",
         ]))
         try:
             add("CHROMIUM / DWM DEBUG", embedded_chromium_debug_report())
