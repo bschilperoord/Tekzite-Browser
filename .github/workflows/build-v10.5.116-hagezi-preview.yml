@@ -1,4 +1,5 @@
 name: Build HaGeZi Privacy Core preview
+# Version-synchronized preview build
 
 on:
   push:
