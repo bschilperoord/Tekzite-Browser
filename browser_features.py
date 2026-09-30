@@ -254,6 +254,8 @@ class BrowserFeatures:
         self._hagezi_update_future = None
         self._hagezi_update_after_id = None
         self._hagezi_force_pending = False
+        self._hagezi_update_callbacks = []
+        self._hagezi_last_result = None
         self._closing = False
         self._configure_feature_preferences()
 
@@ -298,13 +300,15 @@ class BrowserFeatures:
                 'last_error': '',
             }
 
-    def _schedule_hagezi_update(self, delay_ms=1500, force=False):
+    def _schedule_hagezi_update(self, delay_ms=1500, force=False, callback=None):
         if self._closing or getattr(self, '_private_mode', False):
             return False
         if not self.preferences.get('hagezi_enabled', True):
             return False
         if force:
             self._hagezi_force_pending = True
+        if callable(callback):
+            self._hagezi_update_callbacks.append(callback)
         try:
             if self._hagezi_update_after_id is not None:
                 self.root.after_cancel(self._hagezi_update_after_id)
@@ -366,6 +370,15 @@ class BrowserFeatures:
                 'next_check_seconds': hagezi_privacy.RETRY_INTERVAL_SECONDS,
             }
 
+        self._hagezi_last_result = dict(result)
+        callbacks = list(self._hagezi_update_callbacks)
+        self._hagezi_update_callbacks.clear()
+        for callback in callbacks:
+            try:
+                callback(dict(result))
+            except Exception:
+                pass
+
         state = str(result.get('result') or '')
         entries = int(result.get('entries', 0) or 0)
         if state == 'updated':
@@ -373,7 +386,12 @@ class BrowserFeatures:
         elif state == 'error' and not result.get('available'):
             self.status_var.set('Privacy Core: HaGeZi update failed; built-in rules remain active')
 
-        if (
+        if self._hagezi_force_pending:
+            # A manual refresh may have been requested while an automatic
+            # refresh was already running. Replay it immediately instead of
+            # silently waiting until the next periodic cycle.
+            self._schedule_hagezi_update(0)
+        elif (
             self.preferences.get('hagezi_enabled', True)
             and self.preferences.get('hagezi_auto_update', True)
             and not getattr(self, '_private_mode', False)
