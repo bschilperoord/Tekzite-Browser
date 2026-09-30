@@ -392,9 +392,18 @@ def _ensure_network_engine_locked():
     adblock_enabled = str(os.environ.get("TEKZITE_ADBLOCK_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
     tracker_blocking = str(os.environ.get("TEKZITE_TRACKER_BLOCKING", "1")).strip().lower() not in {"0", "false", "no", "off"}
     https_first = str(os.environ.get("TEKZITE_HTTPS_FIRST", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    hagezi_enabled = str(os.environ.get("TEKZITE_HAGEZI_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    hagezi_list = str(os.environ.get("TEKZITE_HAGEZI_LIST", "") or "").strip()
+    hagezi_allowlist = str(os.environ.get("TEKZITE_HAGEZI_ALLOWLIST", "") or "").strip()
     # Retain proxy protection until the optional extension confirms its rules.
     _set_adblock_fallback(adblock_enabled)
     command += ["--adblock-policy", str(state_dir / "adblock-policy.json")]
+    if hagezi_list:
+        command += ["--hagezi-list", hagezi_list]
+    if hagezi_allowlist:
+        command += ["--hagezi-allowlist", hagezi_allowlist]
+    if not hagezi_enabled:
+        command.append("--disable-hagezi")
     if not adblock_enabled:
         command.append("--disable-adblock")
     if not tracker_blocking:
@@ -477,7 +486,7 @@ def privacy_stats():
     state = _NETWORK_ENGINE or {}
     proc = state.get("process") if state else None
     if proc is None or proc.poll() is not None:
-        return {"telemetry_blocked": 0, "trackers_blocked": 0, "ads_blocked": 0, "https_upgrades": 0, "started_at": None}
+        return {"telemetry_blocked": 0, "trackers_blocked": 0, "ads_blocked": 0, "hagezi_blocked": 0, "https_upgrades": 0, "started_at": None}
     path = _network_engine_state_dir() / "privacy-stats.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -486,12 +495,13 @@ def privacy_stats():
                 "telemetry_blocked": int(data.get("telemetry_blocked", 0) or 0),
                 "trackers_blocked": int(data.get("trackers_blocked", 0) or 0),
                 "ads_blocked": int(data.get("ads_blocked", 0) or 0),
+                "hagezi_blocked": int(data.get("hagezi_blocked", 0) or 0),
                 "https_upgrades": int(data.get("https_upgrades", 0) or 0),
                 "started_at": data.get("started_at"),
             }
     except Exception:
         pass
-    return {"telemetry_blocked": 0, "trackers_blocked": 0, "ads_blocked": 0, "https_upgrades": 0, "started_at": None}
+    return {"telemetry_blocked": 0, "trackers_blocked": 0, "ads_blocked": 0, "hagezi_blocked": 0, "https_upgrades": 0, "started_at": None}
 
 
 def connection_overview(start=False, timeout=0.25):
