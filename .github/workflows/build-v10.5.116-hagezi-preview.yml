@@ -32,6 +32,19 @@ jobs:
         run: python -m py_compile main.py browser_features.py hagezi_privacy.py engine/net.py engine/features.py tekzite_network.py tekzite_network_fast.py
       - name: Run HaGeZi regression
         run: python -m pytest -q tests/current/test_v105116_hagezi_privacy.py
+      - name: Live HaGeZi source smoke
+        run: |
+          python - <<'PY'
+          import tempfile
+          import hagezi_privacy
+          with tempfile.TemporaryDirectory() as directory:
+              result = hagezi_privacy.update_if_due(
+                  directory, enabled=True, auto_update=True, force=True, timeout=12
+              )
+              print(result)
+              assert result.get("result") in {"updated", "not-modified"}, result
+              assert int(result.get("entries", 0) or 0) >= hagezi_privacy.MIN_VALID_ENTRIES, result
+          PY
       - name: Run current regression suite
         run: python -m pytest -q tests/current
       - name: Check extension JavaScript
