@@ -1,3 +1,13 @@
+# v10.5.118 - Native extension controls and cleaner new-tab navigation
+
+- Keeps the omnibar closed and releases address-bar focus when a Most visited card is opened from a new tab, so navigation lands directly on the selected site.
+- Adds a native Extensions area beside Downloads that reflects the real Chromium-loaded extension inventory instead of a separate Tekzite-only list.
+- Uses each extension's own manifest icon when available and keeps extension launchers individually pinnable in the Tekzite toolbar.
+- Opens an extension's real options page from its toolbar launcher when the extension provides one, with a Chromium extension-details fallback when it does not.
+- Adds a local extension-inventory bridge through Chromium's management API while excluding Tekzite's bundled service extension from the user-facing list.
+- Restricts the management permission to read-only inventory calls in regression coverage; Tekzite does not use it to silently enable, disable or uninstall extensions.
+- Keeps the v10.5.116 HaGeZi Privacy Core, live privacy counters and native JavaScript dialog responsiveness intact.
+
 # v10.5.116 - HaGeZi Privacy Core and live privacy counters
 
 - Adds auto-updating HaGeZi Multi PRO Mini protection with official-mirror fallback, background updates, validation, atomic replacement, last-known-good retention and a local allowlist.
