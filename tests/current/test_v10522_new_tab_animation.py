@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.115"
+    assert main.BROWSER_VERSION == "10.5.116"
 
 
 def test_new_tab_records_open_animation_after_initial_tab():

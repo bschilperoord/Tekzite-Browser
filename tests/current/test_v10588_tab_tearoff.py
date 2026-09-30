@@ -45,7 +45,7 @@ def _event(x_root, y_root):
 
 
 def test_release_version_and_window_position_parser():
-    assert main.BROWSER_VERSION == "10.5.115"
+    assert main.BROWSER_VERSION == "10.5.116"
     assert main._requested_window_position(["--window-position=123,-45"]) == (123, -45)
     assert main._requested_window_position(["--window-position=nope"]) is None
     assert main._requested_window_position([]) is None
