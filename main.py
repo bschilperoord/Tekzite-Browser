@@ -12785,6 +12785,14 @@ class BrowserApp(BrowserFeatures):
             except Exception:
                 hagezi = {}
             prefs = self.preferences
+            total_blocked = sum(
+                max(0, int(stats.get(key, 0) or 0))
+                for key in ("telemetry_blocked", "trackers_blocked", "ads_blocked", "hagezi_blocked")
+            )
+            enabled_extensions = [
+                item for item in list(prefs.get("extensions") or [])
+                if isinstance(item, dict) and item.get("enabled", True)
+            ]
             rows = [
                 "TEKZITE PRIVACY",
                 "=" * 46,
@@ -12806,6 +12814,8 @@ class BrowserApp(BrowserFeatures):
                 "=" * 46,
                 f"Local proxy ......... {'RUNNING' if net.get('alive') else 'NOT STARTED'}",
                 f"Proxy endpoint ...... {net.get('proxy') or 'starts with first webpage'}",
+                f"Counter source ...... {stats.get('source') or 'none'}",
+                f"HaGeZi runtime ...... {int(stats.get('hagezi_domains_loaded', 0) or 0):,} domains loaded",
                 "HTTPS inspection .... NONE",
                 "DNS ................. Windows/router resolver",
                 "",
@@ -12815,9 +12825,14 @@ class BrowserApp(BrowserFeatures):
                 f"Trackers blocked .... {int(stats.get('trackers_blocked', 0))}",
                 f"Ads blocked ......... {int(stats.get('ads_blocked', 0))}",
                 f"HaGeZi blocked ...... {int(stats.get('hagezi_blocked', 0))}",
+                f"Total blocked ....... {total_blocked}",
                 f"HTTPS upgrades ...... {int(stats.get('https_upgrades', 0))}",
                 f"Params removed ...... {int(getattr(self, '_privacy_tracking_params_stripped', 0))}",
                 "",
+                *(
+                    ["Enabled user extensions can block a request before Privacy Core sees it."]
+                    if enabled_extensions else []
+                ),
                 "Sites still see your public IP unless you use an upstream privacy layer.",
             ]
             body.configure(state="normal")
