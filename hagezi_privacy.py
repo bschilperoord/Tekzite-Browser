@@ -14,10 +14,12 @@ import urllib.request
 from pathlib import Path
 
 HAGEZI_NAME = "HaGeZi Multi PRO Mini"
-HAGEZI_SOURCE_URL = (
-    "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/"
-    "wildcard/pro.mini-onlydomains.txt"
+HAGEZI_SOURCE_URLS = (
+    "https://hagezi-mirror.dnsbunker.org/wildcard/pro.mini-onlydomains.txt",
+    "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro.mini-onlydomains.txt",
+    "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro.mini-onlydomains.txt",
 )
+HAGEZI_SOURCE_URL = HAGEZI_SOURCE_URLS[0]
 HAGEZI_PROJECT_URL = "https://github.com/hagezi/dns-blocklists"
 UPDATE_INTERVAL_SECONDS = 8 * 60 * 60
 RETRY_INTERVAL_SECONDS = 30 * 60
@@ -137,7 +139,8 @@ def status(state_directory):
             entries = 0
     return {
         "name": HAGEZI_NAME,
-        "source": HAGEZI_SOURCE_URL,
+        "source": str(meta.get("source") or HAGEZI_SOURCE_URL),
+        "preferred_source": HAGEZI_SOURCE_URL,
         "entries": entries,
         "last_checked": meta.get("last_checked"),
         "last_updated": meta.get("last_updated"),
@@ -196,7 +199,7 @@ def update_if_due(
     force=False,
     now=None,
     timeout=15.0,
-    source_url=HAGEZI_SOURCE_URL,
+    source_url=None,
     downloader=None,
 ):
     """Refresh the local list when due and preserve last-known-good on failure."""
@@ -221,61 +224,69 @@ def update_if_due(
             "next_check_seconds": max(60, int(due_interval - age)),
         }
 
-    headers = {}
-    if meta.get("etag"):
-        headers["If-None-Match"] = str(meta["etag"])
-    if meta.get("last_modified"):
-        headers["If-Modified-Since"] = str(meta["last_modified"])
+    sources = (str(source_url),) if source_url else HAGEZI_SOURCE_URLS
+    fetch = downloader or _download
+    errors = []
 
-    try:
-        fetch = downloader or _download
-        code, payload, response_headers = fetch(source_url, headers, timeout)
-        meta["last_checked"] = now
-        meta["source"] = source_url
+    for candidate in sources:
+        headers = {}
+        # Validators belong to the source that returned them. Do not send one
+        # mirror's ETag to a different mirror.
+        if str(meta.get("source") or "") == candidate:
+            if meta.get("etag"):
+                headers["If-None-Match"] = str(meta["etag"])
+            if meta.get("last_modified"):
+                headers["If-Modified-Since"] = str(meta["last_modified"])
 
-        if int(code) == 304:
-            meta["last_error"] = ""
+        try:
+            code, payload, response_headers = fetch(candidate, headers, timeout)
+            meta["last_checked"] = now
+            meta["source"] = candidate
+
+            if int(code) == 304:
+                meta["last_error"] = ""
+                _atomic_write_json(metadata_path(state_directory), meta)
+                return {
+                    **status(state_directory),
+                    "result": "not-modified",
+                    "next_check_seconds": UPDATE_INTERVAL_SECONDS,
+                }
+
+            text = bytes(payload).decode("utf-8", "strict")
+            domains = parse_domain_list(text, min_entries=MIN_VALID_ENTRIES)
+            normalized = "".join(domain + "\n" for domain in sorted(domains))
+            _atomic_write_text(path, normalized)
+            meta.update(
+                {
+                    "entries": len(domains),
+                    "last_updated": now,
+                    "last_error": "",
+                    "etag": str(response_headers.get("ETag") or ""),
+                    "last_modified": str(response_headers.get("Last-Modified") or ""),
+                }
+            )
             _atomic_write_json(metadata_path(state_directory), meta)
             return {
                 **status(state_directory),
-                "result": "not-modified",
+                "result": "updated",
                 "next_check_seconds": UPDATE_INTERVAL_SECONDS,
             }
+        except Exception as exc:
+            errors.append(f"{candidate}: {type(exc).__name__}: {exc}")
 
-        text = bytes(payload).decode("utf-8", "strict")
-        domains = parse_domain_list(text, min_entries=MIN_VALID_ENTRIES)
-        normalized = "".join(domain + "\n" for domain in sorted(domains))
-        _atomic_write_text(path, normalized)
-        meta.update(
-            {
-                "entries": len(domains),
-                "last_updated": now,
-                "last_error": "",
-                "etag": str(response_headers.get("ETag") or ""),
-                "last_modified": str(response_headers.get("Last-Modified") or ""),
-            }
-        )
+    meta.update(
+        {
+            "last_checked": now,
+            "last_error": " | ".join(errors)[:1200],
+        }
+    )
+    try:
         _atomic_write_json(metadata_path(state_directory), meta)
-        return {
-            **status(state_directory),
-            "result": "updated",
-            "next_check_seconds": UPDATE_INTERVAL_SECONDS,
-        }
-    except Exception as exc:
-        meta.update(
-            {
-                "last_checked": now,
-                "source": source_url,
-                "last_error": f"{type(exc).__name__}: {exc}"[:500],
-            }
-        )
-        try:
-            _atomic_write_json(metadata_path(state_directory), meta)
-        except Exception:
-            pass
-        # Crucially, never delete or truncate the existing list on update failure.
-        return {
-            **status(state_directory),
-            "result": "error",
-            "next_check_seconds": RETRY_INTERVAL_SECONDS,
-        }
+    except Exception:
+        pass
+    # Crucially, never delete or truncate the existing list on update failure.
+    return {
+        **status(state_directory),
+        "result": "error",
+        "next_check_seconds": RETRY_INTERVAL_SECONDS,
+    }
