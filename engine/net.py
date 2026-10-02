@@ -5967,15 +5967,6 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     if not profile:
         return False
 
-    # Strongest provider-independent proof: Chromium has navigated back to a
-    # relying-party return/callback host after the standalone auth launch.
-    if _auth_navigation_has_returned(handle):
-        signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
-        handle["google_auth_success_signal"] = signal
-        handle["google_auth_cookie_change_at"] = time.monotonic()
-        handle["auth_provider_independent_success"] = True
-        return True
-
     try:
         launch_host = (
             urlsplit(str(handle.get("url") or "")).hostname or ""
@@ -5991,9 +5982,9 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         or return_host in {"google.com", "youtube.com", "music.youtube.com"}
     )
 
-    # Keep the proven live-HWND Google/YouTube optimization. Other providers
-    # use history/callback and relying-site cookie proof rather than guessing
-    # from arbitrary window titles.
+    # Keep the proven live-HWND Google/YouTube path first. This deliberately
+    # avoids touching History/Cookies when the exact auth window has already
+    # visibly returned, preserving the fast-close behavior.
     if google_flow:
         title_returned = _auth_window_title_has_returned(handle)
         cross_host_return = (
@@ -6020,6 +6011,19 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         elif not title_returned:
             handle["google_auth_title_return_since"] = None
 
+    # Strongest provider-independent proof after the non-disk Google fast path:
+    # Chromium has navigated back to a relying-party return/callback host.
+    if _auth_navigation_has_returned(handle):
+        signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
+        handle["google_auth_success_signal"] = signal
+        handle["google_auth_cookie_change_at"] = time.monotonic()
+        handle["auth_provider_independent_success"] = not google_flow
+        return True
+
+    # Keep the proven live-HWND Google/YouTube optimization. Other providers
+    # use history/callback and relying-site cookie proof rather than guessing
+    # from arbitrary window titles.
+    if google_flow:
         baseline = handle.get("google_auth_cookie_baseline") or {}
         current = _snapshot_google_auth_cookie_state(profile)
         if current is not None and current:
