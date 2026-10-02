@@ -7296,6 +7296,59 @@ def stop_embedded_chromium_loading(target_id: str = None, timeout: float = 2.0):
     return True
 
 
+def _navigate_page_with_cold_bootstrap_timeout_recovery(session, target_id, url, timeout=5.0):
+    """Navigate a page and recover a lost CDP reply during the first cold load.
+
+    Chromium can occasionally accept the initial Page.navigate and begin loading
+    the requested site while the local DevTools websocket misses/times out on
+    the command reply. During the strict about:blank bootstrap this is safe to
+    verify from /json/list: that target had no previous web page to confuse with
+    a successful navigation. Hot navigations still fail normally so stale pages
+    are never mistaken for success.
+    """
+    try:
+        return _persistent_page_cdp_call(
+            session, "Page.navigate", {"url": str(url)},
+            target_id=target_id, timeout=float(timeout), purpose="control",
+        )
+    except Exception as exc:
+        cold_bootstrap_target = bool(
+            session.get("native_blank_bootstrap_launch")
+            and str(target_id or "") == str(session.get("native_app_target_id") or "")
+        )
+        if not cold_bootstrap_target:
+            raise
+
+        live_url = ""
+        try:
+            pages = _devtools_json(
+                int(session.get("port") or 0), "/json/list",
+                timeout=min(0.8, max(0.2, float(timeout))),
+            )
+            match = next(
+                (page for page in (pages or [])
+                 if str(page.get("id") or "") == str(target_id or "")),
+                None,
+            )
+            live_url = str((match or {}).get("url") or "").strip()
+        except Exception:
+            live_url = ""
+
+        try:
+            live_scheme = (urlsplit(live_url).scheme or "").lower()
+        except Exception:
+            live_scheme = ""
+        if live_scheme in {"http", "https"}:
+            session["cold_navigation_timeout_recovered"] = True
+            session["cold_navigation_timeout_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )[:400]
+            session["cold_navigation_recovered_url"] = live_url
+            return {"recovered_after_timeout": True}
+
+        raise
+
+
 def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame: bool = False, target_id: str = None, create_new_target: bool = False):
     """Navigate Chromium with a persistent hot-path control channel.
 
@@ -7345,9 +7398,8 @@ def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame
                     ensure_embedded_chromium_javascript_dialog_monitor(known_target, timeout=0.8)
                 except Exception as exc:
                     session["javascript_dialog_monitor_error"] = type(exc).__name__
-            _persistent_page_cdp_call(
-                session, "Page.navigate", {"url": str(url)},
-                target_id=known_target, timeout=min(5.0, float(timeout)), purpose="control",
+            _navigate_page_with_cold_bootstrap_timeout_recovery(
+                session, known_target, url, timeout=min(5.0, float(timeout))
             )
             session["native_direct_app_navigation_skipped"] = False
         resolved_target = known_target
@@ -7373,9 +7425,8 @@ def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame
                     ensure_embedded_chromium_javascript_dialog_monitor(resolved_target, timeout=0.8)
                 except Exception as exc:
                     session["javascript_dialog_monitor_error"] = type(exc).__name__
-            _persistent_page_cdp_call(
-                session, "Page.navigate", {"url": str(url)},
-                target_id=resolved_target, timeout=min(5.0, float(timeout)), purpose="control",
+            _navigate_page_with_cold_bootstrap_timeout_recovery(
+                session, resolved_target, url, timeout=min(5.0, float(timeout))
             )
             session["native_direct_app_navigation_skipped"] = False
 
