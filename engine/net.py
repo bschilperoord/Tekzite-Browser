@@ -5857,9 +5857,9 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     if not profile:
         return False
 
-    # Keep the live HWND/title snapshot for diagnostics and for identifying the
-    # exact auth window, but never let the title close the window by itself.
-    _auth_window_title_has_returned(handle)
+    # Keep the live HWND/title snapshot for diagnostics. A title becomes a
+    # completion fallback only after an actual auth phase has been observed.
+    title_returned = _auth_window_title_has_returned(handle)
 
     baseline = handle.get("google_auth_cookie_baseline") or {}
     current = _snapshot_google_auth_cookie_state(profile)
@@ -5885,6 +5885,26 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         if current is not None:
             handle["google_auth_cookie_last_snapshot"] = dict(current)
         return True
+
+    # History/Cookies may lag while Chromium is still open. If Tekzite has
+    # definitely seen a non-return Google auth phase and the exact auth window
+    # has then stayed on YouTube for a short interval, accept that live return.
+    # This deliberately does not revive the old "YouTube title == success"
+    # behavior that could close the window before the user had logged in.
+    if title_returned and bool(handle.get("google_auth_auth_phase_seen")):
+        now = time.monotonic()
+        since = handle.get("google_auth_title_return_since")
+        if since is None:
+            handle["google_auth_title_return_since"] = now
+        elif (now - float(since)) >= 0.80:
+            handle["google_auth_success_signal"] = (
+                "window-return",
+                int(handle.get("google_auth_return_hwnd") or 0),
+                str(handle.get("google_auth_return_title") or ""),
+            )
+            return True
+    elif not title_returned:
+        handle["google_auth_title_return_since"] = None
 
     signal = cookie_signal
     if signal is None:
