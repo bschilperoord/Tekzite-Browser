@@ -2004,6 +2004,28 @@ class _OmniboxSuggestionPopup:
                 pass
 
 
+def _small_display_spacing_factors(screen_width, screen_height):
+    """Return adaptive padding/chrome factors for lower-resolution displays.
+
+    Tekzite's default comfortable shell was tuned on roomy desktop monitors.
+    On laptop-class 1366x768 and 1600x900 displays that same geometry can feel
+    visually compressed even though there is less total screen area. Give
+    controls a little more breathing room without changing fonts, tab widths,
+    or user-selected compact/spacious density modes.
+    """
+    try:
+        width = max(1, int(screen_width))
+        height = max(1, int(screen_height))
+    except (TypeError, ValueError):
+        return 1.0, 1.0
+
+    if width <= 1366 or height <= 768:
+        return 1.16, 1.06
+    if width <= 1600 or height <= 900:
+        return 1.10, 1.04
+    return 1.0, 1.0
+
+
 class BrowserApp(BrowserFeatures):
     def _write_stability_log(self, heading, details):
         """Best-effort local diagnostics without turning an error into a crash."""
@@ -11809,17 +11831,60 @@ class BrowserApp(BrowserFeatures):
     def _density_factor(self):
         return {"compact": 0.84, "comfortable": 1.0, "spacious": 1.18}.get(str(self._custom("density", "comfortable")), 1.0)
 
+    def _display_spacing_factors(self):
+        """Adapt the default comfortable shell to laptop-class displays.
+
+        Explicit density or UI-scale choices stay authoritative. The adaptive
+        layer only applies to Tekzite's default comfortable 100% layout.
+        """
+        try:
+            density = str(self._custom("density", "comfortable"))
+            ui_scale = float(self._custom("ui_scale", 1.0))
+        except Exception:
+            density, ui_scale = "comfortable", 1.0
+        if density != "comfortable" or abs(ui_scale - 1.0) > 0.001:
+            return 1.0, 1.0
+
+        try:
+            width = int(self.root.winfo_screenwidth())
+            height = int(self.root.winfo_screenheight())
+        except Exception:
+            return 1.0, 1.0
+
+        signature = (width, height)
+        cached_signature = getattr(self, "_display_spacing_signature", None)
+        cached_factors = getattr(self, "_display_spacing_factor_cache", None)
+        if cached_signature == signature and isinstance(cached_factors, tuple):
+            return cached_factors
+
+        factors = _small_display_spacing_factors(width, height)
+        self._display_spacing_signature = signature
+        self._display_spacing_factor_cache = factors
+        return factors
+
     def _ui_metric(self, key, default):
         try:
             value = float(self._custom(key, default))
             scale = float(self._custom("ui_scale", 1.0))
         except Exception:
             value, scale = float(default), 1.0
+        if key in {
+            "app_bar_height", "tab_bar_height", "toolbar_height",
+            "status_bar_height", "find_bar_height",
+        }:
+            _padding_factor, chrome_factor = self._display_spacing_factors()
+            value *= chrome_factor
         return max(1, int(round(value * scale)))
 
     def _ui_padding(self, value):
         try:
-            return max(0, int(round(float(value) * float(self._custom("ui_scale", 1.0)) * self._density_factor())))
+            padding_factor, _chrome_factor = self._display_spacing_factors()
+            return max(0, int(round(
+                float(value)
+                * float(self._custom("ui_scale", 1.0))
+                * self._density_factor()
+                * padding_factor
+            )))
         except Exception:
             return int(value)
 
