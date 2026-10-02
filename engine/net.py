@@ -5522,43 +5522,65 @@ def _snapshot_chromium_latest_visit(profile, target_url=""):
     return best
 
 
-def _auth_navigation_has_returned(handle):
-    """Detect a fresh standalone-browser navigation back to Tekzite's site.
+def _auth_return_url_candidates(handle):
+    """Collect normal HTTP(S) callback/return URLs advertised by an auth flow."""
+    if not isinstance(handle, dict):
+        return []
+    seeds = [
+        str(handle.get("return_url") or ""),
+        str(handle.get("url") or ""),
+    ]
+    keys = {
+        "redirect_uri", "redirect_url", "return_url", "returnurl",
+        "return_to", "returnto", "continue", "next", "redirect",
+        "callback", "callback_url", "relaystate",
+    }
+    found = []
+    pending = list(seeds)
+    seen = set()
+    while pending and len(seen) < 24:
+        value = str(pending.pop(0) or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        try:
+            parts = urlsplit(value)
+        except Exception:
+            continue
+        if parts.scheme.lower() in {"http", "https"} and parts.hostname:
+            if value not in found:
+                found.append(value)
+        try:
+            for key, raw in parse_qsl(parts.query, keep_blank_values=True):
+                if str(key or "").lower() not in keys:
+                    continue
+                candidate = str(raw or "").strip()
+                try:
+                    cp = urlsplit(candidate)
+                except Exception:
+                    continue
+                if cp.scheme.lower() in {"http", "https"} and cp.hostname:
+                    pending.append(candidate)
+        except Exception:
+            pass
+    return found
 
-    Search specifically for the intended return host. The visible YouTube
-    return can otherwise be hidden by a newer Google/account helper visit.
-    """
+
+def _auth_navigation_has_returned(handle):
+    """Detect a fresh navigation from an identity provider back to the relying site."""
     if not isinstance(handle, dict):
         return False
     profile = str(handle.get("profile") or "")
-    return_url = str(handle.get("return_url") or "")
-    if not profile or not return_url:
-        return False
-
-    latest = _snapshot_chromium_latest_visit(profile, return_url)
-    if not latest:
-        return False
-
-    current_url = str(latest[0] or "")
     launch_url = str(handle.get("url") or "")
-    try:
-        current = urlsplit(current_url)
-        expected = urlsplit(return_url)
-        launch = urlsplit(launch_url)
-        current_host = (current.hostname or "").lower().removeprefix("www.")
-        expected_host = (expected.hostname or "").lower().removeprefix("www.")
-        launch_host = (launch.hostname or "").lower().removeprefix("www.")
-        if not current_host or current_host != expected_host:
-            return False
-
-        # Never treat an auth-flow endpoint itself as the completed return.
-        path_parts = {part for part in (current.path or "").lower().split("/") if part}
-        if (current.hostname or "").lower() == "accounts.google.com":
-            return False
-        if path_parts.intersection({"signin", "login", "servicelogin", "oauth", "o", "accountchooser"}):
-            return False
-    except Exception:
+    if not profile:
         return False
+
+    try:
+        launch_host = (
+            urlsplit(launch_url).hostname or ""
+        ).lower().removeprefix("www.")
+    except Exception:
+        launch_host = ""
 
     prelaunch_baseline = (
         handle.get("history_return_visit_baseline")
@@ -5566,26 +5588,58 @@ def _auth_navigation_has_returned(handle):
     )
     postlaunch_baseline = handle.get("history_return_launch_visit")
 
-    # The normal Google flow launches on accounts.google.com. If Chromium
-    # completed the redirect so quickly that YouTube was already reached while
-    # start_standalone_auth_chromium was still settling the window, that fresh
-    # post-launch return is itself valid evidence.
-    if postlaunch_baseline and tuple(latest) == tuple(postlaunch_baseline):
-        if (
-            launch_host != expected_host
-            and prelaunch_baseline
-            and tuple(postlaunch_baseline) != tuple(prelaunch_baseline)
-        ):
-            handle["google_auth_return_visit"] = tuple(latest)
-            return True
-        return False
+    for expected_url in _auth_return_url_candidates(handle):
+        try:
+            expected = urlsplit(expected_url)
+            expected_host = (expected.hostname or "").lower().removeprefix("www.")
+        except Exception:
+            continue
+        if not expected_host:
+            continue
 
-    if prelaunch_baseline and tuple(latest) == tuple(prelaunch_baseline):
-        return False
+        latest = _snapshot_chromium_latest_visit(profile, expected_url)
+        if not latest:
+            continue
+        current_url = str(latest[0] or "")
+        try:
+            current = urlsplit(current_url)
+            current_host = (current.hostname or "").lower().removeprefix("www.")
+            if current_host != expected_host:
+                continue
 
-    handle["google_auth_return_visit"] = tuple(latest)
-    return True
+            # Same-host sign-in pages are not a completed return. Cross-host
+            # OAuth callbacks are allowed to contain /login or /auth in their
+            # callback path because those are common legitimate callback routes.
+            if current_host == launch_host:
+                path_parts = {
+                    part for part in (current.path or "").lower().split("/") if part
+                }
+                if path_parts.intersection({
+                    "signin", "sign-in", "login", "servicelogin",
+                    "oauth", "oauth2", "authorize", "authorization",
+                    "saml", "sso", "accountchooser",
+                }):
+                    continue
+        except Exception:
+            continue
 
+        if postlaunch_baseline and tuple(latest) == tuple(postlaunch_baseline):
+            if (
+                launch_host != expected_host
+                and prelaunch_baseline
+                and tuple(postlaunch_baseline) != tuple(prelaunch_baseline)
+            ):
+                handle["google_auth_return_visit"] = tuple(latest)
+                handle["auth_return_url_seen"] = current_url
+                return True
+            continue
+        if prelaunch_baseline and tuple(latest) == tuple(prelaunch_baseline):
+            continue
+
+        handle["google_auth_return_visit"] = tuple(latest)
+        handle["auth_return_url_seen"] = current_url
+        return True
+    return False
 
 
 def _standalone_auth_window_snapshot(handle):
@@ -5788,6 +5842,68 @@ def _request_windows_hwnd_close(hwnds, *, synchronous=False, system_close=False)
     except Exception:
         return []
 
+def _snapshot_auth_cookie_state(profile, return_url):
+    """Fingerprint cookies scoped to the relying site for generic auth flows.
+
+    Identity providers cannot set cookies for an unrelated relying-party
+    domain. A new/changed cookie for the return host is therefore useful
+    secondary evidence that the browser actually reached the site again.
+    """
+    try:
+        target_host = (
+            urlsplit(str(return_url or "")).hostname or ""
+        ).lower().removeprefix("www.")
+    except Exception:
+        target_host = ""
+    if not target_host:
+        return {}
+
+    saw_readable_db = False
+    snapshot = {}
+    for db_path in _google_cookie_db_candidates(profile):
+        if not db_path.is_file():
+            continue
+        temp_dir = None
+        try:
+            temp_dir, temp_path = _live_sqlite_snapshot(db_path)
+            if temp_path is None or not temp_path.is_file():
+                continue
+            con = sqlite3.connect(str(temp_path), timeout=0.5)
+            try:
+                rows = con.execute(
+                    "SELECT host_key, name, value, encrypted_value, expires_utc FROM cookies"
+                ).fetchall()
+            finally:
+                con.close()
+            saw_readable_db = True
+            for host, name, value, encrypted, expires in rows:
+                cookie_host = str(host or "").lower().lstrip(".")
+                if not cookie_host:
+                    continue
+                if not (
+                    cookie_host == target_host
+                    or target_host.endswith("." + cookie_host)
+                    or cookie_host.endswith("." + target_host)
+                ):
+                    continue
+                name = str(name or "")
+                plain = str(value or "").encode("utf-8", "replace")
+                encrypted = bytes(encrypted or b"")
+                payload = (
+                    cookie_host.encode("utf-8", "replace") + b"\0" +
+                    name.encode("utf-8", "replace") + b"\0" +
+                    plain + b"\0" + encrypted + b"\0" +
+                    str(expires or "").encode("ascii", "replace")
+                )
+                snapshot[(cookie_host, name)] = hashlib.sha256(payload).hexdigest()
+        except Exception:
+            continue
+        finally:
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+    return snapshot if saw_readable_db else None
+
+
 def _snapshot_google_auth_cookie_state(profile):
     """Return a stable fingerprint of Google auth cookies in a Chromium profile.
 
@@ -5843,53 +5959,48 @@ def _snapshot_google_auth_cookie_state(profile):
 
 
 def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
-    """Detect real auth completion without letting disk probes block live UI.
-
-    The dedicated auth HWND is the fastest source of truth. Evaluate its return
-    state first, before touching Chromium's live SQLite databases: an online
-    SQLite backup can wait on Chromium and used to leave Tekzite's handoff
-    parked forever even though the visible browser had already returned to
-    YouTube.
-
-    A YouTube title still never succeeds on its own. It must be paired with an
-    observed auth phase, an accounts.google.com -> YouTube cross-host return,
-    or authenticated session cookies.
-    """
+    """Detect completed authentication for Google and standards-based providers."""
     if not isinstance(handle, dict):
         return False
     profile = str(handle.get("profile") or "")
+    return_url = str(handle.get("return_url") or "")
     if not profile:
         return False
 
-    # Fast, non-disk path first.
-    title_returned = _auth_window_title_has_returned(handle)
-    cross_host_return = False
     try:
         launch_host = (
             urlsplit(str(handle.get("url") or "")).hostname or ""
         ).lower().removeprefix("www.")
         return_host = (
-            urlsplit(str(handle.get("return_url") or "")).hostname or ""
+            urlsplit(return_url).hostname or ""
         ).lower().removeprefix("www.")
+    except Exception:
+        launch_host = return_host = ""
+
+    google_flow = (
+        launch_host == "accounts.google.com"
+        or return_host in {"google.com", "youtube.com", "music.youtube.com"}
+    )
+
+    # Keep the proven live-HWND Google/YouTube path first. This deliberately
+    # avoids touching History/Cookies when the exact auth window has already
+    # visibly returned, preserving the fast-close behavior.
+    if google_flow:
+        title_returned = _auth_window_title_has_returned(handle)
         cross_host_return = (
             launch_host == "accounts.google.com"
             and return_host in {"youtube.com", "music.youtube.com"}
         )
-    except Exception:
-        cross_host_return = False
-    handle["google_auth_cross_host_return"] = bool(cross_host_return)
-
-    fast_live_proof = bool(
-        handle.get("google_auth_auth_phase_seen") or cross_host_return
-    )
-    if title_returned and fast_live_proof:
-        now = time.monotonic()
-        since = handle.get("google_auth_title_return_since")
-        if since is None:
-            handle["google_auth_title_return_since"] = now
-        else:
-            required_title_settle = 0.80
-            if (now - float(since)) >= required_title_settle:
+        handle["google_auth_cross_host_return"] = bool(cross_host_return)
+        fast_live_proof = bool(
+            handle.get("google_auth_auth_phase_seen") or cross_host_return
+        )
+        if title_returned and fast_live_proof:
+            now = time.monotonic()
+            since = handle.get("google_auth_title_return_since")
+            if since is None:
+                handle["google_auth_title_return_since"] = now
+            elif (now - float(since)) >= 0.80:
                 handle["google_auth_success_signal"] = (
                     "window-return",
                     int(handle.get("google_auth_return_hwnd") or 0),
@@ -5897,67 +6008,75 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
                 )
                 handle["google_auth_fast_return_used"] = True
                 return True
-    elif not title_returned:
-        handle["google_auth_title_return_since"] = None
+        elif not title_returned:
+            handle["google_auth_title_return_since"] = None
 
-    # Slow disk fallbacks only after the live-window path had a chance to win.
-    baseline = handle.get("google_auth_cookie_baseline") or {}
-    current = _snapshot_google_auth_cookie_state(profile)
-    cookie_signal = None
-    authenticated_session = False
-    if current is not None and current:
-        changed = any(
-            baseline.get(key) != value
-            for key, value in current.items()
-            if key[1] in _GOOGLE_AUTH_COOKIE_NAMES
-        )
-        if changed:
-            cookie_signal = ("cookie", tuple(sorted(current.items())))
-
-        cookie_keys = {
-            (str(host or "").lower(), str(name or ""))
-            for host, name in current.keys()
-        }
-        cookie_names = {name for _host, name in cookie_keys}
-        youtube_login = any(
-            name == "LOGIN_INFO" and host.endswith("youtube.com")
-            for host, name in cookie_keys
-        )
-        google_identity = bool(
-            {"SID", "SAPISID"}.issubset(cookie_names)
-            or {"__Secure-1PSID", "__Secure-1PAPISID"}.issubset(cookie_names)
-            or {"__Secure-3PSID", "__Secure-3PAPISID"}.issubset(cookie_names)
-        )
-        authenticated_session = bool(youtube_login or google_identity)
-    handle["google_auth_authenticated_session_seen"] = bool(authenticated_session)
-
-    return_signal = None
+    # Strongest provider-independent proof after the non-disk Google fast path:
+    # Chromium has navigated back to a relying-party return/callback host.
     if _auth_navigation_has_returned(handle):
-        return_signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
-
-    if return_signal is not None:
-        handle["google_auth_success_signal"] = return_signal
+        signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
+        handle["google_auth_success_signal"] = signal
         handle["google_auth_cookie_change_at"] = time.monotonic()
-        if current is not None:
-            handle["google_auth_cookie_last_snapshot"] = dict(current)
+        handle["auth_provider_independent_success"] = not google_flow
         return True
 
-    # Same-host YouTube auth flows cannot use cross-host proof. For those, a
-    # stable returned title plus a real authenticated session is enough.
-    if title_returned and authenticated_session:
-        now = time.monotonic()
-        since = handle.get("google_auth_title_return_since")
-        if since is None:
-            handle["google_auth_title_return_since"] = now
-        elif (now - float(since)) >= 1.20:
-            handle["google_auth_success_signal"] = (
-                "window-return",
-                int(handle.get("google_auth_return_hwnd") or 0),
-                str(handle.get("google_auth_return_title") or ""),
+    # Keep the proven live-HWND Google/YouTube optimization. Other providers
+    # use history/callback and relying-site cookie proof rather than guessing
+    # from arbitrary window titles.
+    if google_flow:
+        baseline = handle.get("google_auth_cookie_baseline") or {}
+        current = _snapshot_google_auth_cookie_state(profile)
+        if current is not None and current:
+            changed = any(
+                baseline.get(key) != value
+                for key, value in current.items()
+                if key[1] in _GOOGLE_AUTH_COOKIE_NAMES
             )
-            return True
+            cookie_keys = {
+                (str(host or "").lower(), str(name or ""))
+                for host, name in current.keys()
+            }
+            cookie_names = {name for _host, name in cookie_keys}
+            authenticated_session = bool(
+                any(
+                    name == "LOGIN_INFO" and host.endswith("youtube.com")
+                    for host, name in cookie_keys
+                )
+                or {"SID", "SAPISID"}.issubset(cookie_names)
+                or {"__Secure-1PSID", "__Secure-1PAPISID"}.issubset(cookie_names)
+                or {"__Secure-3PSID", "__Secure-3PAPISID"}.issubset(cookie_names)
+            )
+            handle["google_auth_authenticated_session_seen"] = authenticated_session
+            if title_returned and authenticated_session:
+                now = time.monotonic()
+                since = handle.get("google_auth_title_return_since")
+                if since is None:
+                    handle["google_auth_title_return_since"] = now
+                elif (now - float(since)) >= 1.20:
+                    handle["google_auth_success_signal"] = (
+                        "window-return",
+                        int(handle.get("google_auth_return_hwnd") or 0),
+                        str(handle.get("google_auth_return_title") or ""),
+                    )
+                    return True
+            if changed:
+                signal = ("cookie", tuple(sorted(current.items())))
+            else:
+                signal = None
+        else:
+            signal = None
+    else:
+        # Generic fallback: only fingerprint cookies scoped to the relying site.
+        # An unrelated identity provider cannot manufacture such cookies.
+        baseline = handle.get("auth_cookie_baseline") or {}
+        current = _snapshot_auth_cookie_state(profile, return_url)
+        changed = bool(
+            current is not None
+            and any(baseline.get(key) != value for key, value in current.items())
+        )
+        signal = ("site-cookie", tuple(sorted((current or {}).items()))) if changed else None
+        handle["auth_relying_site_cookie_seen"] = bool(changed)
 
-    signal = cookie_signal
     if signal is None:
         handle["google_auth_success_signal"] = None
         handle["google_auth_cookie_change_at"] = None
@@ -5967,8 +6086,6 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     if handle.get("google_auth_success_signal") != signal:
         handle["google_auth_success_signal"] = signal
         handle["google_auth_cookie_change_at"] = now
-        if current is not None:
-            handle["google_auth_cookie_last_snapshot"] = dict(current)
         return False
 
     changed_at = handle.get("google_auth_cookie_change_at")
@@ -5976,7 +6093,11 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         handle["google_auth_cookie_change_at"] = now
         return False
     required_settle = max(0.8, float(settle_seconds))
-    return (now - float(changed_at)) >= required_settle
+    if (now - float(changed_at)) >= required_settle:
+        handle["auth_provider_independent_success"] = not google_flow
+        return True
+    return False
+
 
 def _request_windows_window_close(pids, *, synchronous: bool = False, system_close: bool = False):
     """Ask every top-level window owned by *pids* to close normally.
@@ -6351,6 +6472,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
         # "restore pages" bubble even for users upgrading from v10.5.63.
         _mark_chromium_profile_exited_cleanly(profile)
         google_auth_cookie_baseline = _snapshot_google_auth_cookie_state(profile) or {}
+        auth_cookie_baseline = _snapshot_auth_cookie_state(profile, str(return_url or "")) or {}
         history_visit_baseline = _snapshot_chromium_latest_visit(profile)
         history_return_visit_baseline = _snapshot_chromium_latest_visit(
             profile, str(return_url or "")
@@ -6435,6 +6557,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             "return_url": str(return_url or ""),
             "window_geometry": (x, y, width, height),
             "google_auth_cookie_baseline": dict(google_auth_cookie_baseline),
+            "auth_cookie_baseline": dict(auth_cookie_baseline),
             "history_visit_baseline": tuple(history_visit_baseline) if history_visit_baseline else None,
             "history_return_visit_baseline": tuple(history_return_visit_baseline) if history_return_visit_baseline else None,
             "history_return_launch_visit": tuple(history_return_launch_visit) if history_return_launch_visit else None,

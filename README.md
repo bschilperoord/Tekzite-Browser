@@ -24,7 +24,7 @@ Some of the main features are:
 - Per-site permissions and privacy controls
 - Downloads, bookmarks and history
 - Custom themes, layouts, fonts and UI scaling
-- Google/YouTube authentication handoff
+- Provider-independent OAuth/OIDC/SAML authentication handoff
 - Windows DWM-based Chromium presentation
 - Linux support
 - Built-in diagnostics and network inspection

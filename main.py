@@ -4875,7 +4875,90 @@ class BrowserApp(BrowserFeatures):
             return None
 
     @staticmethod
+    def _is_external_auth_url(url, previous_url=""):
+        """Return True for cross-site OAuth/OIDC/SAML style authentication URLs.
+
+        Keep ordinary first-party /login pages inside Tekzite. The standalone
+        Chromium handoff is reserved for identity-provider or standards-based
+        cross-origin auth flows where browser compatibility matters.
+        """
+        try:
+            parts = urlsplit(str(url or ""))
+            if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+                return False
+            host = (parts.hostname or "").lower().removeprefix("www.")
+            path = (parts.path or "").lower()
+            params = {
+                str(k or "").lower(): str(v or "")
+                for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            }
+            previous_host = ""
+            try:
+                previous_host = (
+                    urlsplit(str(previous_url or "")).hostname or ""
+                ).lower().removeprefix("www.")
+            except Exception:
+                previous_host = ""
+
+            known_hosts = {
+                "accounts.google.com",
+                "login.microsoftonline.com",
+                "login.live.com",
+                "login.windows.net",
+                "appleid.apple.com",
+                "idmsa.apple.com",
+                "github.com",
+                "discord.com",
+                "facebook.com",
+                "www.facebook.com",
+                "linkedin.com",
+                "www.linkedin.com",
+                "accounts.spotify.com",
+                "id.twitch.tv",
+            }
+            provider_suffixes = (
+                ".auth0.com", ".okta.com", ".oktapreview.com",
+                ".onelogin.com", ".pingidentity.com",
+            )
+            auth_subdomain = host.split(".", 1)[0] in {
+                "login", "auth", "sso", "id", "identity", "accounts", "account"
+            }
+            strong_path = any(token in path for token in (
+                "/oauth", "/oauth2", "/authorize", "/authorization",
+                "/openid", "/oidc", "/saml", "/sso", "/signin",
+                "/sign-in", "/login", "/accountchooser", "/servicelogin",
+            ))
+            oauth_query = bool(
+                params.get("client_id")
+                and (
+                    params.get("redirect_uri")
+                    or params.get("response_type")
+                    or params.get("scope")
+                )
+            )
+            redirect_query = any(key in params for key in (
+                "redirect_uri", "redirect_url", "return_url", "returnurl",
+                "return_to", "returnto", "continue", "callback",
+                "callback_url", "relaystate",
+            ))
+            cross_host = bool(previous_host and previous_host != host)
+            known_provider = host in known_hosts or any(
+                host.endswith(suffix) for suffix in provider_suffixes
+            )
+
+            if known_provider and (strong_path or oauth_query or redirect_query):
+                return True
+            if oauth_query and (cross_host or auth_subdomain or strong_path):
+                return True
+            if cross_host and strong_path and (auth_subdomain or redirect_query):
+                return True
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
     def _is_google_auth_url(url):
+        """Compatibility helper retained for older regression tests."""
         try:
             parts = urlsplit(str(url or ""))
             host = (parts.hostname or "").lower()
@@ -4887,37 +4970,83 @@ class BrowserApp(BrowserFeatures):
             return False
 
     @staticmethod
-    def _google_auth_handoff_urls(url, previous_url=""):
-        """Return (standalone launch URL, Tekzite return URL)."""
+    def _external_auth_handoff_urls(url, previous_url=""):
+        """Return (standalone launch URL, Tekzite page to restore after auth)."""
         source = str(url or "").strip()
         launch_url = source
-        return_url = str(previous_url or "").strip()
+        previous = str(previous_url or "").strip()
+        return_url = previous
+
+        def valid_http(value):
+            try:
+                p = urlsplit(str(value or "").strip())
+                return p.scheme.lower() in {"http", "https"} and bool(p.hostname)
+            except Exception:
+                return False
+
+        def auth_candidate_urls(value):
+            found = []
+            pending = [str(value or "")]
+            seen = set()
+            keys = (
+                "redirect_uri", "redirect_url", "return_url", "returnurl",
+                "return_to", "returnto", "continue", "next", "redirect",
+                "callback", "callback_url", "relaystate",
+            )
+            while pending and len(seen) < 16:
+                current = pending.pop(0)
+                if current in seen:
+                    continue
+                seen.add(current)
+                try:
+                    parts = urlsplit(current)
+                    params = dict(parse_qsl(parts.query, keep_blank_values=True))
+                except Exception:
+                    continue
+                lowered = {str(k).lower(): str(v or "").strip() for k, v in params.items()}
+                for key in keys:
+                    candidate = lowered.get(key, "")
+                    if valid_http(candidate):
+                        found.append(candidate)
+                        pending.append(candidate)
+            return found
+
         try:
-            parts = urlsplit(source)
-            params = dict(parse_qsl(parts.query, keep_blank_values=True))
-            continue_url = str(params.get("continue") or "").strip()
-            if "rejected" in (parts.path or "").lower() and continue_url:
-                cp = urlsplit(continue_url)
-                if cp.scheme.lower() in {"http", "https"} and cp.hostname:
-                    launch_url = continue_url
-            if (not return_url) or BrowserApp._is_google_auth_url(return_url):
-                candidate = continue_url
-                if candidate:
-                    cp = urlsplit(candidate)
-                    nested = dict(parse_qsl(cp.query, keep_blank_values=True))
-                    next_url = str(nested.get("next") or "").strip()
-                    np = urlsplit(next_url)
-                    if np.scheme.lower() in {"http", "https"} and np.hostname:
-                        return_url = next_url
-                    elif cp.scheme.lower() in {"http", "https"} and cp.hostname:
+            source_parts = urlsplit(source)
+            candidates = auth_candidate_urls(source)
+
+            # Google's rejected page wraps the real sign-in URL in continue=.
+            if "rejected" in (source_parts.path or "").lower() and candidates:
+                launch_url = candidates[0]
+
+            # The page the user came from is normally the best page to restore.
+            # If it is itself an auth endpoint, use the deepest non-auth callback.
+            if (not valid_http(return_url)) or BrowserApp._is_external_auth_url(
+                return_url, source
+            ):
+                for candidate in reversed(candidates):
+                    if not BrowserApp._is_external_auth_url(candidate, source):
                         return_url = candidate
-            rp = urlsplit(return_url)
-            if rp.scheme.lower() not in {"http", "https"} or not rp.hostname:
-                return_url = "https://www.google.com/"
+                        break
+
+            if not valid_http(return_url):
+                # Last-resort non-auth candidate. If there is none, stay on the
+                # source origin rather than inventing a provider-specific page.
+                for candidate in reversed(candidates):
+                    if valid_http(candidate):
+                        return_url = candidate
+                        break
+            if not valid_http(return_url):
+                return_url = source
         except Exception:
             if not return_url:
-                return_url = "https://www.google.com/"
+                return_url = source
         return launch_url, return_url
+
+    @staticmethod
+    def _google_auth_handoff_urls(url, previous_url=""):
+        """Compatibility alias for the now provider-independent handoff."""
+        return BrowserApp._external_auth_handoff_urls(url, previous_url)
 
     def _paint_google_auth_handoff(self):
         try:
@@ -4927,7 +5056,7 @@ class BrowserApp(BrowserFeatures):
             self.canvas.create_text(
                 width // 2, 115,
                 anchor="n",
-                text="Google sign-in opened in a normal Chromium window",
+                text="Secure sign-in opened in a normal Chromium window",
                 width=max(460, width - 180),
                 justify="center",
                 fill=self.ui["text"],
@@ -5026,20 +5155,20 @@ class BrowserApp(BrowserFeatures):
             )
         except Exception as exc:
             self._google_auth_handoff_active = False
-            self.status_var.set(f"Could not open Google sign-in window: {exc}")
+            self.status_var.set(f"Could not open sign-in window: {exc}")
             return
         self.root.after(40, self._poll_google_auth_launch)
 
     def _maybe_start_google_auth_handoff(self, url, previous_url="", tab=None):
         if os.name != "nt" or getattr(self, "_google_auth_handoff_active", False):
             return False
-        if not self._is_google_auth_url(url):
+        if not self._is_external_auth_url(url, previous_url):
             return False
         tab = tab or self._active_tab()
         if tab is None or tab.get("id") != self.active_tab_id:
             return False
 
-        launch_url, return_url = self._google_auth_handoff_urls(url, previous_url)
+        launch_url, return_url = self._external_auth_handoff_urls(url, previous_url)
         self._google_auth_handoff_active = True
         self._google_auth_return_url = return_url
         self._google_auth_source_url = str(url or "")
@@ -5068,7 +5197,7 @@ class BrowserApp(BrowserFeatures):
         self._page_state_inflight.clear()
 
         self._paint_google_auth_handoff()
-        self.status_var.set("Google sign-in: complete authentication in Chromium; Tekzite will close it automatically")
+        self.status_var.set("Secure sign-in: complete authentication in Chromium; Tekzite will close it automatically")
         self._refresh_tab_strip()
 
         # Let Tk finish destroying/hiding every native DWM surface before the
@@ -5093,9 +5222,9 @@ class BrowserApp(BrowserFeatures):
         except Exception as exc:
             self._google_auth_handoff_active = False
             self._google_auth_handle = None
-            self.status_var.set(f"Google sign-in handoff failed: {exc}")
+            self.status_var.set(f"Sign-in handoff failed: {exc}")
             return
-        self.status_var.set("Google sign-in window is open; Tekzite will close it when authentication finishes")
+        self.status_var.set("Sign-in window is open; Tekzite will close it when authentication finishes")
         # v10.5.69: the live HWND completion signal is cheap and authoritative.
         # Poll it quickly so a visibly completed YouTube sign-in does not linger
         # for the old 220 ms cadence. Slow cookie/history fallbacks still run in
