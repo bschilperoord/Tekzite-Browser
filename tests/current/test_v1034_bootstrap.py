@@ -71,3 +71,48 @@ def test_bootstrap_claims_single_canonicalized_page_instead_of_creating_second_t
     assert page_call.call_args.args[1] == "Page.navigate"
     assert page_call.call_args.args[2] == {"url": "about:blank"}
 
+
+
+def test_cold_bootstrap_accepts_live_http_target_after_cdp_navigate_timeout():
+    session = {
+        "port": 9222,
+        "native_blank_bootstrap_launch": True,
+        "native_app_target_id": "bootstrap-1",
+    }
+
+    with patch.object(
+        net, "_persistent_page_cdp_call",
+        side_effect=TimeoutError("timed out"),
+    ), patch.object(
+        net,
+        "_devtools_json",
+        return_value=[_page("bootstrap-1", "https://www.youtube.com/")],
+    ):
+        result = net._navigate_page_with_cold_bootstrap_timeout_recovery(
+            session, "bootstrap-1", "https://www.youtube.com/", timeout=0.5
+        )
+
+    assert result == {"recovered_after_timeout": True}
+    assert session["cold_navigation_timeout_recovered"] is True
+    assert session["cold_navigation_recovered_url"] == "https://www.youtube.com/"
+
+
+def test_hot_navigation_does_not_hide_cdp_timeout():
+    session = {
+        "port": 9222,
+        "native_blank_bootstrap_launch": False,
+        "native_app_target_id": "bootstrap-1",
+    }
+
+    with patch.object(
+        net, "_persistent_page_cdp_call",
+        side_effect=TimeoutError("timed out"),
+    ):
+        try:
+            net._navigate_page_with_cold_bootstrap_timeout_recovery(
+                session, "bootstrap-1", "https://www.youtube.com/", timeout=0.5
+            )
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("hot navigation timeout must still propagate")

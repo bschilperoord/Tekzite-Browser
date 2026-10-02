@@ -1,4 +1,4 @@
-name: Build Windows DWM dialog restore
+name: Build Windows test artifact
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
       - "dev/v10.5.114-dialog-alpha"
       - "dev/v10.5.114-dialog-freeze-fix"
       - "dev/v10.5.114-dialog-first-event-fix"
+      - "dev/v10.5.119-auth-close-guard"
 
 permissions:
   contents: read
@@ -57,21 +58,21 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exeName = "Tekzite-Browser-v10.5.114-dwm-dialog-Windows-x64.exe"
-          $zipName = "Tekzite-Browser-v10.5.114-dwm-dialog-Windows-x64.zip"
+          $exeName = "Tekzite-Browser-v10.5.119-auth-fix-Windows-x64.exe"
+          $zipName = "Tekzite-Browser-v10.5.119-auth-fix-Windows-x64.zip"
           Copy-Item ".\dist\TekziteBrowser.exe" ".\$exeName" -Force
           Compress-Archive -Path ".\$exeName" -DestinationPath ".\$zipName" -CompressionLevel Optimal -Force
           $exeHash = (Get-FileHash ".\$exeName" -Algorithm SHA256).Hash.ToLowerInvariant()
           $zipHash = (Get-FileHash ".\$zipName" -Algorithm SHA256).Hash.ToLowerInvariant()
-          @("$exeHash  $exeName", "$zipHash  $zipName") | Set-Content ".\SHA256SUMS-dwm-dialog.txt" -Encoding ascii
+          @("$exeHash  $exeName", "$zipHash  $zipName") | Set-Content ".\SHA256SUMS-auth-fix.txt" -Encoding ascii
 
       - name: Upload Windows test build
         uses: actions/upload-artifact@v4
         with:
-          name: Tekzite-Browser-v10.5.114-dwm-dialog-Windows-x64
+          name: Tekzite-Browser-v10.5.119-auth-fix-Windows-x64
           path: |
-            Tekzite-Browser-v10.5.114-dwm-dialog-Windows-x64.exe
-            Tekzite-Browser-v10.5.114-dwm-dialog-Windows-x64.zip
-            SHA256SUMS-dwm-dialog.txt
+            Tekzite-Browser-v10.5.119-auth-fix-Windows-x64.exe
+            Tekzite-Browser-v10.5.119-auth-fix-Windows-x64.zip
+            SHA256SUMS-auth-fix.txt
           if-no-files-found: error
           retention-days: 14

@@ -5790,12 +5790,12 @@ def _snapshot_google_auth_cookie_state(profile):
 
 
 def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
-    """Detect settled auth completion from the live HWND, then disk fallbacks.
+    """Detect real auth completion without trusting a window title alone.
 
-    The visible auth window is authoritative for YouTube: once its real Win32
-    title has returned to YouTube there is no reason to wait for Chromium to
-    flush History or Cookies. Cookie and History signals remain useful fallback
-    paths for other/older auth transitions.
+    A YouTube title is only a UI hint: Chromium can show a YouTube-titled
+    sign-in or redirect page before the user is authenticated. Completion
+    therefore requires either a fresh navigation back to the requested return
+    URL, or a settled change in authenticated Google cookies.
     """
     if not isinstance(handle, dict):
         return False
@@ -5803,57 +5803,36 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     if not profile:
         return False
 
-    window_signal = None
-    if _auth_window_title_has_returned(handle):
-        window_signal = (
-            "window",
-            int(handle.get("google_auth_return_hwnd") or 0),
-            str(handle.get("google_auth_return_title") or ""),
-        )
+    # Keep the live HWND/title snapshot for diagnostics and for identifying the
+    # exact auth window, but never let the title close the window by itself.
+    _auth_window_title_has_returned(handle)
 
-    # v10.5.69: the live returned HWND is already the strongest completion
-    # signal we have. It is the exact standalone auth window, it has left the
-    # Google account UI, and its visible title is now YouTube. Close on the
-    # first observation instead of forcing a second 0.55 s settle cycle. Disk
-    # based cookie/history signals keep their conservative settling below.
-    if window_signal is not None:
-        handle["google_auth_success_signal"] = window_signal
+    baseline = handle.get("google_auth_cookie_baseline") or {}
+    current = _snapshot_google_auth_cookie_state(profile)
+    cookie_signal = None
+    if current is not None and current:
+        changed = any(
+            baseline.get(key) != value
+            for key, value in current.items()
+            if key[1] in _GOOGLE_AUTH_COOKIE_NAMES
+        )
+        if changed:
+            cookie_signal = ("cookie", tuple(sorted(current.items())))
+
+    return_signal = None
+    if _auth_navigation_has_returned(handle):
+        return_signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
+
+    # A fresh visit to the explicit return URL is direct evidence that the
+    # standalone auth flow has actually left the sign-in endpoint.
+    if return_signal is not None:
+        handle["google_auth_success_signal"] = return_signal
         handle["google_auth_cookie_change_at"] = time.monotonic()
+        if current is not None:
+            handle["google_auth_cookie_last_snapshot"] = dict(current)
         return True
 
-    current = None
-    signal = None
-    if signal is None:
-        baseline = handle.get("google_auth_cookie_baseline") or {}
-        current = _snapshot_google_auth_cookie_state(profile)
-        cookie_signal = None
-        if current is not None and current:
-            changed = any(
-                baseline.get(key) != value
-                for key, value in current.items()
-                if key[1] in _GOOGLE_AUTH_COOKIE_NAMES
-            )
-            if changed:
-                cookie_signal = ("cookie", tuple(sorted(current.items())))
-
-        return_signal = None
-        if _auth_navigation_has_returned(handle):
-            return_signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
-        signal = return_signal or cookie_signal
-
-        # The title can flip to YouTube while a slower SQLite fallback is in
-        # progress. Re-sample the live HWND before yielding so that transition
-        # is closed in this same detector cycle rather than one poll later.
-        if signal is None and _auth_window_title_has_returned(handle):
-            live_signal = (
-                "window",
-                int(handle.get("google_auth_return_hwnd") or 0),
-                str(handle.get("google_auth_return_title") or ""),
-            )
-            handle["google_auth_success_signal"] = live_signal
-            handle["google_auth_cookie_change_at"] = time.monotonic()
-            return True
-
+    signal = cookie_signal
     if signal is None:
         handle["google_auth_success_signal"] = None
         handle["google_auth_cookie_change_at"] = None
@@ -5873,7 +5852,6 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         return False
     required_settle = max(0.8, float(settle_seconds))
     return (now - float(changed_at)) >= required_settle
-
 
 def _request_windows_window_close(pids, *, synchronous: bool = False, system_close: bool = False):
     """Ask every top-level window owned by *pids* to close normally.
@@ -7318,6 +7296,59 @@ def stop_embedded_chromium_loading(target_id: str = None, timeout: float = 2.0):
     return True
 
 
+def _navigate_page_with_cold_bootstrap_timeout_recovery(session, target_id, url, timeout=5.0):
+    """Navigate a page and recover a lost CDP reply during the first cold load.
+
+    Chromium can occasionally accept the initial Page.navigate and begin loading
+    the requested site while the local DevTools websocket misses/times out on
+    the command reply. During the strict about:blank bootstrap this is safe to
+    verify from /json/list: that target had no previous web page to confuse with
+    a successful navigation. Hot navigations still fail normally so stale pages
+    are never mistaken for success.
+    """
+    try:
+        return _persistent_page_cdp_call(
+            session, "Page.navigate", {"url": str(url)},
+            target_id=target_id, timeout=float(timeout), purpose="control",
+        )
+    except Exception as exc:
+        cold_bootstrap_target = bool(
+            session.get("native_blank_bootstrap_launch")
+            and str(target_id or "") == str(session.get("native_app_target_id") or "")
+        )
+        if not cold_bootstrap_target:
+            raise
+
+        live_url = ""
+        try:
+            pages = _devtools_json(
+                int(session.get("port") or 0), "/json/list",
+                timeout=min(0.8, max(0.2, float(timeout))),
+            )
+            match = next(
+                (page for page in (pages or [])
+                 if str(page.get("id") or "") == str(target_id or "")),
+                None,
+            )
+            live_url = str((match or {}).get("url") or "").strip()
+        except Exception:
+            live_url = ""
+
+        try:
+            live_scheme = (urlsplit(live_url).scheme or "").lower()
+        except Exception:
+            live_scheme = ""
+        if live_scheme in {"http", "https"}:
+            session["cold_navigation_timeout_recovered"] = True
+            session["cold_navigation_timeout_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )[:400]
+            session["cold_navigation_recovered_url"] = live_url
+            return {"recovered_after_timeout": True}
+
+        raise
+
+
 def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame: bool = False, target_id: str = None, create_new_target: bool = False):
     """Navigate Chromium with a persistent hot-path control channel.
 
@@ -7367,9 +7398,8 @@ def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame
                     ensure_embedded_chromium_javascript_dialog_monitor(known_target, timeout=0.8)
                 except Exception as exc:
                     session["javascript_dialog_monitor_error"] = type(exc).__name__
-            _persistent_page_cdp_call(
-                session, "Page.navigate", {"url": str(url)},
-                target_id=known_target, timeout=min(5.0, float(timeout)), purpose="control",
+            _navigate_page_with_cold_bootstrap_timeout_recovery(
+                session, known_target, url, timeout=min(5.0, float(timeout))
             )
             session["native_direct_app_navigation_skipped"] = False
         resolved_target = known_target
@@ -7395,9 +7425,8 @@ def navigate_embedded_chromium(url: str, timeout: int = 20, wait_for_first_frame
                     ensure_embedded_chromium_javascript_dialog_monitor(resolved_target, timeout=0.8)
                 except Exception as exc:
                     session["javascript_dialog_monitor_error"] = type(exc).__name__
-            _persistent_page_cdp_call(
-                session, "Page.navigate", {"url": str(url)},
-                target_id=resolved_target, timeout=min(5.0, float(timeout)), purpose="control",
+            _navigate_page_with_cold_bootstrap_timeout_recovery(
+                session, resolved_target, url, timeout=min(5.0, float(timeout))
             )
             session["native_direct_app_navigation_skipped"] = False
 
