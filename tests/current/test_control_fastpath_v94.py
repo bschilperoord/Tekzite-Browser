@@ -17,10 +17,18 @@ def test_browser_level_cdp_is_persistent():
 
 
 def test_hot_navigation_uses_persistent_control_lane():
-    block = NET[NET.index('def navigate_embedded_chromium'):NET.index('def _windows_descendant_pids')]
-    assert 'purpose="control"' in block
-    assert '"Page.enable"' not in block
-    assert '_open_devtools_websocket' not in block
+    helper = NET[
+        NET.index('def _navigate_page_with_cold_bootstrap_timeout_recovery'):
+        NET.index('def navigate_embedded_chromium')
+    ]
+    block = NET[
+        NET.index('def navigate_embedded_chromium'):
+        NET.index('def _windows_descendant_pids')
+    ]
+    assert 'purpose="control"' in helper
+    assert '_navigate_page_with_cold_bootstrap_timeout_recovery' in block
+    assert '"Page.enable"' not in helper + block
+    assert '_open_devtools_websocket' not in helper + block
 
 
 def test_bootstrap_skips_unneeded_page_socket_and_default_zoom():
