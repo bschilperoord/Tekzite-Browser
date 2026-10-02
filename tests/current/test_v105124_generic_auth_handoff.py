@@ -27,13 +27,63 @@ def test_first_party_login_is_not_forced_out_to_standalone_chromium():
     )
 
 
-def test_generic_handoff_restores_original_site():
+def test_generic_handoff_prefers_explicit_oauth_redirect_uri():
     launch, return_url = main.BrowserApp._external_auth_handoff_urls(
         "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=x&redirect_uri=https%3A%2F%2Fexample.com%2Foauth%2Fcallback",
         "https://example.com/dashboard",
     )
     assert launch.startswith("https://login.microsoftonline.com/")
-    assert return_url == "https://example.com/dashboard"
+    assert return_url == "https://example.com/oauth/callback"
+
+
+def test_outlook_handoff_uses_outlook_redirect_not_microsoft_marketing_page():
+    source = (
+        "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"
+        "client_id=9199bf20-a13f-4107-85dc-02114787ef48&"
+        "redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F&"
+        "response_type=code&scope=openid%20profile%20offline_access"
+    )
+    launch, return_url = main.BrowserApp._external_auth_handoff_urls(
+        source,
+        "https://www.microsoft.com/nl-nl/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+    )
+    assert launch.startswith("https://login.microsoftonline.com/")
+    assert return_url == "https://outlook.live.com/mail/"
+
+
+def test_github_oauth_prefers_registered_callback_over_previous_page():
+    source = (
+        "https://github.com/login/oauth/authorize?"
+        "client_id=abc&redirect_uri=https%3A%2F%2Fapp.example.com%2Fauth%2Fgithub%2Fcallback"
+    )
+    _launch, return_url = main.BrowserApp._external_auth_handoff_urls(
+        source, "https://app.example.com/settings"
+    )
+    assert return_url == "https://app.example.com/auth/github/callback"
+
+
+def test_auth0_oauth_prefers_callback_over_previous_page():
+    source = (
+        "https://tenant.eu.auth0.com/authorize?"
+        "client_id=abc&response_type=code&"
+        "redirect_uri=https%3A%2F%2Fportal.example.com%2Fcallback"
+    )
+    _launch, return_url = main.BrowserApp._external_auth_handoff_urls(
+        source, "https://portal.example.com/"
+    )
+    assert return_url == "https://portal.example.com/callback"
+
+
+def test_okta_oauth_prefers_callback_over_previous_page():
+    source = (
+        "https://tenant.okta.com/oauth2/default/v1/authorize?"
+        "client_id=abc&response_type=code&"
+        "redirect_uri=https%3A%2F%2Fapp.example.com%2Foidc%2Fcallback"
+    )
+    _launch, return_url = main.BrowserApp._external_auth_handoff_urls(
+        source, "https://app.example.com/home"
+    )
+    assert return_url == "https://app.example.com/oidc/callback"
 
 
 def test_generic_return_detection_accepts_cross_host_login_callback(monkeypatch):

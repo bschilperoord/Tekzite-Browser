@@ -5019,9 +5019,34 @@ class BrowserApp(BrowserFeatures):
             if "rejected" in (source_parts.path or "").lower() and candidates:
                 launch_url = candidates[0]
 
-            # The page the user came from is normally the best page to restore.
-            # If it is itself an auth endpoint, use the deepest non-auth callback.
-            if (not valid_http(return_url)) or BrowserApp._is_external_auth_url(
+            # Standards-based auth requests advertise the authoritative
+            # relying-party callback in redirect_uri or an equivalent field.
+            # Prefer that explicit callback over the page Tekzite happened to
+            # show before the auth redirect. This matters whenever those hosts
+            # differ, such as microsoft.com -> outlook.live.com.
+            explicit_return = ""
+            try:
+                source_params = {
+                    str(k or "").lower(): str(v or "").strip()
+                    for k, v in parse_qsl(source_parts.query, keep_blank_values=True)
+                }
+                for key in (
+                    "redirect_uri", "redirect_url", "return_url", "returnurl",
+                    "return_to", "returnto", "callback", "callback_url",
+                ):
+                    candidate = source_params.get(key, "")
+                    if (
+                        valid_http(candidate)
+                        and not BrowserApp._is_external_auth_url(candidate, source)
+                    ):
+                        explicit_return = candidate
+                        break
+            except Exception:
+                explicit_return = ""
+
+            if explicit_return:
+                return_url = explicit_return
+            elif (not valid_http(return_url)) or BrowserApp._is_external_auth_url(
                 return_url, source
             ):
                 for candidate in reversed(candidates):
