@@ -1,3 +1,12 @@
+# v10.5.123 - Auth handoff session-proof fix
+
+- Fixes the remaining case where the standalone YouTube authentication window can stay open even though the shared Chromium profile is already authenticated.
+- Detects authentication cookies across Chromium Default, Profile 1, Profile 2 and other profile directories instead of assuming the active profile is Default.
+- Moves Google authentication launch, probing, closing and profile-release work onto a dedicated executor so unrelated Chromium work cannot stall the handoff.
+- Checks the live returned auth window before slower History/Cookies SQLite probes, allowing a confirmed accounts.google.com to YouTube return to complete promptly.
+- Replaces the potentially unbounded live SQLite backup loop with a bounded DB/WAL/SHM snapshot strategy so the auth worker cannot wait indefinitely on Chromium locks.
+- Adds auth-handoff diagnostics and regression coverage for existing-session, cross-host-return and non-default-profile cases.
+
 # v10.5.122 - Reliable auth window completion
 
 - Fixes the standalone Google/YouTube authentication window remaining open after a successful login.
