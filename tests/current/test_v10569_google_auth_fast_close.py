@@ -6,7 +6,7 @@ import engine.net as net
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.120"  # sync_version updates this pin
+    assert main.BROWSER_VERSION == "10.5.121"  # sync_version updates this pin
 
 
 def test_youtube_title_alone_does_not_complete_auth(monkeypatch):
