@@ -1,3 +1,13 @@
+# v10.5.124 - Provider-independent authentication handoff
+
+- Generalizes the standalone Chromium authentication handoff beyond Google/YouTube to common cross-site OAuth, OAuth2, OpenID Connect and SAML-style login flows.
+- Recognizes common identity-provider patterns including Microsoft, GitHub, Discord, Apple, Facebook, LinkedIn, Spotify, Twitch, Auth0, Okta, OneLogin and similar providers without hard-coding completion to a single service.
+- Keeps ordinary first-party /login pages inside Tekzite instead of unnecessarily opening a standalone browser.
+- Derives relying-site return/callback URLs from standard redirect, continue, callback, RelayState and related parameters.
+- Confirms generic completion using a fresh navigation back to the relying site or relying-site cookie changes, while preserving the proven fast Google/YouTube HWND completion path.
+- Retains clean shared-profile handoff and graceful Chromium shutdown so authenticated sessions return to Tekzite without crash-recovery prompts.
+- Adds focused regression coverage for generic provider detection, first-party login preservation, callback returns and provider-independent session proof.
+
 # v10.5.123 - Auth handoff session-proof fix
 
 - Fixes the remaining case where the standalone YouTube authentication window can stay open even though the shared Chromium profile is already authenticated.
