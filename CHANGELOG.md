@@ -1,3 +1,11 @@
+# v10.5.125 - Cross-provider OAuth return-target fix
+
+- Fixes standalone authentication windows that could remain open after successful login when the identity provider redirects to a different relying-party host than the page Tekzite showed before login.
+- Prefers explicit OAuth/OIDC redirect_uri, callback and return targets over the pre-auth page.
+- Fixes the Outlook flow where login.microsoftonline.com redirects to outlook.live.com/mail/ while the previous page is on microsoft.com.
+- Adds regression coverage for Microsoft/Outlook, GitHub OAuth, Auth0 and Okta-style callback flows.
+- Preserves the existing Google/YouTube fast-close path and first-party login behavior.
+
 # v10.5.124 - Provider-independent authentication handoff
 
 - Generalizes the standalone Chromium authentication handoff beyond Google/YouTube to common cross-site OAuth, OAuth2, OpenID Connect and SAML-style login flows.
