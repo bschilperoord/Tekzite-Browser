@@ -39,7 +39,16 @@ def test_javascript_dialog_event_is_sanitized():
 def test_dialog_monitor_is_armed_before_navigation():
     block = NET[NET.index("def navigate_embedded_chromium"):NET.index("def _windows_descendant_pids")]
     assert "ensure_embedded_chromium_javascript_dialog_monitor" in block
-    assert block.index("ensure_embedded_chromium_javascript_dialog_monitor") < block.index('"Page.navigate"')
+    assert "_navigate_page_with_cold_bootstrap_timeout_recovery" in block
+    assert (
+        block.index("ensure_embedded_chromium_javascript_dialog_monitor")
+        < block.index("_navigate_page_with_cold_bootstrap_timeout_recovery")
+    )
+    helper = NET[
+        NET.index("def _navigate_page_with_cold_bootstrap_timeout_recovery"):
+        NET.index("def navigate_embedded_chromium")
+    ]
+    assert '"Page.navigate"' in helper
     assert "'Target.attachToTarget'" in NET
     assert "'flatten': True" in NET
     assert "'Page.enable'" in NET
