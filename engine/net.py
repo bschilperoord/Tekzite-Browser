@@ -5790,12 +5790,12 @@ def _snapshot_google_auth_cookie_state(profile):
 
 
 def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
-    """Detect settled auth completion from the live HWND, then disk fallbacks.
+    """Detect real auth completion without trusting a window title alone.
 
-    The visible auth window is authoritative for YouTube: once its real Win32
-    title has returned to YouTube there is no reason to wait for Chromium to
-    flush History or Cookies. Cookie and History signals remain useful fallback
-    paths for other/older auth transitions.
+    A YouTube title is only a UI hint: Chromium can show a YouTube-titled
+    sign-in or redirect page before the user is authenticated. Completion
+    therefore requires either a fresh navigation back to the requested return
+    URL, or a settled change in authenticated Google cookies.
     """
     if not isinstance(handle, dict):
         return False
@@ -5803,57 +5803,36 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     if not profile:
         return False
 
-    window_signal = None
-    if _auth_window_title_has_returned(handle):
-        window_signal = (
-            "window",
-            int(handle.get("google_auth_return_hwnd") or 0),
-            str(handle.get("google_auth_return_title") or ""),
-        )
+    # Keep the live HWND/title snapshot for diagnostics and for identifying the
+    # exact auth window, but never let the title close the window by itself.
+    _auth_window_title_has_returned(handle)
 
-    # v10.5.69: the live returned HWND is already the strongest completion
-    # signal we have. It is the exact standalone auth window, it has left the
-    # Google account UI, and its visible title is now YouTube. Close on the
-    # first observation instead of forcing a second 0.55 s settle cycle. Disk
-    # based cookie/history signals keep their conservative settling below.
-    if window_signal is not None:
-        handle["google_auth_success_signal"] = window_signal
+    baseline = handle.get("google_auth_cookie_baseline") or {}
+    current = _snapshot_google_auth_cookie_state(profile)
+    cookie_signal = None
+    if current is not None and current:
+        changed = any(
+            baseline.get(key) != value
+            for key, value in current.items()
+            if key[1] in _GOOGLE_AUTH_COOKIE_NAMES
+        )
+        if changed:
+            cookie_signal = ("cookie", tuple(sorted(current.items())))
+
+    return_signal = None
+    if _auth_navigation_has_returned(handle):
+        return_signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
+
+    # A fresh visit to the explicit return URL is direct evidence that the
+    # standalone auth flow has actually left the sign-in endpoint.
+    if return_signal is not None:
+        handle["google_auth_success_signal"] = return_signal
         handle["google_auth_cookie_change_at"] = time.monotonic()
+        if current is not None:
+            handle["google_auth_cookie_last_snapshot"] = dict(current)
         return True
 
-    current = None
-    signal = None
-    if signal is None:
-        baseline = handle.get("google_auth_cookie_baseline") or {}
-        current = _snapshot_google_auth_cookie_state(profile)
-        cookie_signal = None
-        if current is not None and current:
-            changed = any(
-                baseline.get(key) != value
-                for key, value in current.items()
-                if key[1] in _GOOGLE_AUTH_COOKIE_NAMES
-            )
-            if changed:
-                cookie_signal = ("cookie", tuple(sorted(current.items())))
-
-        return_signal = None
-        if _auth_navigation_has_returned(handle):
-            return_signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
-        signal = return_signal or cookie_signal
-
-        # The title can flip to YouTube while a slower SQLite fallback is in
-        # progress. Re-sample the live HWND before yielding so that transition
-        # is closed in this same detector cycle rather than one poll later.
-        if signal is None and _auth_window_title_has_returned(handle):
-            live_signal = (
-                "window",
-                int(handle.get("google_auth_return_hwnd") or 0),
-                str(handle.get("google_auth_return_title") or ""),
-            )
-            handle["google_auth_success_signal"] = live_signal
-            handle["google_auth_cookie_change_at"] = time.monotonic()
-            return True
-
+    signal = cookie_signal
     if signal is None:
         handle["google_auth_success_signal"] = None
         handle["google_auth_cookie_change_at"] = None
@@ -5873,7 +5852,6 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         return False
     required_settle = max(0.8, float(settle_seconds))
     return (now - float(changed_at)) >= required_settle
-
 
 def _request_windows_window_close(pids, *, synchronous: bool = False, system_close: bool = False):
     """Ask every top-level window owned by *pids* to close normally.
