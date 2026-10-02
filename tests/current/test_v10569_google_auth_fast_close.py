@@ -153,3 +153,34 @@ def test_accounts_google_launch_can_complete_on_stable_youtube_return(monkeypatc
 
     assert net.standalone_google_auth_succeeded(handle, 1.35)
     assert handle["google_auth_cross_host_return"] is True
+
+
+def test_cross_host_live_return_wins_before_any_sqlite_probe(monkeypatch):
+    handle = {
+        "profile": "profile",
+        "url": "https://accounts.google.com/ServiceLogin",
+        "return_url": "https://www.youtube.com/",
+        "google_auth_cookie_baseline": {},
+        "google_auth_return_hwnd": 4242,
+        "google_auth_return_title": "YouTube - Chromium",
+        "google_auth_title_return_since": time.monotonic() - 1.0,
+        "launched_monotonic": time.monotonic() - 5.0,
+    }
+    monkeypatch.setattr(net, "_auth_window_title_has_returned", lambda _handle: True)
+    monkeypatch.setattr(
+        net,
+        "_snapshot_google_auth_cookie_state",
+        lambda _profile: (_ for _ in ()).throw(
+            AssertionError("cookie SQLite probe must not run before live return")
+        ),
+    )
+    monkeypatch.setattr(
+        net,
+        "_auth_navigation_has_returned",
+        lambda _handle: (_ for _ in ()).throw(
+            AssertionError("history SQLite probe must not run before live return")
+        ),
+    )
+
+    assert net.standalone_google_auth_succeeded(handle, 1.35)
+    assert handle["google_auth_fast_return_used"] is True
