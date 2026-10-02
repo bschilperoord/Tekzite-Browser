@@ -1,3 +1,12 @@
+# v10.5.122 - Reliable auth window completion
+
+- Fixes the standalone Google/YouTube authentication window remaining open after a successful login.
+- Searches Chromium History specifically for a fresh visit to the intended return host instead of relying only on the single newest History entry.
+- Handles auxiliary Google/account visits that can otherwise hide the successful YouTube return.
+- Adds a guarded live YouTube-window fallback after Tekzite has genuinely observed the Google authentication phase.
+- Preserves the earlier protection against prematurely closing the auth window merely because its title contains YouTube.
+- Adds regression coverage for successful return-host detection, fast redirects, same-host launch safety, and guarded live-window completion.
+
 # v10.5.121 - Responsive spacing for smaller displays
 
 - Gives the default comfortable Tekzite interface more breathing room on laptop-class displays without globally enlarging the UI.
