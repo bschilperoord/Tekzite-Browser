@@ -73,3 +73,41 @@ def test_auth_window_polling_uses_fast_live_hwnd_cadence():
     auth_poll = inspect.getsource(main.BrowserApp._poll_google_auth_window)
     assert "after(70, self._poll_google_auth_window)" in launch_poll
     assert "after(70, self._poll_google_auth_window)" in auth_poll
+
+
+def test_stable_youtube_title_after_observed_auth_phase_can_complete(monkeypatch):
+    handle = {
+        "profile": "profile",
+        "return_url": "https://www.youtube.com/",
+        "google_auth_cookie_baseline": {},
+        "google_auth_auth_phase_seen": True,
+        "google_auth_return_hwnd": 4242,
+        "google_auth_return_title": "(4) YouTube - Chromium",
+        "google_auth_title_return_since": time.monotonic() - 1.0,
+        "launched_monotonic": time.monotonic() - 5.0,
+    }
+    monkeypatch.setattr(net, "_auth_window_title_has_returned", lambda _handle: True)
+    monkeypatch.setattr(net, "_snapshot_google_auth_cookie_state", lambda _profile: {})
+    monkeypatch.setattr(net, "_auth_navigation_has_returned", lambda _handle: False)
+
+    assert net.standalone_google_auth_succeeded(handle, 1.35)
+    assert handle["google_auth_success_signal"] == (
+        "window-return", 4242, "(4) YouTube - Chromium"
+    )
+
+
+def test_youtube_title_without_observed_auth_phase_still_cannot_complete(monkeypatch):
+    handle = {
+        "profile": "profile",
+        "return_url": "https://www.youtube.com/",
+        "google_auth_cookie_baseline": {},
+        "google_auth_return_hwnd": 4242,
+        "google_auth_return_title": "YouTube - Chromium",
+        "google_auth_title_return_since": time.monotonic() - 10.0,
+        "launched_monotonic": time.monotonic() - 10.0,
+    }
+    monkeypatch.setattr(net, "_auth_window_title_has_returned", lambda _handle: True)
+    monkeypatch.setattr(net, "_snapshot_google_auth_cookie_state", lambda _profile: {})
+    monkeypatch.setattr(net, "_auth_navigation_has_returned", lambda _handle: False)
+
+    assert not net.standalone_google_auth_succeeded(handle, 1.35)
