@@ -88,9 +88,9 @@ def test_explicit_lan_name_may_resolve_private(monkeypatch):
 def test_build_supply_chain_uses_hashes_and_immutable_actions():
     assert '--require-hashes -r requirements-windows.lock' in BUILD
     assert '--require-hashes -r requirements-build-windows.lock' in BUILD
-    assert 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262' in CI
-    assert 'actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065' in CI
-    assert 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' in CI
+    assert 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' in CI
+    assert 'actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97' in CI
+    assert 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020' in CI
     runtime_lock = (ROOT / 'requirements-windows.lock').read_text(encoding='utf-8')
     build_lock = (ROOT / 'requirements-build-windows.lock').read_text(encoding='utf-8')
     assert '--hash=sha256:' in runtime_lock
