@@ -4,7 +4,7 @@ import main
 
 
 def test_release_version_is_10554():
-    assert main.BROWSER_VERSION == "10.5.119"
+    assert main.BROWSER_VERSION == "10.5.120"
 
 
 def _block(name, next_name):
