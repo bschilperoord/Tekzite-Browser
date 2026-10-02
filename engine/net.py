@@ -5328,13 +5328,32 @@ _GOOGLE_AUTH_COOKIE_NAMES = frozenset({
 
 
 def _google_cookie_db_candidates(profile):
+    """Yield cookie databases from every Chromium profile directory.
+
+    Chromium launched with only --user-data-dir can reopen the profile selected
+    in Local State, which is not necessarily "Default". History detection
+    already scans Profile 1/Profile 2/etc.; auth cookie detection must follow
+    the same rule or a visibly authenticated standalone window can look logged
+    out to Tekzite forever.
+    """
     root = Path(str(profile or ""))
-    return (
-        root / "Default" / "Network" / "Cookies",
-        root / "Default" / "Cookies",
-        root / "Network" / "Cookies",
-        root / "Cookies",
-    )
+    seen = set()
+    profile_dirs = [root / "Default", *sorted(root.glob("Profile *"))]
+    for profile_dir in profile_dirs:
+        for candidate in (
+            profile_dir / "Network" / "Cookies",
+            profile_dir / "Cookies",
+        ):
+            key = str(candidate)
+            if key not in seen:
+                seen.add(key)
+                yield candidate
+    # Legacy/root-level layouts are uncommon but still supported.
+    for candidate in (root / "Network" / "Cookies", root / "Cookies"):
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            yield candidate
 
 
 def _live_sqlite_snapshot(db_path):
