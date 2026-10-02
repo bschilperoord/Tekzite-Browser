@@ -131,3 +131,77 @@ def test_auth_launcher_repairs_crash_state_and_suppresses_legacy_bubble():
     assert '"history_visit_baseline"' in source
     assert '"return_url"' in source
     assert "start_standalone_auth_chromium, launch_url, return_url" in worker
+
+
+def test_return_host_history_is_found_even_when_newer_auxiliary_visit_exists(tmp_path):
+    profile = tmp_path / "profile"
+    db = profile / "Default" / "History"
+    db.parent.mkdir(parents=True)
+    con = sqlite3.connect(db)
+    try:
+        con.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT)")
+        con.execute(
+            "CREATE TABLE visits (id INTEGER PRIMARY KEY, url INTEGER, visit_time INTEGER)"
+        )
+        con.execute("INSERT INTO urls(id, url) VALUES(1, ?)", ("https://www.youtube.com/",))
+        con.execute("INSERT INTO visits(id, url, visit_time) VALUES(1, 1, 100)")
+        con.execute("INSERT INTO urls(id, url) VALUES(2, ?)", ("https://accounts.google.com/ServiceLogin",))
+        con.execute("INSERT INTO visits(id, url, visit_time) VALUES(2, 2, 200)")
+        con.execute("INSERT INTO urls(id, url) VALUES(3, ?)", ("https://www.youtube.com/",))
+        con.execute("INSERT INTO visits(id, url, visit_time) VALUES(3, 3, 300)")
+        con.execute("INSERT INTO urls(id, url) VALUES(4, ?)", ("https://myaccount.google.com/",))
+        con.execute("INSERT INTO visits(id, url, visit_time) VALUES(4, 4, 400)")
+        con.commit()
+
+        assert net._snapshot_chromium_latest_visit(profile) == (
+            "https://myaccount.google.com/", 400, 4
+        )
+        assert net._snapshot_chromium_latest_visit(
+            profile, "https://www.youtube.com/"
+        ) == ("https://www.youtube.com/", 300, 3)
+
+        handle = {
+            "profile": str(profile),
+            "url": "https://accounts.google.com/ServiceLogin",
+            "return_url": "https://www.youtube.com/",
+            "history_return_visit_baseline": ("https://www.youtube.com/", 100, 1),
+            "history_return_launch_visit": ("https://www.youtube.com/", 100, 1),
+        }
+        assert net._auth_navigation_has_returned(handle)
+        assert handle["google_auth_return_visit"] == (
+            "https://www.youtube.com/", 300, 3
+        )
+    finally:
+        con.close()
+
+
+def test_fast_google_return_during_launch_settle_is_accepted(monkeypatch):
+    latest = ("https://www.youtube.com/", 300, 3)
+    handle = {
+        "profile": "profile",
+        "url": "https://accounts.google.com/ServiceLogin",
+        "return_url": "https://www.youtube.com/",
+        "history_return_visit_baseline": ("https://www.youtube.com/", 100, 1),
+        "history_return_launch_visit": latest,
+    }
+    monkeypatch.setattr(
+        net, "_snapshot_chromium_latest_visit",
+        lambda _profile, _target="": latest,
+    )
+    assert net._auth_navigation_has_returned(handle)
+
+
+def test_same_host_launch_visit_is_not_mistaken_for_auth_return(monkeypatch):
+    launch_visit = ("https://www.youtube.com/", 200, 2)
+    handle = {
+        "profile": "profile",
+        "url": "https://www.youtube.com/",
+        "return_url": "https://www.youtube.com/",
+        "history_return_visit_baseline": ("https://www.youtube.com/", 100, 1),
+        "history_return_launch_visit": launch_visit,
+    }
+    monkeypatch.setattr(
+        net, "_snapshot_chromium_latest_visit",
+        lambda _profile, _target="": launch_visit,
+    )
+    assert not net._auth_navigation_has_returned(handle)
