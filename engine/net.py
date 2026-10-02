@@ -5886,23 +5886,72 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
             handle["google_auth_cookie_last_snapshot"] = dict(current)
         return True
 
-    # History/Cookies may lag while Chromium is still open. If Tekzite has
-    # definitely seen a non-return Google auth phase and the exact auth window
-    # has then stayed on YouTube for a short interval, accept that live return.
-    # This deliberately does not revive the old "YouTube title == success"
-    # behavior that could close the window before the user had logged in.
-    if title_returned and bool(handle.get("google_auth_auth_phase_seen")):
+    # History/Cookies may lag while Chromium is still open. The visible return
+    # window can still be trusted when there is independent session evidence:
+    # either Tekzite observed the real Google auth phase, the shared profile has
+    # authenticated YouTube/Google session cookies, or the standalone browser
+    # was launched on accounts.google.com and has stably returned to YouTube.
+    #
+    # Requiring both a stable returned title and one of those proofs preserves
+    # the v10.5.119 protection against the old false-positive "YouTube title
+    # alone == success" behavior.
+    authenticated_session = False
+    if current:
+        cookie_keys = {
+            (str(host or "").lower(), str(name or ""))
+            for host, name in current.keys()
+        }
+        cookie_names = {name for _host, name in cookie_keys}
+        youtube_login = any(
+            name == "LOGIN_INFO" and host.endswith("youtube.com")
+            for host, name in cookie_keys
+        )
+        google_identity = bool(
+            {"SID", "SAPISID"}.issubset(cookie_names)
+            or {"__Secure-1PSID", "__Secure-1PAPISID"}.issubset(cookie_names)
+            or {"__Secure-3PSID", "__Secure-3PAPISID"}.issubset(cookie_names)
+        )
+        authenticated_session = bool(youtube_login or google_identity)
+
+    cross_host_return = False
+    try:
+        launch_host = (
+            urlsplit(str(handle.get("url") or "")).hostname or ""
+        ).lower().removeprefix("www.")
+        return_host = (
+            urlsplit(str(handle.get("return_url") or "")).hostname or ""
+        ).lower().removeprefix("www.")
+        cross_host_return = (
+            launch_host == "accounts.google.com"
+            and return_host in {"youtube.com", "music.youtube.com"}
+        )
+    except Exception:
+        cross_host_return = False
+
+    live_return_proof = bool(
+        handle.get("google_auth_auth_phase_seen")
+        or authenticated_session
+        or cross_host_return
+    )
+    handle["google_auth_authenticated_session_seen"] = bool(authenticated_session)
+    handle["google_auth_cross_host_return"] = bool(cross_host_return)
+
+    if title_returned and live_return_proof:
         now = time.monotonic()
         since = handle.get("google_auth_title_return_since")
         if since is None:
             handle["google_auth_title_return_since"] = now
-        elif (now - float(since)) >= 0.80:
-            handle["google_auth_success_signal"] = (
-                "window-return",
-                int(handle.get("google_auth_return_hwnd") or 0),
-                str(handle.get("google_auth_return_title") or ""),
-            )
-            return True
+        else:
+            required_title_settle = 0.80 if (
+                handle.get("google_auth_auth_phase_seen") or cross_host_return
+            ) else 1.20
+            if (now - float(since)) >= required_title_settle:
+                handle["google_auth_success_signal"] = (
+                    "window-return",
+                    int(handle.get("google_auth_return_hwnd") or 0),
+                    str(handle.get("google_auth_return_title") or ""),
+                )
+                return True
     elif not title_returned:
         handle["google_auth_title_return_since"] = None
 
