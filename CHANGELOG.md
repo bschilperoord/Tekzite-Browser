@@ -1,3 +1,12 @@
+# v10.5.121 - Responsive spacing for smaller displays
+
+- Gives the default comfortable Tekzite interface more breathing room on laptop-class displays without globally enlarging the UI.
+- Uses about 16% more control padding and 6% taller browser chrome at 1366x768-class resolutions.
+- Uses about 10% more control padding and 4% taller browser chrome at 1600x900-class resolutions.
+- Keeps 1920x1080, 3440x1440 and other roomier desktop layouts unchanged.
+- Preserves explicit Compact/Spacious density and custom UI-scale choices as authoritative user settings.
+- Adds regression coverage for the adaptive spacing breakpoints and for untouched desktop metrics.
+
 # v10.5.120 - Reliable auth completion and cold-start timeout recovery
 
 - Prevents the standalone Google/YouTube authentication window from closing merely because its title already looks like a returned YouTube page.
