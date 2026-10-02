@@ -5328,57 +5328,56 @@ _GOOGLE_AUTH_COOKIE_NAMES = frozenset({
 
 
 def _google_cookie_db_candidates(profile):
+    """Yield cookie databases from every Chromium profile directory.
+
+    Chromium launched with only --user-data-dir can reopen the profile selected
+    in Local State, which is not necessarily "Default". History detection
+    already scans Profile 1/Profile 2/etc.; auth cookie detection must follow
+    the same rule or a visibly authenticated standalone window can look logged
+    out to Tekzite forever.
+    """
     root = Path(str(profile or ""))
-    return (
-        root / "Default" / "Network" / "Cookies",
-        root / "Default" / "Cookies",
-        root / "Network" / "Cookies",
-        root / "Cookies",
-    )
+    seen = set()
+    profile_dirs = [root / "Default", *sorted(root.glob("Profile *"))]
+    for profile_dir in profile_dirs:
+        for candidate in (
+            profile_dir / "Network" / "Cookies",
+            profile_dir / "Cookies",
+        ):
+            key = str(candidate)
+            if key not in seen:
+                seen.add(key)
+                yield candidate
+    # Legacy/root-level layouts are uncommon but still supported.
+    for candidate in (root / "Network" / "Cookies", root / "Cookies"):
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            yield candidate
 
 
 def _live_sqlite_snapshot(db_path):
-    """Create a consistent local snapshot of a live SQLite database.
+    """Create a bounded snapshot of a live Chromium SQLite database.
 
-    Chromium keeps its Cookies database in WAL mode. Copying only ``Cookies``
-    therefore misses freshly committed sign-in cookies while the browser is
-    still open. Prefer SQLite's online backup API, which includes live WAL
-    state, and fall back to copying the DB/WAL/SHM bundle when Windows sharing
-    rules prevent a direct read.
+    Never use SQLite's online backup loop here. While Chromium owns a WAL
+    database, backup() can keep waiting for locks beyond the connection timeout,
+    which previously stranded Tekzite's auth success worker indefinitely.
+
+    Copying the DB/WAL/SHM bundle is filesystem-bounded and may race with a
+    write; a raced/corrupt snapshot simply fails the caller's query and is
+    retried on the next auth poll.
     """
     db_path = Path(db_path)
     temp_dir = Path(tempfile.mkdtemp(prefix="tekzite-live-sqlite-"))
     snapshot_path = temp_dir / db_path.name
-    source = dest = None
     try:
-        try:
-            uri = db_path.resolve().as_uri() + "?mode=ro"
-            source = sqlite3.connect(uri, uri=True, timeout=0.35)
-            dest = sqlite3.connect(str(snapshot_path), timeout=0.35)
-            source.backup(dest, pages=128, sleep=0.01)
-            dest.close(); dest = None
-            source.close(); source = None
-            return temp_dir, snapshot_path
-        except Exception:
-            try:
-                if dest is not None:
-                    dest.close()
-            except Exception:
-                pass
-            try:
-                if source is not None:
-                    source.close()
-            except Exception:
-                pass
-            dest = source = None
-
         copied_main = False
         for suffix in ("", "-wal", "-shm"):
             src = Path(str(db_path) + suffix)
             if not src.is_file():
                 continue
             dst = temp_dir / (db_path.name + suffix)
-            shutil.copy2(src, dst)
+            shutil.copyfile(src, dst)
             copied_main = copied_main or suffix == ""
         if copied_main:
             return temp_dir, snapshot_path
@@ -5844,12 +5843,17 @@ def _snapshot_google_auth_cookie_state(profile):
 
 
 def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
-    """Detect real auth completion without trusting a window title alone.
+    """Detect real auth completion without letting disk probes block live UI.
 
-    A YouTube title is only a UI hint: Chromium can show a YouTube-titled
-    sign-in or redirect page before the user is authenticated. Completion
-    therefore requires either a fresh navigation back to the requested return
-    URL, or a settled change in authenticated Google cookies.
+    The dedicated auth HWND is the fastest source of truth. Evaluate its return
+    state first, before touching Chromium's live SQLite databases: an online
+    SQLite backup can wait on Chromium and used to leave Tekzite's handoff
+    parked forever even though the visible browser had already returned to
+    YouTube.
+
+    A YouTube title still never succeeds on its own. It must be paired with an
+    observed auth phase, an accounts.google.com -> YouTube cross-host return,
+    or authenticated session cookies.
     """
     if not isinstance(handle, dict):
         return False
@@ -5857,13 +5861,50 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     if not profile:
         return False
 
-    # Keep the live HWND/title snapshot for diagnostics. A title becomes a
-    # completion fallback only after an actual auth phase has been observed.
+    # Fast, non-disk path first.
     title_returned = _auth_window_title_has_returned(handle)
+    cross_host_return = False
+    try:
+        launch_host = (
+            urlsplit(str(handle.get("url") or "")).hostname or ""
+        ).lower().removeprefix("www.")
+        return_host = (
+            urlsplit(str(handle.get("return_url") or "")).hostname or ""
+        ).lower().removeprefix("www.")
+        cross_host_return = (
+            launch_host == "accounts.google.com"
+            and return_host in {"youtube.com", "music.youtube.com"}
+        )
+    except Exception:
+        cross_host_return = False
+    handle["google_auth_cross_host_return"] = bool(cross_host_return)
 
+    fast_live_proof = bool(
+        handle.get("google_auth_auth_phase_seen") or cross_host_return
+    )
+    if title_returned and fast_live_proof:
+        now = time.monotonic()
+        since = handle.get("google_auth_title_return_since")
+        if since is None:
+            handle["google_auth_title_return_since"] = now
+        else:
+            required_title_settle = 0.80
+            if (now - float(since)) >= required_title_settle:
+                handle["google_auth_success_signal"] = (
+                    "window-return",
+                    int(handle.get("google_auth_return_hwnd") or 0),
+                    str(handle.get("google_auth_return_title") or ""),
+                )
+                handle["google_auth_fast_return_used"] = True
+                return True
+    elif not title_returned:
+        handle["google_auth_title_return_since"] = None
+
+    # Slow disk fallbacks only after the live-window path had a chance to win.
     baseline = handle.get("google_auth_cookie_baseline") or {}
     current = _snapshot_google_auth_cookie_state(profile)
     cookie_signal = None
+    authenticated_session = False
     if current is not None and current:
         changed = any(
             baseline.get(key) != value
@@ -5873,12 +5914,27 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         if changed:
             cookie_signal = ("cookie", tuple(sorted(current.items())))
 
+        cookie_keys = {
+            (str(host or "").lower(), str(name or ""))
+            for host, name in current.keys()
+        }
+        cookie_names = {name for _host, name in cookie_keys}
+        youtube_login = any(
+            name == "LOGIN_INFO" and host.endswith("youtube.com")
+            for host, name in cookie_keys
+        )
+        google_identity = bool(
+            {"SID", "SAPISID"}.issubset(cookie_names)
+            or {"__Secure-1PSID", "__Secure-1PAPISID"}.issubset(cookie_names)
+            or {"__Secure-3PSID", "__Secure-3PAPISID"}.issubset(cookie_names)
+        )
+        authenticated_session = bool(youtube_login or google_identity)
+    handle["google_auth_authenticated_session_seen"] = bool(authenticated_session)
+
     return_signal = None
     if _auth_navigation_has_returned(handle):
         return_signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
 
-    # A fresh visit to the explicit return URL is direct evidence that the
-    # standalone auth flow has actually left the sign-in endpoint.
     if return_signal is not None:
         handle["google_auth_success_signal"] = return_signal
         handle["google_auth_cookie_change_at"] = time.monotonic()
@@ -5886,25 +5942,20 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
             handle["google_auth_cookie_last_snapshot"] = dict(current)
         return True
 
-    # History/Cookies may lag while Chromium is still open. If Tekzite has
-    # definitely seen a non-return Google auth phase and the exact auth window
-    # has then stayed on YouTube for a short interval, accept that live return.
-    # This deliberately does not revive the old "YouTube title == success"
-    # behavior that could close the window before the user had logged in.
-    if title_returned and bool(handle.get("google_auth_auth_phase_seen")):
+    # Same-host YouTube auth flows cannot use cross-host proof. For those, a
+    # stable returned title plus a real authenticated session is enough.
+    if title_returned and authenticated_session:
         now = time.monotonic()
         since = handle.get("google_auth_title_return_since")
         if since is None:
             handle["google_auth_title_return_since"] = now
-        elif (now - float(since)) >= 0.80:
+        elif (now - float(since)) >= 1.20:
             handle["google_auth_success_signal"] = (
                 "window-return",
                 int(handle.get("google_auth_return_hwnd") or 0),
                 str(handle.get("google_auth_return_title") or ""),
             )
             return True
-    elif not title_returned:
-        handle["google_auth_title_return_since"] = None
 
     signal = cookie_signal
     if signal is None:

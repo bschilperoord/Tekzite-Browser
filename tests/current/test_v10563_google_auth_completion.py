@@ -77,3 +77,28 @@ def test_google_auth_return_page_gets_one_shot_authenticated_refresh():
     assert "pending_auth_refresh" in nav_source
     assert "self._google_auth_refresh_pending_url = None" in nav_source
     assert "self.root.after(650, self._refresh_after_google_auth" in nav_source
+
+
+def test_auth_cookie_snapshot_finds_non_default_chromium_profile(tmp_path):
+    profile = tmp_path / "profile"
+    db = profile / "Profile 1" / "Network" / "Cookies"
+    db.parent.mkdir(parents=True)
+
+    con = sqlite3.connect(db)
+    try:
+        con.execute(
+            "CREATE TABLE cookies ("
+            "host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB, expires_utc INTEGER)"
+        )
+        con.execute(
+            "INSERT INTO cookies(host_key, name, value, encrypted_value, expires_utc) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (".youtube.com", "LOGIN_INFO", "", b"profile-one-auth-cookie", 999999999),
+        )
+        con.commit()
+
+        current = net._snapshot_google_auth_cookie_state(profile)
+        assert current is not None
+        assert (".youtube.com", "LOGIN_INFO") in current
+    finally:
+        con.close()

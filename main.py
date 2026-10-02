@@ -2412,6 +2412,12 @@ class BrowserApp(BrowserFeatures):
         # v6.0: Chromium is the only web engine.  Tekzite owns browser UI,
         # while all page parsing/layout/JS/media/storage live in Chromium.
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tekzite-chromium")
+        # Authentication is a separate state machine. Keep its launch/probe/close
+        # work off the general Chromium pool so page metadata, favicons, network
+        # maintenance, or a blocked CDP task can never freeze the auth handoff UI.
+        self._google_auth_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="tekzite-google-auth"
+        )
         # JavaScript dialogs can synchronously block renderer/page CDP work. Their
         # observer and response must never queue behind that blocked work or the
         # only task capable of dismissing the modal can deadlock in the general pool.
@@ -4931,8 +4937,8 @@ class BrowserApp(BrowserFeatures):
                 width // 2, 175,
                 anchor="n",
                 text=(
-                    "Complete the sign-in there, then close that Chromium window.\n"
-                    "Tekzite will reopen this tab with the same profile and cookies."
+                    "Complete the sign-in there. Tekzite is monitoring that Chromium window\n"
+                    "and will close it automatically once the authenticated return is confirmed."
                 ),
                 width=max(440, width - 220),
                 justify="center",
@@ -5014,7 +5020,8 @@ class BrowserApp(BrowserFeatures):
         if not getattr(self, "_google_auth_handoff_active", False):
             return
         try:
-            self._google_auth_launch_future = self._executor.submit(
+            auth_executor = getattr(self, "_google_auth_executor", self._executor)
+            self._google_auth_launch_future = auth_executor.submit(
                 start_standalone_auth_chromium, launch_url, return_url
             )
         except Exception as exc:
@@ -5118,13 +5125,22 @@ class BrowserApp(BrowserFeatures):
                 future = getattr(self, "_google_auth_success_future", None)
                 if future is None:
                     try:
-                        self._google_auth_success_future = self._executor.submit(
+                        auth_executor = getattr(self, "_google_auth_executor", self._executor)
+                        self._google_auth_success_future = auth_executor.submit(
                             standalone_google_auth_succeeded, handle, 1.35
                         )
-                    except Exception:
+                        self._google_auth_success_future_started_at = time.monotonic()
+                        handle["google_auth_probe_count"] = int(
+                            handle.get("google_auth_probe_count") or 0
+                        ) + 1
+                    except Exception as exc:
                         self._google_auth_success_future = None
+                        handle["google_auth_last_probe_error"] = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
                 elif future.done():
                     self._google_auth_success_future = None
+                    self._google_auth_success_future_started_at = None
                     try:
                         succeeded = bool(future.result())
                     except Exception:
@@ -5138,7 +5154,8 @@ class BrowserApp(BrowserFeatures):
                             # SC_CLOSE/WM_CLOSE against the exact auth HWND. This is
                             # still a clean Chromium shutdown, but avoids leaving a
                             # fully authenticated YouTube window sitting on screen.
-                            self._google_auth_close_future = self._executor.submit(
+                            auth_executor = getattr(self, "_google_auth_executor", self._executor)
+                            self._google_auth_close_future = auth_executor.submit(
                                 close_standalone_auth_chromium, handle, True
                             )
                         except Exception:
@@ -5158,7 +5175,8 @@ class BrowserApp(BrowserFeatures):
                         else "Google sign-in complete; closing Chromium cleanly…"
                     )
                     try:
-                        self._google_auth_close_future = self._executor.submit(
+                        auth_executor = getattr(self, "_google_auth_executor", self._executor)
+                        self._google_auth_close_future = auth_executor.submit(
                             close_standalone_auth_chromium, handle, cooperative_escalation
                         )
                     except Exception:
@@ -5172,7 +5190,8 @@ class BrowserApp(BrowserFeatures):
         # Do not relaunch embedded Chromium until the standalone browser has
         # flushed cookies/storage and released its profile singleton files.
         try:
-            self._google_auth_release_future = self._executor.submit(
+            auth_executor = getattr(self, "_google_auth_executor", self._executor)
+            self._google_auth_release_future = auth_executor.submit(
                 wait_for_standalone_auth_chromium_release, handle, 6.0
             )
         except Exception:
@@ -5212,6 +5231,7 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_launch_future = None
         self._google_auth_release_future = None
         self._google_auth_success_future = None
+        self._google_auth_success_future_started_at = None
         self._google_auth_close_future = None
         return_url = str(getattr(self, "_google_auth_return_url", "") or "")
         source_tab_id = getattr(self, "_google_auth_source_tab_id", None)
@@ -14138,6 +14158,40 @@ class BrowserApp(BrowserFeatures):
             f"hagezi_last_error: {hagezi_debug.get('last_error')}",
             f"hagezi_last_result: {getattr(self, '_hagezi_last_result', None)}",
             f"hagezi_list_path: {hagezi_list_file}",
+        ]))
+        auth_handle = getattr(self, "_google_auth_handle", None) or {}
+        auth_success_future = getattr(self, "_google_auth_success_future", None)
+        auth_close_future = getattr(self, "_google_auth_close_future", None)
+        auth_release_future = getattr(self, "_google_auth_release_future", None)
+        auth_started_at = getattr(self, "_google_auth_success_future_started_at", None)
+        auth_probe_age = None
+        if auth_started_at:
+            try:
+                auth_probe_age = round(max(0.0, time.monotonic() - float(auth_started_at)), 3)
+            except Exception:
+                auth_probe_age = None
+        add("GOOGLE AUTH HANDOFF", "\n".join([
+            f"active: {getattr(self, '_google_auth_handoff_active', False)}",
+            f"return_url: {getattr(self, '_google_auth_return_url', None)}",
+            f"source_url: {getattr(self, '_google_auth_source_url', None)}",
+            f"launch_pid: {auth_handle.get('launch_pid')}",
+            f"browser_pids: {auth_handle.get('browser_pids')}",
+            f"auth_hwnds: {auth_handle.get('auth_hwnds')}",
+            f"auth_window_titles: {auth_handle.get('auth_window_titles')}",
+            f"auth_phase_seen: {auth_handle.get('google_auth_auth_phase_seen')}",
+            f"return_title: {auth_handle.get('google_auth_return_title')}",
+            f"return_hwnd: {auth_handle.get('google_auth_return_hwnd')}",
+            f"cross_host_return: {auth_handle.get('google_auth_cross_host_return')}",
+            f"authenticated_session_seen: {auth_handle.get('google_auth_authenticated_session_seen')}",
+            f"fast_return_used: {auth_handle.get('google_auth_fast_return_used')}",
+            f"success_signal: {auth_handle.get('google_auth_success_signal')}",
+            f"auto_close_requested: {auth_handle.get('auto_close_requested')}",
+            f"probe_count: {auth_handle.get('google_auth_probe_count')}",
+            f"probe_future_pending: {bool(auth_success_future is not None and not auth_success_future.done())}",
+            f"probe_future_age_s: {auth_probe_age}",
+            f"close_future_pending: {bool(auth_close_future is not None and not auth_close_future.done())}",
+            f"release_future_pending: {bool(auth_release_future is not None and not auth_release_future.done())}",
+            f"last_probe_error: {auth_handle.get('google_auth_last_probe_error')}",
         ]))
         try:
             add("CHROMIUM / DWM DEBUG", embedded_chromium_debug_report())
