@@ -7,7 +7,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_is_v10552():
-    assert main.BROWSER_VERSION == "10.5.124"
+    assert main.BROWSER_VERSION == "10.5.125"
 
 
 def test_minimize_destroys_transient_dwm_destination():
