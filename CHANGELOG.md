@@ -1,3 +1,11 @@
+# v10.5.120 - Reliable auth completion and cold-start timeout recovery
+
+- Prevents the standalone Google/YouTube authentication window from closing merely because its title already looks like a returned YouTube page.
+- Requires real authentication evidence before automatic close: a fresh return navigation or a settled authenticated Google-cookie change.
+- Recovers the first cold Chromium navigation when the Page.navigate reply times out but Chromium has already moved the claimed bootstrap target to a real HTTP/HTTPS page.
+- Keeps ordinary hot-navigation timeouts strict, so a genuinely broken navigation is never silently treated as successful.
+- Adds regression coverage for false auth-title completion, authenticated return/cookie completion, cold-start timeout recovery and hot-navigation timeout propagation.
+
 # v10.5.119 - DWM first-frame reveal guard
 
 - Prevents an unproven Chromium native frame from exposing Tekzite's raw white DWM destination during navigation, including renderer-heavy transitions such as opening YouTube.
