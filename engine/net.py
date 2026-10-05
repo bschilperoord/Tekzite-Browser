@@ -108,6 +108,12 @@ _INTERNAL_NETWORK_ACTIVITY_MAX_AGE = 15.0
 _INTERNAL_NETWORK_ACTIVITY_MAX_RECORDS = 128
 
 
+def _network_helper_executable(root, helper_name):
+    """Use a directory-built helper when packaged, retaining one-file compatibility."""
+    directory_helper = Path(root) / "network-helper" / helper_name
+    return directory_helper if directory_helper.is_file() else Path(root) / helper_name
+
+
 def _network_engine_root():
     return Path(__file__).resolve().parent.parent
 
@@ -360,7 +366,7 @@ def _ensure_network_engine_locked():
     allow_loopback_port(port, "Tekzite Network proxy (HTTP/HTTPS filtering and ad blocking)", owner="tekzite-network")
     root = _network_engine_root()
     helper_name = "tekzite-network.exe" if os.name == "nt" else "tekzite-network"
-    exe = root / helper_name
+    exe = _network_helper_executable(root, helper_name)
     script = root / "tekzite_network.py"
     instance_token = secrets.token_hex(16)
     if exe.is_file():
