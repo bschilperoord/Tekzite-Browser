@@ -1,0 +1,77 @@
+name: Audit flagged Windows preview
+
+on:
+  push:
+    branches: ["fix/auth-handoff-lifecycle-tests"]
+    paths: [".github/workflows/audit-flagged-preview.yml"]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  audit:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download exact flagged artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64
+          run-id: 37378560319
+          github-token: ${{ github.token }}
+          path: flagged-preview
+
+      - name: Scan original executable without running it
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $report = [ordered]@{
+            artifactRun = 37378560319
+            expectedSHA256 = "a4e189c7f585d03d8adc6de2287be41b7bfba75df13893c25cae23f115113dd4"
+            executableLaunched = $false
+            scanCompleted = $false
+            threats = @()
+          }
+          New-Item -ItemType Directory -Force audit-report | Out-Null
+          try {
+            $exe = Join-Path $PWD "flagged-preview/Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64.exe"
+            $report.actualSHA256 = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($report.actualSHA256 -ne $report.expectedSHA256) { throw "Original executable hash mismatch" }
+            $report.signatureStatus = [string](Get-AuthenticodeSignature $exe).Status
+            Update-MpSignature
+            $status = Get-MpComputerStatus
+            $report.engineVersion = $status.AMEngineVersion
+            $report.signatureVersion = $status.AntivirusSignatureVersion
+            $report.signatureUpdated = [string]$status.AntivirusSignatureLastUpdated
+            if (-not $status.AntivirusEnabled) { throw "Microsoft Defender antivirus is unavailable or disabled on runner" }
+            Start-MpScan -ScanType CustomScan -ScanPath (Join-Path $PWD "flagged-preview")
+            $report.scanCompleted = $true
+            $report.threats = @(Get-MpThreatDetection | Where-Object {
+              ($_.Resources -join " ") -like "*flagged-preview*"
+            } | Select-Object ThreatID, InitialDetectionTime, ActionSuccess, Resources)
+            $report.executableStillPresent = Test-Path $exe
+            if ($report.threats.Count -gt 0 -or -not $report.executableStillPresent) {
+              throw "Detection or quarantine occurred; inspect audit report"
+            }
+          } catch {
+            $report.error = $_.Exception.Message
+            try {
+              $report.threats = @(Get-MpThreatDetection | Where-Object {
+                ($_.Resources -join " ") -like "*flagged-preview*"
+              } | Select-Object ThreatID, InitialDetectionTime, ActionSuccess, Resources)
+            } catch {}
+            throw
+          } finally {
+            $report | ConvertTo-Json -Depth 8 | Set-Content audit-report/scan.json -Encoding utf8
+            Get-Content audit-report/scan.json
+          }
+
+      - name: Upload scan report only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flagged-preview-scan-report
+          path: audit-report/scan.json
+          if-no-files-found: warn
+          retention-days: 14
