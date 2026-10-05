@@ -21,7 +21,7 @@ Invoke-BuildPython @(
     "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--noupx", "--optimize", "1",
     "--name", "tekzite-network", "--distpath", $helperDist, "--workpath", $helperWork,
     "--specpath", $specDir, "--exclude-module", "numpy", "--exclude-module", "pygame",
-    "--exclude-module", "pytest", "tekzite_network_fast.py"
+    "--exclude-module", "pytest", (Join-Path $PSScriptRoot "tekzite_network_fast.py")
 )
 $helperFolder = Join-Path $helperDist "tekzite-network"
 $extensionFolder = Join-Path $PSScriptRoot "chromium_zoom_extension"
@@ -33,14 +33,14 @@ Invoke-BuildPython @(
     "--name", "TekziteBrowser", "--distpath", "dist-folder", "--workpath", "build/browser-folder-work",
     "--specpath", $specDir, "--add-data", "$helperFolder;network-helper",
     "--add-data", "$extensionFolder;chromium_zoom_extension", "--add-data", "$assetsFolder;assets",
-    "--icon", "assets/tekzite.ico", "--version-file", "tekzite_version_info.txt",
-    "--manifest", "tekzite_browser.manifest",
+    "--icon", (Join-Path $assetsFolder "tekzite.ico"), "--version-file", (Join-Path $PSScriptRoot "tekzite_version_info.txt"),
+    "--manifest", (Join-Path $PSScriptRoot "tekzite_browser.manifest"),
     "--hidden-import", "tkinter.ttk", "--hidden-import", "tkinter.font",
     "--hidden-import", "tkinter.colorchooser", "--hidden-import", "tkinter.filedialog",
     "--hidden-import", "tkinter.messagebox", "--hidden-import", "tkinter.simpledialog",
     "--exclude-module", "pytest", "--exclude-module", "numpy", "--exclude-module", "pygame",
     "--exclude-module", "matplotlib", "--exclude-module", "pandas", "--exclude-module", "scipy",
-    "--exclude-module", "IPython", "--exclude-module", "psutil", "ultraspeed_launcher.py"
+    "--exclude-module", "IPython", "--exclude-module", "psutil", (Join-Path $PSScriptRoot "ultraspeed_launcher.py")
 )
 $folder = Join-Path $PSScriptRoot "dist-folder/TekziteBrowser"
 $exe = Join-Path $folder "TekziteBrowser.exe"
