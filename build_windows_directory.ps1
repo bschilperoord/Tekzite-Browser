@@ -24,13 +24,15 @@ Invoke-BuildPython @(
     "--exclude-module", "pytest", "tekzite_network_fast.py"
 )
 $helperFolder = Join-Path $helperDist "tekzite-network"
+$extensionFolder = Join-Path $PSScriptRoot "chromium_zoom_extension"
+$assetsFolder = Join-Path $PSScriptRoot "assets"
 if (-not (Test-Path (Join-Path $helperFolder "tekzite-network.exe"))) { throw "Directory helper missing" }
 
 Invoke-BuildPython @(
     "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--noupx", "--windowed", "--optimize", "1",
     "--name", "TekziteBrowser", "--distpath", "dist-folder", "--workpath", "build/browser-folder-work",
     "--specpath", $specDir, "--add-data", "$helperFolder;network-helper",
-    "--add-data", "chromium_zoom_extension;chromium_zoom_extension", "--add-data", "assets;assets",
+    "--add-data", "$extensionFolder;chromium_zoom_extension", "--add-data", "$assetsFolder;assets",
     "--icon", "assets/tekzite.ico", "--version-file", "tekzite_version_info.txt",
     "--manifest", "tekzite_browser.manifest",
     "--hidden-import", "tkinter.ttk", "--hidden-import", "tkinter.font",
