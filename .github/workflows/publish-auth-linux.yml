@@ -1,0 +1,66 @@
+name: Publish Linux auth session release
+on:
+  push:
+    branches: ["fix/auth-handoff-lifecycle-tests"]
+    paths: [".github/workflows/publish-auth-linux.yml"]
+permissions:
+  contents: write
+concurrency:
+  group: publish-linux-auth-session-fix
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: f6dab5a8b41d6dad7806863249167d6919467840
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+          cache: pip
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22"
+      - name: Install Linux runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-tk xvfb libgl1 libx11-6 libxext6 libxrender1 libxss1 libxtst6
+      - name: Verify synchronized version metadata
+        run: python tools/sync_version.py 10.5.125 --check
+      - name: Install test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: -r requirements.txt
+          python -m pip install --only-binary=:all: -r requirements-dev.txt
+      - name: Regression tests
+        run: python -m pytest -q tests/current
+      - name: Extension tests
+        run: node tests/current/test_extension_features.cjs
+      - name: Environment doctor
+        run: python tools/doctor.py
+      - name: Build standalone Linux executable
+        run: bash build_linux.sh
+      - name: Package and publish Linux assets
+        run: |
+          set -euo pipefail
+          bin_name=Tekzite-Browser-v10.5.125-auth-session-fix-Linux-x86_64
+          cp dist/TekziteBrowser "$bin_name"
+          chmod +x "$bin_name"
+          tar -czf "$bin_name.tar.gz" "$bin_name"
+          sha256sum "$bin_name" "$bin_name.tar.gz" > SHA256SUMS-Linux.txt
+          sha256sum --check SHA256SUMS-Linux.txt
+          gh api repos/"$GH_REPO"/git/ref/tags/v10.5.125-auth-session-fix > tag.json
+          python - <<'PY'
+          import json
+          r=json.load(open("tag.json"))
+          assert r["object"]["type"]=="commit"
+          assert r["object"]["sha"]=="f6dab5a8b41d6dad7806863249167d6919467840"
+          PY
+          gh release upload v10.5.125-auth-session-fix "$bin_name" "$bin_name.tar.gz" SHA256SUMS-Linux.txt
