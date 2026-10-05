@@ -18,7 +18,7 @@ Remove-Item "dist-folder/TekziteBrowser" -Recurse -Force -ErrorAction SilentlyCo
 New-Item -ItemType Directory -Force $specDir | Out-Null
 
 Invoke-BuildPython @(
-    "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--noupx", "--optimize", "1",
+    "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--contents-directory", ".", "--noupx", "--optimize", "1",
     "--name", "tekzite-network", "--distpath", $helperDist, "--workpath", $helperWork,
     "--specpath", $specDir, "--exclude-module", "numpy", "--exclude-module", "pygame",
     "--exclude-module", "pytest", (Join-Path $PSScriptRoot "tekzite_network_fast.py")
@@ -29,7 +29,7 @@ $assetsFolder = Join-Path $PSScriptRoot "assets"
 if (-not (Test-Path (Join-Path $helperFolder "tekzite-network.exe"))) { throw "Directory helper missing" }
 
 Invoke-BuildPython @(
-    "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--noupx", "--windowed", "--optimize", "1",
+    "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--contents-directory", ".", "--noupx", "--windowed", "--optimize", "1",
     "--name", "TekziteBrowser", "--distpath", "dist-folder", "--workpath", "build/browser-folder-work",
     "--specpath", $specDir, "--add-data", "$helperFolder;network-helper",
     "--add-data", "$extensionFolder;chromium_zoom_extension", "--add-data", "$assetsFolder;assets",
@@ -45,9 +45,11 @@ Invoke-BuildPython @(
 $folder = Join-Path $PSScriptRoot "dist-folder/TekziteBrowser"
 $exe = Join-Path $folder "TekziteBrowser.exe"
 if (-not (Test-Path $exe)) { throw "Directory browser missing" }
-if (-not (Test-Path (Join-Path $folder "_internal/network-helper/tekzite-network.exe"))) { throw "Bundled directory helper missing" }
+if (-not (Test-Path (Join-Path $folder "network-helper/tekzite-network.exe"))) { throw "Bundled directory helper missing" }
+
+if (@(Get-ChildItem $folder -Recurse -Directory | Where-Object Name -eq "_internal").Count -ne 0) { throw "Unexpected _internal directory in flat build" }
 
 # No certificate is configured for these previews; do not claim signed output.
-"Extract the whole ZIP into a folder. Run TekziteBrowser.exe and keep _internal beside it." |
+"Extract the whole ZIP into a folder. Run TekziteBrowser.exe and keep all included files and folders beside it." |
     Set-Content (Join-Path $folder "README.txt") -Encoding utf8
 Write-Host "Built directory preview: $folder (unsigned)"

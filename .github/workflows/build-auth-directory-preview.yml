@@ -39,6 +39,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $root = Join-Path $PWD "dist-folder/TekziteBrowser"
+          if (@(Get-ChildItem $root -Recurse -Directory | Where-Object Name -eq "_internal").Count -ne 0) { throw "Unexpected _internal directory" }
           $files = @(Get-ChildItem $root -Recurse -File)
           $executables = @($files | Where-Object Extension -eq ".exe")
           if ($executables.Count -ne 2) { throw "Unexpected executable count" }
@@ -70,7 +71,7 @@ jobs:
       - name: Upload files directly (one ZIP download)
         uses: actions/upload-artifact@v4
         with:
-          name: Tekzite-Browser-v10.5.125-pr26-directory-Windows-x64
+          name: Tekzite-Browser-v10.5.125-pr26-flat-Windows-x64
           path: dist-folder/TekziteBrowser/
           if-no-files-found: error
           retention-days: 14
