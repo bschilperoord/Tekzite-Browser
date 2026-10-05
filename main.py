@@ -5196,6 +5196,7 @@ class BrowserApp(BrowserFeatures):
         launch_url, return_url = self._external_auth_handoff_urls(url, previous_url)
         self._google_auth_handoff_active = True
         self._google_auth_return_url = return_url
+        self._google_auth_previous_url = str(previous_url or tab.get("url") or "")
         self._google_auth_source_url = str(url or "")
         self._google_auth_source_tab_id = tab.get("id")
         self._suspend_chromium_for_external_auth()
@@ -5381,6 +5382,7 @@ class BrowserApp(BrowserFeatures):
         if not getattr(self, "_google_auth_handoff_active", False):
             return
         self._google_auth_handoff_active = False
+        handle = getattr(self, "_google_auth_handle", None) or {}
         self._google_auth_handle = None
         self._google_auth_launch_future = None
         self._google_auth_release_future = None
@@ -5388,6 +5390,26 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_success_future_started_at = None
         self._google_auth_close_future = None
         return_url = str(getattr(self, "_google_auth_return_url", "") or "")
+        previous_url = str(getattr(self, "_google_auth_previous_url", "") or "")
+        self._google_auth_previous_url = None
+        if previous_url:
+            # Resume the initiating page on cancellation; never replay an OAuth
+            # callback without its one-time code/state. Prefer a final landing
+            # page only when it is safe to revisit without callback parameters.
+            seen = str(handle.get("auth_return_url_seen") or "")
+            expected = urlsplit(return_url)
+            actual = urlsplit(seen)
+            if (handle.get("auth_provider_independent_success") and seen
+                    and actual.hostname == expected.hostname
+                    and not set(actual.path.lower().strip("/").split("/"))
+                    & {"auth", "oauth", "oauth2", "oidc", "login", "callback"}
+                    and not dict(parse_qsl(actual.query) + parse_qsl(actual.fragment)).keys()
+                    & {"code", "state", "error"}):
+                return_url = seen
+            elif not handle.get("google_auth_success_signal") or handle.get(
+                "auth_provider_independent_success"
+            ):
+                return_url = previous_url
         source_tab_id = getattr(self, "_google_auth_source_tab_id", None)
         self._google_auth_return_url = None
         self._google_auth_source_url = None

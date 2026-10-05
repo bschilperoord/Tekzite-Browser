@@ -23,7 +23,7 @@ import atexit
 import threading
 from pathlib import Path
 from urllib.request import urlopen as _stdlib_urlopen
-from urllib.parse import urlsplit, unquote
+from urllib.parse import urlsplit, unquote, parse_qsl
 from loopback_policy import allow_loopback_port, revoke_loopback_port, snapshot as loopback_policy_snapshot
 from .udp_peer_etw import ensure_udp_peer_monitor, stop_udp_peer_monitor
 
@@ -5606,6 +5606,11 @@ def _auth_navigation_has_returned(handle):
             current_host = (current.hostname or "").lower().removeprefix("www.")
             if current_host != expected_host:
                 continue
+            # An OAuth error return is a completed navigation, not a login.
+            params = dict(parse_qsl(current.query) + parse_qsl(current.fragment))
+            if params.get("error") or params.get("error_description"):
+                handle["auth_callback_error"] = True
+                return False
 
             # Same-host sign-in pages are not a completed return. Cross-host
             # OAuth callbacks are allowed to contain /login or /auth in their
@@ -6019,6 +6024,11 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         handle["google_auth_cookie_change_at"] = time.monotonic()
         handle["auth_provider_independent_success"] = not google_flow
         return True
+
+    if not google_flow:
+        # A relying-site cookie can be consent, CSRF or tracking state. It must
+        # never independently authorize closing an unfinished login window.
+        return False
 
     # Keep the proven live-HWND Google/YouTube optimization. Other providers
     # use history/callback and relying-site cookie proof rather than guessing
