@@ -4982,10 +4982,43 @@ def persistent_cdp_debug():
     }
 
 
+def _chromium_profile_directory(profile_dir):
+    """Choose one existing Chromium subprofile for both sides of a handoff."""
+    try:
+        state = json.loads((Path(profile_dir) / "Local State").read_text(encoding="utf-8"))
+        name = str(state.get("profile", {}).get("last_used") or "Default")
+        if (name == "Default" or re.fullmatch(r"Profile [0-9]+", name)) and (
+            Path(profile_dir) / name
+        ).is_dir():
+            return name
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return "Default"
+
+
+def _enable_chromium_session_restore(profile_dir, profile_directory):
+    """Keep session cookies across Tekzite's clean Chromium process handoff.
+
+    Chromium persists session cookies but only reloads them after a clean exit
+    when its startup preference restores the previous session. Never modify
+    cookie expiry, copy credentials, or mark a clean profile as crashed.
+    """
+    directory = Path(profile_dir) / profile_directory
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "Preferences"
+    prefs = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(prefs, dict):
+        raise ValueError("Chromium profile preferences must be an object")
+    prefs.setdefault("session", {})["restore_on_startup"] = 1
+    temp = path.with_suffix(".session-restore.tmp")
+    temp.write_text(json.dumps(prefs, separators=(",", ":")), encoding="utf-8")
+    temp.replace(path)
+
+
 def _apply_privacy_profile_preferences(profile_dir):
     """Apply privacy-first Chromium profile prefs without weakening TLS/security."""
     try:
-        default_dir = Path(profile_dir) / "Default"
+        default_dir = Path(profile_dir) / _chromium_profile_directory(profile_dir)
         default_dir.mkdir(parents=True, exist_ok=True)
         pref_path = default_dir / "Preferences"
         try:
@@ -5145,7 +5178,9 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     # the failed first helper before relaunching the same profile.
                     time.sleep(0.15)
                 _clear_devtools_active_port(profile)
+                profile_directory = _chromium_profile_directory(profile)
                 _apply_privacy_profile_preferences(profile)
+                _enable_chromium_session_restore(profile, profile_directory)
                 launch_x, launch_y, launch_w, launch_h = (-32000, -32000, 800, 600)
                 if launch_geometry:
                     try:
@@ -5162,6 +5197,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     f"--remote-debugging-port={port}",
                     "--remote-debugging-address=127.0.0.1",
                     f"--user-data-dir={profile}",
+                    f"--profile-directory={profile_directory}",
                     "--no-first-run", "--no-default-browser-check",
                     "--disable-save-password-bubble", "--disable-translate",
                     "--disable-search-engine-choice-screen",
@@ -5253,6 +5289,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                 _write_profile_owner(profile, process.pid)
                 _CHROMIUM_SESSION = {
                     "process": process, "port": port, "profile": profile,
+                    "profile_directory": profile_directory,
                     "page_cdp_channels": {}, "executable": executable,
                     "browser_ws_url": str((wait_info.get("version") or {}).get("webSocketDebuggerUrl") or ""),
                     "launch_attempt": attempt,
@@ -6456,6 +6493,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
         session = _CHROMIUM_SESSION or {}
         executable = str(session.get("executable") or "")
         profile = str(session.get("profile") or _persistent_chromium_profile_dir())
+        profile_directory = str(session.get("profile_directory") or _chromium_profile_directory(profile))
         if not executable:
             executable = next(iter(_chromium_candidates()), "")
         if not executable or not os.path.isfile(executable):
@@ -6481,6 +6519,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
         # standalone browser ever reads the profile. This removes the persistent
         # "restore pages" bubble even for users upgrading from v10.5.63.
         _mark_chromium_profile_exited_cleanly(profile)
+        _enable_chromium_session_restore(profile, profile_directory)
         google_auth_cookie_baseline = _snapshot_google_auth_cookie_state(profile) or {}
         auth_cookie_baseline = _snapshot_auth_cookie_state(profile, str(return_url or "")) or {}
         history_visit_baseline = _snapshot_chromium_latest_visit(profile)
@@ -6492,6 +6531,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
         command = [
             executable,
             f"--user-data-dir={profile}",
+            f"--profile-directory={profile_directory}",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-background-mode",
@@ -6562,6 +6602,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             "launch_pid": int(process.pid),
             "browser_pids": list(browser_pids),
             "profile": profile,
+            "profile_directory": profile_directory,
             "executable": executable,
             "url": target_url,
             "return_url": str(return_url or ""),

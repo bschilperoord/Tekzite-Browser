@@ -44,3 +44,23 @@ web storage and identify whether that storage survives the handoff.
 
 Record PASS/FAIL/NOT RUN for every case, with build commit and timing. A failure
 must include only sanitized paths/error names and user-visible behavior.
+
+## Session persistence follow-up
+
+The first PR26 preview failed the user's Outlook check: mailbox was visible in
+standalone Chromium, which closed automatically, but Tekzite resumed logged out.
+The follow-up enables Chromium's `session.restore_on_startup = 1` and explicitly
+selects the same subprofile for embedded and standalone launches. Chromium's
+`ProfileImpl::ShouldRestoreOldSessionCookies` gates loading cookies after clean
+exit on the startup restore preference; merely sharing a user-data directory is
+insufficient. This is a plausible cause, not a confirmed diagnosis of that user's
+profile. Existing cookie files and expiry values are not modified. Tekzite's
+explicit clear-on-exit setting still removes the profile when enabled.
+
+Primary implementation reference:
+https://github.com/chromium/chromium/blob/main/chrome/browser/profiles/profile_impl.cc
+
+Repeat the Outlook fresh-login and existing-SSO checks on the new build. Check
+also that session restoration does not expose extra old Chromium windows. This
+change does not prove that tab-specific sessionStorage survives creating a new
+application tab; applications depending on that storage still need live testing.
