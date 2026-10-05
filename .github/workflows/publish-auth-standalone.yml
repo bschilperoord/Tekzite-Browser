@@ -1,0 +1,59 @@
+name: Publish verified standalone auth build
+on:
+  push:
+    branches: ["fix/auth-handoff-lifecycle-tests"]
+    paths: [".github/workflows/publish-auth-standalone.yml"]
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-auth-session-fix
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Verify source build and download executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/"$GH_REPO"/actions/runs/37382446987 > run.json
+          python3 - <<'PY'
+          import json
+          r=json.load(open("run.json"))
+          assert r["conclusion"]=="success"
+          assert r["head_sha"]=="f6dab5a8b41d6dad7806863249167d6919467840"
+          PY
+          gh run download 37382446987 --name Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64 --dir artifact
+          cd artifact
+          sha256sum --check SHA256SUMS-auth-lifecycle-pr26.txt
+          test "$(sha256sum Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64.exe | cut -d ' ' -f 1)" = "134f1a5a7ccc1f2bbb30f200583e5ac2d3a6bb0d5d0226b73c48d6930cff4aaa"
+          mv Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64.exe Tekzite-Browser-v10.5.125-auth-session-fix-Windows-x64.exe
+          sha256sum Tekzite-Browser-v10.5.125-auth-session-fix-Windows-x64.exe > SHA256SUMS.txt
+      - name: Publish standalone Windows release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          Standalone Windows x64 executable with authentication lifecycle and session restoration fixes.
+          
+          Download the .exe directly and run it. No accompanying runtime files or _internal folder are required.
+          
+          - Preserve Chromium session cookies when returning from the authentication window.
+          - Use the existing Chromium profile consistently during authentication and restart.
+          - Reject failed authentication callbacks and prevent callback replay.
+          - Restore the previous page when authentication is cancelled.
+          
+          Published from successful Windows build 37382446987 at commit f6dab5a8b41d6dad7806863249167d6919467840. Regression and mocked extension tests passed. This is the exact previously supplied executable; its SHA256 is 134f1a5a7ccc1f2bbb30f200583e5ac2d3a6bb0d5d0226b73c48d6930cff4aaa.
+          
+          The executable is unsigned. Live end-to-end login has not been verified for every supported provider.
+          NOTES
+          gh release create v10.5.125-auth-session-fix \
+            artifact/Tekzite-Browser-v10.5.125-auth-session-fix-Windows-x64.exe \
+            artifact/SHA256SUMS.txt \
+            --target f6dab5a8b41d6dad7806863249167d6919467840 \
+            --title "Tekzite Browser v10.5.125 — Authentication session fix" \
+            --notes-file notes.md --latest
