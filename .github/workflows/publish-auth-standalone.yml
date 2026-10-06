@@ -7,7 +7,7 @@ permissions:
   contents: write
   actions: read
 concurrency:
-  group: publish-auth-session-fix
+  group: publish-auth-completion-fix
   cancel-in-progress: false
 jobs:
   publish:
@@ -20,40 +20,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh api repos/"$GH_REPO"/actions/runs/37382446987 > run.json
+          gh api repos/"$GH_REPO"/actions/runs/37400341036 > run.json
           python3 - <<'PY'
           import json
           r=json.load(open("run.json"))
           assert r["conclusion"]=="success"
-          assert r["head_sha"]=="f6dab5a8b41d6dad7806863249167d6919467840"
+          assert r["head_sha"]=="b5d32c7ba47b87da4990a1c238e2cd691b7fc446"
           PY
-          gh run download 37382446987 --name Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64 --dir artifact
+          gh run download 37400341036 --name Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64 --dir artifact
           cd artifact
           sha256sum --check SHA256SUMS-auth-lifecycle-pr26.txt
-          test "$(sha256sum Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64.exe | cut -d ' ' -f 1)" = "134f1a5a7ccc1f2bbb30f200583e5ac2d3a6bb0d5d0226b73c48d6930cff4aaa"
-          mv Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64.exe Tekzite-Browser-v10.5.125-auth-session-fix-Windows-x64.exe
-          sha256sum Tekzite-Browser-v10.5.125-auth-session-fix-Windows-x64.exe > SHA256SUMS.txt
+          test "$(sha256sum Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64.exe | cut -d ' ' -f 1)" = "d84c1f3e51c160abeaa4fce878ada97449dac479f3ad80838f606da1081221c4"
+          mv Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64.exe Tekzite-Browser-v10.5.125-auth-completion-fix-Windows-x64.exe
+          sha256sum Tekzite-Browser-v10.5.125-auth-completion-fix-Windows-x64.exe > SHA256SUMS.txt
       - name: Publish standalone Windows release
         shell: bash
         run: |
           set -euo pipefail
           cat > notes.md <<'NOTES'
-          Standalone Windows x64 executable with authentication lifecycle and session restoration fixes.
+          Windows x64 and Linux x86_64 release with authentication completion and profile handoff fixes.
           
-          Download the .exe directly and run it. No accompanying runtime files or _internal folder are required.
+          Windows: download the standalone .exe directly. No accompanying runtime files or _internal folder are required.
+          Linux: download the standalone executable or the .tar.gz archive; the usual Linux system libraries and Chromium runtime requirements apply.
           
-          - Preserve Chromium session cookies when returning from the authentication window.
-          - Use the existing Chromium profile consistently during authentication and restart.
-          - Reject failed authentication callbacks and prevent callback replay.
-          - Restore the previous page when authentication is cancelled.
+          - Keep GitHub OAuth provider login/session pages from prematurely completing the handoff.
+          - Detect GitHub's own sign-in separately from OAuth callbacks to another website.
+          - Confirm a fresh GitHub dashboard return even when Chromium's live cookie database is unreadable.
+          - Clear stale Tekzite profile-owner markers only after Chromium has exited, allowing the browser to resume.
+          - Remove the forced extra auth-window launch request and use provider-neutral sign-in status text.
+          - Add credential-free Copy Auth Debug under Tools.
           
-          Published from successful Windows build 37382446987 at commit f6dab5a8b41d6dad7806863249167d6919467840. Regression and mocked extension tests passed. This is the exact previously supplied executable; its SHA256 is 134f1a5a7ccc1f2bbb30f200583e5ac2d3a6bb0d5d0226b73c48d6930cff4aaa.
+          GitHub's own sign-in and automatic auth-window closure were confirmed by the user on Windows. All 750 current regression tests and mocked extension checks passed on the Windows build. The Linux publisher runs the same regression suite, extension checks and environment doctor before uploading its assets. Live login is not yet verified for every provider or on Linux.
           
-          The executable is unsigned. Live end-to-end login has not been verified for every supported provider.
+          Windows executable: exact user-tested build 37400341036 at commit b5d32c7ba47b87da4990a1c238e2cd691b7fc446. SHA256: d84c1f3e51c160abeaa4fce878ada97449dac479f3ad80838f606da1081221c4.
+          
+          The Windows executable is unsigned.
           NOTES
-          gh release create v10.5.125-auth-session-fix \
-            artifact/Tekzite-Browser-v10.5.125-auth-session-fix-Windows-x64.exe \
+          gh release create v10.5.125-auth-completion-fix \
+            artifact/Tekzite-Browser-v10.5.125-auth-completion-fix-Windows-x64.exe \
             artifact/SHA256SUMS.txt \
-            --target f6dab5a8b41d6dad7806863249167d6919467840 \
-            --title "Tekzite Browser v10.5.125 — Authentication session fix" \
+            --target b5d32c7ba47b87da4990a1c238e2cd691b7fc446 \
+            --title "Tekzite Browser v10.5.125 — Authentication completion fix" \
             --notes-file notes.md --latest
