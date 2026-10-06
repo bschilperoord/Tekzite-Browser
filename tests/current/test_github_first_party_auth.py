@@ -58,8 +58,9 @@ def test_old_dashboard_with_new_cookie_is_not_completion(tmp_path):
     assert not net.standalone_google_auth_succeeded(handle)
 
 
-def test_unchanged_session_cookie_is_not_new_login(tmp_path):
+def test_unchanged_session_cookie_is_not_new_login(tmp_path, monkeypatch):
     handle = profile_state(tmp_path)
+    monkeypatch.setattr(net, '_standalone_auth_window_snapshot', lambda _: [])
     handle['auth_cookie_baseline'] = net._snapshot_auth_cookie_state(str(tmp_path), 'https://github.com/')
     assert not net.standalone_google_auth_succeeded(handle)
 
@@ -70,3 +71,15 @@ def test_unchanged_session_cookie_is_not_new_login(tmp_path):
 ])
 def test_oauth_does_not_use_first_party_session_detection(source, target):
     assert not net._github_first_party_auth({'url': source, 'return_url': target})
+
+
+def test_existing_session_needs_live_dashboard_and_fresh_visit(tmp_path, monkeypatch):
+    handle = profile_state(tmp_path)
+    handle['auth_cookie_baseline'] = net._snapshot_auth_cookie_state(str(tmp_path), 'https://github.com/')
+    monkeypatch.setattr(net, '_standalone_auth_window_snapshot',
+                        lambda _: [{'title': 'GitHub - Chromium'}])
+    now = [10.0]
+    monkeypatch.setattr(net.time, 'monotonic', lambda: now[0])
+    assert not net.standalone_google_auth_succeeded(handle)
+    now[0] += 1.5
+    assert net.standalone_google_auth_succeeded(handle)

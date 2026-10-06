@@ -6038,7 +6038,13 @@ def _github_first_party_auth_succeeded(handle, settle_seconds):
     sessions = {key: value for key, value in (current or {}).items()
                 if key[0].lstrip(".") == "github.com" and key[1] == "user_session"}
     changed = any(baseline.get(key) != value for key, value in sessions.items())
-    if not changed:
+    # An already authenticated profile may redirect /login without rotating
+    # its session cookie. In that case require the live dashboard title too.
+    dashboard_visible = bool(sessions) and any(
+        str(row.get("title") or "").split(" - ", 1)[0].strip() == "GitHub"
+        for row in _standalone_auth_window_snapshot(handle)
+    )
+    if not (changed or dashboard_visible):
         handle["github_auth_settle_since"] = None
         return False
     # A second restored login window can append a newer /login visit. Search
