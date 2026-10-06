@@ -10732,6 +10732,7 @@ class BrowserApp(BrowserFeatures):
                 None,
                 ("Copy All Debug", self.copy_all_debug, ""),
                 ("Copy Full Debug", self.copy_full_debug, ""),
+                ("Copy Auth Debug", self.copy_auth_debug, ""),
                 None,
                 ("Inspect Chromium HTML", self.inspect_html, "Ctrl+U / F12"),
             ]),
@@ -14417,6 +14418,25 @@ class BrowserApp(BrowserFeatures):
             self._all_debug_text(),
             "compact debug",
         )
+
+    def copy_auth_debug(self):
+        """Copy only auth state flags, never URLs or session credentials."""
+        handle = getattr(self, "_google_auth_handle", None) or {}
+        allowed = {"detector", "stage", "cookie_database_readable",
+                   "github_session_present", "github_session_changed",
+                   "dashboard_window_visible", "fresh_dashboard_visit"}
+        report = {key: value for key, value in (handle.get("auth_diagnostics") or {}).items()
+                  if key in allowed and isinstance(value, (bool, str))}
+        report.update({
+            "auth_active": bool(getattr(self, "_google_auth_handoff_active", False)),
+            "probe_count": int(handle.get("google_auth_probe_count") or 0),
+            "completion_detected": bool(handle.get("google_auth_success_signal")),
+            "close_requested": bool(handle.get("auto_close_requested")),
+            "visible_window_count": len(handle.get("auth_hwnds") or []),
+            "probe_error": bool(handle.get("google_auth_last_probe_error")),
+        })
+        self._copy_debug_report(json.dumps(report, indent=2), "auth debug")
+
 
     def copy_full_debug(self):
         self._copy_debug_report(

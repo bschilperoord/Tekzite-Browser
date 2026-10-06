@@ -6038,13 +6038,20 @@ def _github_first_party_auth_succeeded(handle, settle_seconds):
     sessions = {key: value for key, value in (current or {}).items()
                 if key[0].lstrip(".") == "github.com" and key[1] == "user_session"}
     changed = any(baseline.get(key) != value for key, value in sessions.items())
+    handle["auth_diagnostics"].update({
+        "cookie_database_readable": current is not None,
+        "github_session_present": bool(sessions),
+        "github_session_changed": changed,
+    })
     # An already authenticated profile may redirect /login without rotating
     # its session cookie. In that case require the live dashboard title too.
     dashboard_visible = bool(sessions) and any(
         str(row.get("title") or "").split(" - ", 1)[0].strip() == "GitHub"
         for row in _standalone_auth_window_snapshot(handle)
     )
+    handle["auth_diagnostics"]["dashboard_window_visible"] = dashboard_visible
     if not (changed or dashboard_visible):
+        handle["auth_diagnostics"]["stage"] = "waiting-for-login-session"
         handle["github_auth_settle_since"] = None
         return False
     # A second restored login window can append a newer /login visit. Search
@@ -6052,9 +6059,13 @@ def _github_first_party_auth_succeeded(handle, settle_seconds):
     latest = _snapshot_chromium_latest_visit(
         handle["profile"], "https://github.com/", match_path=True)
     before = handle.get("history_visit_baseline")
-    if not latest or (before and tuple(latest)[1:] <= tuple(before)[1:]):
+    fresh = bool(latest and (not before or tuple(latest)[1:] > tuple(before)[1:]))
+    handle["auth_diagnostics"]["fresh_dashboard_visit"] = fresh
+    if not fresh:
+        handle["auth_diagnostics"]["stage"] = "waiting-for-dashboard-history"
         handle["github_auth_settle_since"] = None
         return False
+    handle["auth_diagnostics"]["stage"] = "settling-github-return"
     signal = ("github-session-return", tuple(latest), tuple(sorted(sessions.items())))
     now = time.monotonic()
     if handle.get("github_auth_pending_signal") != signal:
@@ -6067,6 +6078,7 @@ def _github_first_party_auth_succeeded(handle, settle_seconds):
         return False
     if now - since < max(0.8, float(settle_seconds)):
         return False
+    handle["auth_diagnostics"]["stage"] = "github-completion-confirmed"
     handle["google_auth_success_signal"] = ("github-session-return", tuple(latest))
     handle["auth_return_url_seen"] = str(latest[0])
     handle["auth_provider_independent_success"] = True
@@ -6097,6 +6109,9 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         or return_host in {"google.com", "youtube.com", "music.youtube.com"}
     )
 
+    handle["auth_diagnostics"] = {"detector": "github-first-party" if _github_first_party_auth(handle)
+                                  else "google" if google_flow else "oauth-return",
+                                  "stage": "waiting-for-completion"}
     if _github_first_party_auth(handle):
         return _github_first_party_auth_succeeded(handle, settle_seconds)
 
