@@ -5501,7 +5501,7 @@ def _chromium_history_db_candidates(profile):
         yield profile_dir / "History"
 
 
-def _snapshot_chromium_latest_visit(profile, target_url=""):
+def _snapshot_chromium_latest_visit(profile, target_url="", *, match_path=False):
     """Return the newest matching Chromium History visit.
 
     When *target_url* is supplied, search recent visits for that normalized host
@@ -5551,6 +5551,8 @@ def _snapshot_chromium_latest_visit(profile, target_url=""):
                     except Exception:
                         continue
                     if candidate_host != expected_host:
+                        continue
+                    if match_path and (urlsplit(candidate[0]).path or "/") != (urlsplit(target_url).path or "/"):
                         continue
                 if best is None or candidate[1:] > best[1:]:
                     best = candidate
@@ -6012,6 +6014,59 @@ def _snapshot_google_auth_cookie_state(profile):
     return {} if saw_readable_db else None
 
 
+def _github_first_party_auth(handle):
+    """Distinguish GitHub's own login from GitHub OAuth for another site."""
+    try:
+        source = urlsplit(str(handle.get("url") or ""))
+        target = urlsplit(str(handle.get("return_url") or ""))
+        return (source.hostname == target.hostname == "github.com"
+                and source.path.rstrip("/") == "/login"
+                and "oauth" not in source.query.lower())
+    except Exception:
+        return False
+
+
+def _github_first_party_auth_succeeded(handle, settle_seconds):
+    """Require a fresh dashboard visit plus a changed GitHub login cookie.
+
+    GitHub documents user_session as its login cookie. CSRF/consent cookie
+    changes and provider visits during an OAuth flow cannot trigger this path.
+    Only fingerprints are retained; cookie contents are never exposed.
+    """
+    current = _snapshot_auth_cookie_state(handle["profile"], "https://github.com/")
+    baseline = handle.get("auth_cookie_baseline") or {}
+    sessions = {key: value for key, value in (current or {}).items()
+                if key[0].lstrip(".") == "github.com" and key[1] == "user_session"}
+    changed = any(baseline.get(key) != value for key, value in sessions.items())
+    if not changed:
+        handle["github_auth_settle_since"] = None
+        return False
+    # A second restored login window can append a newer /login visit. Search
+    # for the dashboard itself instead of trusting the newest provider URL.
+    latest = _snapshot_chromium_latest_visit(
+        handle["profile"], "https://github.com/", match_path=True)
+    before = handle.get("history_visit_baseline")
+    if not latest or (before and tuple(latest)[1:] <= tuple(before)[1:]):
+        handle["github_auth_settle_since"] = None
+        return False
+    signal = ("github-session-return", tuple(latest), tuple(sorted(sessions.items())))
+    now = time.monotonic()
+    if handle.get("github_auth_pending_signal") != signal:
+        handle["github_auth_pending_signal"] = signal
+        handle["github_auth_settle_since"] = now
+        return False
+    since = handle.get("github_auth_settle_since")
+    if since is None:
+        handle["github_auth_settle_since"] = now
+        return False
+    if now - since < max(0.8, float(settle_seconds)):
+        return False
+    handle["google_auth_success_signal"] = ("github-session-return", tuple(latest))
+    handle["auth_return_url_seen"] = str(latest[0])
+    handle["auth_provider_independent_success"] = True
+    return True
+
+
 def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     """Detect completed authentication for Google and standards-based providers."""
     if not isinstance(handle, dict):
@@ -6035,6 +6090,9 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         launch_host == "accounts.google.com"
         or return_host in {"google.com", "youtube.com", "music.youtube.com"}
     )
+
+    if _github_first_party_auth(handle):
+        return _github_first_party_auth_succeeded(handle, settle_seconds)
 
     # Keep the proven live-HWND Google/YouTube path first. This deliberately
     # avoids touching History/Cookies when the exact auth window has already
@@ -6552,7 +6610,8 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             "--disable-session-crashed-bubble",
             f"--window-position={x},{y}",
             f"--window-size={width},{height}",
-            "--new-window",
+            # Reuse the restored browser window. --new-window would request
+            # an additional visible window alongside session restoration.
             target_url,
         ]
         process = subprocess.Popen(

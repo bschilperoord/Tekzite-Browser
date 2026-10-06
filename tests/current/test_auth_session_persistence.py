@@ -75,3 +75,5 @@ def test_both_launchers_use_same_selected_profile_and_restore_cookies(tmp_path, 
     assert '--profile-directory=Profile 2' in command
     assert json.loads((tmp_path / directory / 'Preferences').read_text())['session']['restore_on_startup'] == 1
     assert not any(flag.startswith('--incognito') for flag in command)
+    if standalone:
+        assert '--new-window' not in command
