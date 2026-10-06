@@ -83,3 +83,20 @@ def test_existing_session_needs_live_dashboard_and_fresh_visit(tmp_path, monkeyp
     assert not net.standalone_google_auth_succeeded(handle)
     now[0] += 1.5
     assert net.standalone_google_auth_succeeded(handle)
+
+
+@pytest.mark.parametrize('title,visit_time,succeeds', [
+    ('GitHub - Chromium', 200, True),
+    ('Sign in to GitHub - Chromium', 200, False),
+    ('GitHub - Chromium', 50, False),
+])
+def test_locked_cookie_db_requires_live_dashboard_and_fresh_history(tmp_path, monkeypatch, title, visit_time, succeeds):
+    handle = profile_state(tmp_path, dashboard_time=visit_time)
+    monkeypatch.setattr(net, '_snapshot_auth_cookie_state', lambda *_: None)
+    monkeypatch.setattr(net, '_standalone_auth_window_snapshot', lambda _: [{'title': title}])
+    now = [10.0]
+    monkeypatch.setattr(net.time, 'monotonic', lambda: now[0])
+    assert not net.standalone_google_auth_succeeded(handle)
+    now[0] += 1.5
+    assert net.standalone_google_auth_succeeded(handle) is succeeds
+    assert not handle['auth_diagnostics']['cookie_database_readable']

@@ -6043,17 +6043,14 @@ def _github_first_party_auth_succeeded(handle, settle_seconds):
         "github_session_present": bool(sessions),
         "github_session_changed": changed,
     })
-    # An already authenticated profile may redirect /login without rotating
-    # its session cookie. In that case require the live dashboard title too.
-    dashboard_visible = bool(sessions) and any(
+    # Cookie files can be locked while Chromium is running. Independently
+    # observe the live dashboard; this still requires a fresh matching History
+    # visit below, never a title or cookie alone.
+    dashboard_visible = any(
         str(row.get("title") or "").split(" - ", 1)[0].strip() == "GitHub"
         for row in _standalone_auth_window_snapshot(handle)
     )
     handle["auth_diagnostics"]["dashboard_window_visible"] = dashboard_visible
-    if not (changed or dashboard_visible):
-        handle["auth_diagnostics"]["stage"] = "waiting-for-login-session"
-        handle["github_auth_settle_since"] = None
-        return False
     # A second restored login window can append a newer /login visit. Search
     # for the dashboard itself instead of trusting the newest provider URL.
     latest = _snapshot_chromium_latest_visit(
@@ -6065,8 +6062,14 @@ def _github_first_party_auth_succeeded(handle, settle_seconds):
         handle["auth_diagnostics"]["stage"] = "waiting-for-dashboard-history"
         handle["github_auth_settle_since"] = None
         return False
+    if not (changed or dashboard_visible):
+        handle["auth_diagnostics"]["stage"] = "waiting-for-login-session"
+        handle["github_auth_settle_since"] = None
+        return False
     handle["auth_diagnostics"]["stage"] = "settling-github-return"
-    signal = ("github-session-return", tuple(latest), tuple(sorted(sessions.items())))
+    # Readability can alternate while the cookie DB is locked; the confirmed
+    # dashboard visit is the stable settle key, not a fluctuating snapshot.
+    signal = ("github-session-return", tuple(latest))
     now = time.monotonic()
     if handle.get("github_auth_pending_signal") != signal:
         handle["github_auth_pending_signal"] = signal
