@@ -1,64 +1,35 @@
-name: Publish verified standalone auth build
+name: Update authentication release notes
 on:
   push:
     branches: ["fix/auth-handoff-lifecycle-tests"]
     paths: [".github/workflows/publish-auth-standalone.yml"]
 permissions:
   contents: write
-  actions: read
 concurrency:
   group: publish-auth-completion-fix
   cancel-in-progress: false
 jobs:
-  publish:
+  update-notes:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - name: Verify source build and download executable
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api repos/"$GH_REPO"/actions/runs/37400341036 > run.json
-          python3 - <<'PY'
-          import json
-          r=json.load(open("run.json"))
-          assert r["conclusion"]=="success"
-          assert r["head_sha"]=="b5d32c7ba47b87da4990a1c238e2cd691b7fc446"
-          PY
-          gh run download 37400341036 --name Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64 --dir artifact
-          cd artifact
-          sha256sum --check SHA256SUMS-auth-lifecycle-pr26.txt
-          test "$(sha256sum Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64.exe | cut -d ' ' -f 1)" = "d84c1f3e51c160abeaa4fce878ada97449dac479f3ad80838f606da1081221c4"
-          mv Tekzite-Browser-v10.5.125-auth-lifecycle-pr26-Windows-x64.exe Tekzite-Browser-v10.5.125-auth-completion-fix-Windows-x64.exe
-          sha256sum Tekzite-Browser-v10.5.125-auth-completion-fix-Windows-x64.exe > SHA256SUMS.txt
-      - name: Publish standalone Windows release
+      - name: Update release description
         shell: bash
         run: |
           set -euo pipefail
           cat > notes.md <<'NOTES'
-          Windows x64 and Linux x86_64 release with authentication completion and profile handoff fixes.
+          Fixes GitHub sign-in completion, auth-window closing and browser session handoff.
           
-          Windows: download the standalone .exe directly. No accompanying runtime files or _internal folder are required.
-          Linux: download the standalone executable or the .tar.gz archive; the usual Linux system libraries and Chromium runtime requirements apply.
+          - Prevents premature closure during GitHub OAuth sign-in.
+          - Resumes browsing after authentication and avoids duplicate auth windows.
+          - Adds **Tools → Copy Auth Debug** for troubleshooting.
           
-          - Keep GitHub OAuth provider login/session pages from prematurely completing the handoff.
-          - Detect GitHub's own sign-in separately from OAuth callbacks to another website.
-          - Confirm a fresh GitHub dashboard return even when Chromium's live cookie database is unreadable.
-          - Clear stale Tekzite profile-owner markers only after Chromium has exited, allowing the browser to resume.
-          - Remove the forced extra auth-window launch request and use provider-neutral sign-in status text.
-          - Add credential-free Copy Auth Debug under Tools.
+          **Downloads:** Windows x64: standalone `.exe`. Linux x86_64: executable or `.tar.gz`. SHA256 checksums are included.
           
-          GitHub's own sign-in and automatic auth-window closure were confirmed by the user on Windows. All 750 current regression tests and mocked extension checks passed on the Windows build. The Linux publisher runs the same regression suite, extension checks and environment doctor before uploading its assets. Live login is not yet verified for every provider or on Linux.
-          
-          Windows executable: exact user-tested build 37400341036 at commit b5d32c7ba47b87da4990a1c238e2cd691b7fc446. SHA256: d84c1f3e51c160abeaa4fce878ada97449dac479f3ad80838f606da1081221c4.
+          **Validation:** 750 regression tests passed. GitHub sign-in and automatic window closure were verified on Windows; live login on Linux and other providers remains unverified.
           
           The Windows executable is unsigned.
           NOTES
-          gh release create v10.5.125-auth-completion-fix \
-            artifact/Tekzite-Browser-v10.5.125-auth-completion-fix-Windows-x64.exe \
-            artifact/SHA256SUMS.txt \
-            --target 536fd91a21e4277bb31e9ac6171540488fa85ee2 \
-            --title "Tekzite Browser v10.5.125 — Authentication completion fix" \
-            --notes-file notes.md --latest
+          gh release edit v10.5.125-auth-completion-fix --notes-file notes.md
