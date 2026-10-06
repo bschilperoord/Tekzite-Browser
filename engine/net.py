@@ -5581,6 +5581,8 @@ def _auth_return_url_candidates(handle):
     found = []
     pending = list(seeds)
     seen = set()
+    launch_url = str(handle.get("url") or "")
+    return_url = str(handle.get("return_url") or "")
     while pending and len(seen) < 24:
         value = str(pending.pop(0) or "").strip()
         if not value or value in seen:
@@ -5591,7 +5593,11 @@ def _auth_return_url_candidates(handle):
         except Exception:
             continue
         if parts.scheme.lower() in {"http", "https"} and parts.hostname:
-            if value not in found:
+            # The provider launch URL supplies nested callback parameters,
+            # but its own host is not a relying-party return destination.
+            # Otherwise GitHub /session, / or two-factor pages can close an
+            # unfinished login using unrelated provider history.
+            if (value != launch_url or value == return_url) and value not in found:
                 found.append(value)
         try:
             for key, raw in parse_qsl(parts.query, keep_blank_values=True):
