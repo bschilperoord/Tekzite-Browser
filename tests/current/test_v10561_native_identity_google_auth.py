@@ -38,7 +38,7 @@ def test_google_auth_url_handoff_unwraps_rejected_continue_url():
 
 def test_standalone_google_auth_uses_visible_non_cdp_chromium_window():
     source = inspect.getsource(net.start_standalone_auth_chromium)
-    assert "--new-window" in source
+    assert '"--new-window",' not in source
     assert "--window-position=" in source
     assert "--window-size=" in source
     assert "_force_standalone_auth_window_onscreen" in source

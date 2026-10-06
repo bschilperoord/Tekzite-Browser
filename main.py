@@ -5196,6 +5196,7 @@ class BrowserApp(BrowserFeatures):
         launch_url, return_url = self._external_auth_handoff_urls(url, previous_url)
         self._google_auth_handoff_active = True
         self._google_auth_return_url = return_url
+        self._google_auth_previous_url = str(previous_url or tab.get("url") or "")
         self._google_auth_source_url = str(url or "")
         self._google_auth_source_tab_id = tab.get("id")
         self._suspend_chromium_for_external_auth()
@@ -5301,7 +5302,7 @@ class BrowserApp(BrowserFeatures):
                         succeeded = False
                     if succeeded:
                         self.status_var.set(
-                            "Google sign-in successful; closing authentication window…"
+                            "Sign-in successful; closing authentication window…"
                         )
                         try:
                             # The first close is already a synchronous, cooperative
@@ -5325,8 +5326,8 @@ class BrowserApp(BrowserFeatures):
                 if close_future is None and elapsed >= 1.6:
                     cooperative_escalation = elapsed >= 3.8
                     self.status_var.set(
-                        "Finishing Google sign-in…" if not cooperative_escalation
-                        else "Google sign-in complete; closing Chromium cleanly…"
+                        "Finishing Sign-in…" if not cooperative_escalation
+                        else "Sign-in complete; closing Chromium cleanly…"
                     )
                     try:
                         auth_executor = getattr(self, "_google_auth_executor", self._executor)
@@ -5371,7 +5372,7 @@ class BrowserApp(BrowserFeatures):
             released = False
         if not released:
             self.status_var.set(
-                "Google sign-in window is still releasing its profile; waiting…"
+                "Sign-in window is still releasing its profile; waiting…"
             )
             self.root.after(350, self._poll_google_auth_window)
             return
@@ -5381,6 +5382,7 @@ class BrowserApp(BrowserFeatures):
         if not getattr(self, "_google_auth_handoff_active", False):
             return
         self._google_auth_handoff_active = False
+        handle = getattr(self, "_google_auth_handle", None) or {}
         self._google_auth_handle = None
         self._google_auth_launch_future = None
         self._google_auth_release_future = None
@@ -5388,6 +5390,26 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_success_future_started_at = None
         self._google_auth_close_future = None
         return_url = str(getattr(self, "_google_auth_return_url", "") or "")
+        previous_url = str(getattr(self, "_google_auth_previous_url", "") or "")
+        self._google_auth_previous_url = None
+        if previous_url:
+            # Resume the initiating page on cancellation; never replay an OAuth
+            # callback without its one-time code/state. Prefer a final landing
+            # page only when it is safe to revisit without callback parameters.
+            seen = str(handle.get("auth_return_url_seen") or "")
+            expected = urlsplit(return_url)
+            actual = urlsplit(seen)
+            if (handle.get("auth_provider_independent_success") and seen
+                    and actual.hostname == expected.hostname
+                    and not set(actual.path.lower().strip("/").split("/"))
+                    & {"auth", "oauth", "oauth2", "oidc", "login", "callback"}
+                    and not dict(parse_qsl(actual.query) + parse_qsl(actual.fragment)).keys()
+                    & {"code", "state", "error"}):
+                return_url = seen
+            elif not handle.get("google_auth_success_signal") or handle.get(
+                "auth_provider_independent_success"
+            ):
+                return_url = previous_url
         source_tab_id = getattr(self, "_google_auth_source_tab_id", None)
         self._google_auth_return_url = None
         self._google_auth_source_url = None
@@ -5410,7 +5432,7 @@ class BrowserApp(BrowserFeatures):
                 self._google_auth_refresh_pending_url = return_url
                 self.url_var.set(return_url)
                 self._refresh_tab_strip()
-                self.status_var.set("Returning from Google sign-in…")
+                self.status_var.set("Returning from Sign-in…")
                 self.navigate_to(return_url, add_history=False, reuse_existing=False)
             else:
                 # The auth result belongs to the tab that initiated it, never to
@@ -5419,10 +5441,10 @@ class BrowserApp(BrowserFeatures):
                 tab["restore_pending"] = True
                 self._google_auth_refresh_pending_url = None
                 self._refresh_tab_strip()
-                self.status_var.set("Google sign-in complete")
+                self.status_var.set("Sign-in complete")
         else:
             self._google_auth_refresh_pending_url = None
-            self.status_var.set("Google sign-in window closed")
+            self.status_var.set("Sign-in window closed")
 
     def _refresh_after_google_auth(self, generation, target_id, expected_url):
         """Reload the returned page once after Chromium has reopened the profile."""
@@ -5433,7 +5455,7 @@ class BrowserApp(BrowserFeatures):
             return
         if self._canonical_tab_url(tab.get("url")) != self._canonical_tab_url(expected_url):
             return
-        self.status_var.set("Applying Google sign-in session…")
+        self.status_var.set("Applying Sign-in session…")
         self.navigate_to(expected_url, add_history=False, reuse_existing=False)
 
     def _poll_one_tab_state(self, tab_id, target_id, include_favicon=False):
@@ -10710,6 +10732,7 @@ class BrowserApp(BrowserFeatures):
                 None,
                 ("Copy All Debug", self.copy_all_debug, ""),
                 ("Copy Full Debug", self.copy_full_debug, ""),
+                ("Copy Auth Debug", self.copy_auth_debug, ""),
                 None,
                 ("Inspect Chromium HTML", self.inspect_html, "Ctrl+U / F12"),
             ]),
@@ -14395,6 +14418,25 @@ class BrowserApp(BrowserFeatures):
             self._all_debug_text(),
             "compact debug",
         )
+
+    def copy_auth_debug(self):
+        """Copy only auth state flags, never URLs or session credentials."""
+        handle = getattr(self, "_google_auth_handle", None) or {}
+        allowed = {"detector", "stage", "cookie_database_readable",
+                   "github_session_present", "github_session_changed",
+                   "dashboard_window_visible", "fresh_dashboard_visit", "profile_process_alive"}
+        report = {key: value for key, value in (handle.get("auth_diagnostics") or {}).items()
+                  if key in allowed and isinstance(value, (bool, str))}
+        report.update({
+            "auth_active": bool(getattr(self, "_google_auth_handoff_active", False)),
+            "probe_count": int(handle.get("google_auth_probe_count") or 0),
+            "completion_detected": bool(handle.get("google_auth_success_signal")),
+            "close_requested": bool(handle.get("auto_close_requested")),
+            "visible_window_count": len(handle.get("auth_hwnds") or []),
+            "probe_error": bool(handle.get("google_auth_last_probe_error")),
+        })
+        self._copy_debug_report(json.dumps(report, indent=2), "auth debug")
+
 
     def copy_full_debug(self):
         self._copy_debug_report(
