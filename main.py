@@ -5302,7 +5302,7 @@ class BrowserApp(BrowserFeatures):
                         succeeded = False
                     if succeeded:
                         self.status_var.set(
-                            "Google sign-in successful; closing authentication window…"
+                            "Sign-in successful; closing authentication window…"
                         )
                         try:
                             # The first close is already a synchronous, cooperative
@@ -5326,8 +5326,8 @@ class BrowserApp(BrowserFeatures):
                 if close_future is None and elapsed >= 1.6:
                     cooperative_escalation = elapsed >= 3.8
                     self.status_var.set(
-                        "Finishing Google sign-in…" if not cooperative_escalation
-                        else "Google sign-in complete; closing Chromium cleanly…"
+                        "Finishing Sign-in…" if not cooperative_escalation
+                        else "Sign-in complete; closing Chromium cleanly…"
                     )
                     try:
                         auth_executor = getattr(self, "_google_auth_executor", self._executor)
@@ -5372,7 +5372,7 @@ class BrowserApp(BrowserFeatures):
             released = False
         if not released:
             self.status_var.set(
-                "Google sign-in window is still releasing its profile; waiting…"
+                "Sign-in window is still releasing its profile; waiting…"
             )
             self.root.after(350, self._poll_google_auth_window)
             return
@@ -5432,7 +5432,7 @@ class BrowserApp(BrowserFeatures):
                 self._google_auth_refresh_pending_url = return_url
                 self.url_var.set(return_url)
                 self._refresh_tab_strip()
-                self.status_var.set("Returning from Google sign-in…")
+                self.status_var.set("Returning from Sign-in…")
                 self.navigate_to(return_url, add_history=False, reuse_existing=False)
             else:
                 # The auth result belongs to the tab that initiated it, never to
@@ -5441,10 +5441,10 @@ class BrowserApp(BrowserFeatures):
                 tab["restore_pending"] = True
                 self._google_auth_refresh_pending_url = None
                 self._refresh_tab_strip()
-                self.status_var.set("Google sign-in complete")
+                self.status_var.set("Sign-in complete")
         else:
             self._google_auth_refresh_pending_url = None
-            self.status_var.set("Google sign-in window closed")
+            self.status_var.set("Sign-in window closed")
 
     def _refresh_after_google_auth(self, generation, target_id, expected_url):
         """Reload the returned page once after Chromium has reopened the profile."""
@@ -5455,7 +5455,7 @@ class BrowserApp(BrowserFeatures):
             return
         if self._canonical_tab_url(tab.get("url")) != self._canonical_tab_url(expected_url):
             return
-        self.status_var.set("Applying Google sign-in session…")
+        self.status_var.set("Applying Sign-in session…")
         self.navigate_to(expected_url, add_history=False, reuse_existing=False)
 
     def _poll_one_tab_state(self, tab_id, target_id, include_favicon=False):
@@ -14424,7 +14424,7 @@ class BrowserApp(BrowserFeatures):
         handle = getattr(self, "_google_auth_handle", None) or {}
         allowed = {"detector", "stage", "cookie_database_readable",
                    "github_session_present", "github_session_changed",
-                   "dashboard_window_visible", "fresh_dashboard_visit"}
+                   "dashboard_window_visible", "fresh_dashboard_visit", "profile_process_alive"}
         report = {key: value for key, value in (handle.get("auth_diagnostics") or {}).items()
                   if key in allowed and isinstance(value, (bool, str))}
         report.update({

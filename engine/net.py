@@ -6757,31 +6757,32 @@ def standalone_auth_chromium_running(handle):
 
 
 def wait_for_standalone_auth_chromium_release(handle, timeout: float = 6.0):
-    """Wait for auth Chromium to release Tekzite's shared profile completely."""
+    """Wait for the auth browser to exit, then clear stale profile bookkeeping."""
     if not isinstance(handle, dict):
         return True
 
     profile = str(handle.get("profile") or "")
+    diagnostics = handle.setdefault("auth_diagnostics", {})
+    diagnostics["stage"] = "waiting-for-profile-release"
     deadline = time.monotonic() + max(1.0, float(timeout))
-    while time.monotonic() < deadline:
-        if standalone_auth_chromium_running(handle):
-            time.sleep(0.08)
-            continue
-        if profile and _profile_chromium_pids(profile):
-            time.sleep(0.08)
-            continue
-        # Chromium can exit a fraction before its singleton files disappear.
-        if profile and _profile_recovery_needed(profile):
-            time.sleep(0.08)
-            continue
-        return True
-
-    # If no live browser owns the profile anymore, stale singleton crumbs are
-    # safe to remove. Never delete them while a tracked process is alive.
-    if profile and not _profile_chromium_pids(profile):
-        _clear_chromium_profile_locks(profile)
-        return not _profile_recovery_needed(profile)
-    return False
+    while True:
+        running = standalone_auth_chromium_running(handle)
+        owners = _profile_chromium_pids(profile) if profile else []
+        diagnostics["profile_process_alive"] = bool(running or owners)
+        if not running and not owners:
+            # _profile_recovery_needed includes Tekzite's own PID marker.
+            # Clearing only Chromium singleton files leaves that stale marker
+            # behind forever after an adopted process or mismatched old PID.
+            if profile:
+                _clear_profile_owner(profile)
+                _clear_chromium_profile_locks(profile)
+            released = not profile or not _profile_recovery_needed(profile)
+            diagnostics["stage"] = "profile-released" if released else "profile-cleanup-pending"
+            if released:
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.08)
 
 
 def _pick_devtools_page(port, session=None, target_id=None):
