@@ -59,6 +59,6 @@ jobs:
           gh release create v10.5.125-auth-completion-fix \
             artifact/Tekzite-Browser-v10.5.125-auth-completion-fix-Windows-x64.exe \
             artifact/SHA256SUMS.txt \
-            --target b5d32c7ba47b87da4990a1c238e2cd691b7fc446 \
+            --target 536fd91a21e4277bb31e9ac6171540488fa85ee2 \
             --title "Tekzite Browser v10.5.125 — Authentication completion fix" \
             --notes-file notes.md --latest

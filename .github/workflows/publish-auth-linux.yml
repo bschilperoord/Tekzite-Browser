@@ -61,6 +61,6 @@ jobs:
           import json
           r=json.load(open("tag.json"))
           assert r["object"]["type"]=="commit"
-          assert r["object"]["sha"]=="b5d32c7ba47b87da4990a1c238e2cd691b7fc446"
+          assert r["object"]["sha"]=="536fd91a21e4277bb31e9ac6171540488fa85ee2"
           PY
           gh release upload v10.5.125-auth-completion-fix "$bin_name" "$bin_name.tar.gz" SHA256SUMS-Linux.txt
