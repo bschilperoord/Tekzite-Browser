@@ -45,7 +45,7 @@ def _event(x_root, y_root):
 
 
 def test_release_version_and_window_position_parser():
-    assert main.BROWSER_VERSION == "10.5.130"
+    assert main.BROWSER_VERSION == "10.5.131"
     assert main._requested_window_position(["--window-position=123,-45"]) == (123, -45)
     assert main._requested_window_position(["--window-position=nope"]) is None
     assert main._requested_window_position([]) is None
@@ -139,3 +139,29 @@ def test_tab_context_menu_exposes_manual_move_to_new_window():
     block = source[source.index("def _show_tab_context_menu"):source.index("def _queue_closed_target_retirement")]
     assert "Move Tab to New Window" in block
     assert "self._tear_off_tab(tab_id)" in block
+
+
+def test_frozen_browser_spawn_has_independent_onefile_resources(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(main.sys, 'frozen', True, raising=False)
+    monkeypatch.setenv('_PYI_APPLICATION_HOME_DIR', 'old-extraction')
+    monkeypatch.setenv('TEKZITE_USER_EXTENSIONS', '["user-extension"]')
+    monkeypatch.delenv('PYINSTALLER_RESET_ENVIRONMENT', raising=False)
+    def popen(command, **kwargs):
+        seen.update(command=command, **kwargs)
+        return 'child'
+    monkeypatch.setattr(main.subprocess, 'Popen', popen)
+    app = SimpleNamespace(_profile_name='Music')
+    assert main.BrowserApp._spawn_browser_process(app, private=True) == 'child'
+    assert seen['command'] == [main.sys.executable, '--profile', 'Music', '--private']
+    assert seen['env']['PYINSTALLER_RESET_ENVIRONMENT'] == '1'
+    assert seen['env']['TEKZITE_USER_EXTENSIONS'] == '["user-extension"]'
+    assert 'PYINSTALLER_RESET_ENVIRONMENT' not in main.os.environ
+
+
+def test_source_spawn_does_not_reset_worker_environment(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(main.sys, 'frozen', False, raising=False)
+    monkeypatch.setattr(main.subprocess, 'Popen', lambda command, **kwargs: seen.update(kwargs))
+    main.BrowserApp._spawn_browser_process(SimpleNamespace(_profile_name='Default'))
+    assert seen['env'] is None

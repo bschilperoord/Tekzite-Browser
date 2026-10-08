@@ -955,7 +955,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.130"
+BROWSER_VERSION = "10.5.131"
 
 
 
@@ -11554,8 +11554,12 @@ class BrowserApp(BrowserFeatures):
             self.root.after(70, lambda: self._schedule_dwm_geometry_sync(resize=True, delay=1))
 
     def _spawn_browser_process(self, *, private=False, profile=None, target_url=None, window_position=None):
+        child_environment = None
         if getattr(sys, "frozen", False):
             command = [sys.executable]
+            # Independent windows/restarts outlive this OneFile extraction.
+            # Ask the bootloader to unpack its own resources before ours vanish.
+            child_environment = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
         else:
             command = [sys.executable, os.path.abspath(__file__)]
         selected_profile = _profile_slug(profile or getattr(self, "_profile_name", "Default"))
@@ -11573,7 +11577,7 @@ class BrowserApp(BrowserFeatures):
         if target_url and target_url.lower() != "about:blank":
             command.append(target_url)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-        return subprocess.Popen(command, creationflags=creationflags)
+        return subprocess.Popen(command, creationflags=creationflags, env=child_environment)
 
     def _new_window(self):
         try:

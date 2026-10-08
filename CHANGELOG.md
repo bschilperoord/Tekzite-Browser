@@ -1,3 +1,10 @@
+# v10.5.131 - Preserve bundled resources across restart
+
+- Launches packaged restarts and independent browser windows with a fresh OneFile extraction.
+- Prevents the replacement Chromium process from losing Tekzite's built-in extension when the old extraction folder is removed.
+- Preserves user extension paths and profile/private-window arguments.
+- Adds regression tests and real PyInstaller OneFile cleanup/restart probes on Windows and Linux.
+
 # v10.5.130 - Clear extension update results and copyable diagnostics
 
 - Distinguishes updated, pending, current, missing-source, unchecked and ineligible extensions.
