@@ -1385,16 +1385,25 @@ class _AnimatedPopupMenu:
         except Exception:
             return False
 
+    @staticmethod
+    def _label_parts(label):
+        # Existing callers use the common icon/label formatter. Render its
+        # fields separately: proportional glyph widths cannot align with spaces.
+        text = str(label or "")
+        match = re.fullmatch(r"  (.+?)   (.*?)  ", text, flags=re.DOTALL)
+        return (match.group(1), match.group(2)) if match else ("", text.strip())
+
+
     def _measure(self):
         try:
             font = tkfont.Font(font=self._font)
-            label_widths = [font.measure(str(i.get("label", ""))) for i in self.items if i.get("type") != "separator"]
+            label_widths = [font.measure(self._label_parts(i.get("label", ""))[1]) for i in self.items if i.get("type") != "separator"]
             accel_widths = [font.measure(str(i.get("accelerator", ""))) for i in self.items if i.get("type") != "separator"]
             label_w = max(label_widths or [120])
             accel_w = max(accel_widths or [0])
         except Exception:
             label_w, accel_w = 180, 80
-        self._width = max(230, min(620, int(label_w + accel_w + self.app._ui_padding(58))))
+        self._width = max(230, min(620, int(label_w + accel_w + self.app._ui_padding(96))))
         y = self._outer_pad
         rows = []
         for index, item in enumerate(self.items):
@@ -1441,12 +1450,16 @@ class _AnimatedPopupMenu:
                                                 fill=self._accent, outline="")
                 color = self._disabled if disabled else self._text
                 y_text = (y1 + y2) / 2 + (1 if pressed else 0)
-                canvas.create_text(left + (1 if pressed else 0), y_text,
-                                   text=item.get("label", ""), fill=color,
+                icon, label = self._label_parts(item.get("label", ""))
+                if icon:
+                    canvas.create_text(left + self.app._ui_padding(12) + (1 if pressed else 0), y_text,
+                                       text=icon, fill=color, font=font, anchor="center")
+                canvas.create_text(left + self.app._ui_padding(36) + (1 if pressed else 0), y_text,
+                                   text=label, fill=color,
                                    font=font, anchor="w")
                 accelerator = item.get("accelerator", "")
                 if accelerator:
-                    canvas.create_text(right - (14 if typ == "cascade" else 0), y_text,
+                    canvas.create_text(right - self.app._ui_padding(18), y_text,
                                        text=accelerator, fill=(self._disabled if disabled else self._muted),
                                        font=font, anchor="e")
                 if typ == "cascade":
