@@ -10,12 +10,12 @@ MENU_SOURCE = inspect.getsource(main._AnimatedPopupMenu.__init__)
 SETTINGS_SOURCE = inspect.getsource(main.BrowserApp.show_preferences)
 
 
-def test_current_default_shell_is_tighter_but_readable():
+def test_current_default_shell_is_larger_and_readable():
     c = main.DEFAULT_CUSTOMIZATION
     assert c["density"] == "comfortable"
-    assert c["spacing_generation"] == 3
-    assert (c["app_bar_height"], c["tab_bar_height"], c["toolbar_height"]) == (40, 46, 62)
-    assert (c["status_bar_height"], c["find_bar_height"]) == (26, 40)
+    assert c["spacing_generation"] == 5
+    assert (c["app_bar_height"], c["tab_bar_height"], c["toolbar_height"]) == (50, 58, 78)
+    assert (c["status_bar_height"], c["find_bar_height"]) == (36, 50)
     assert (c["tab_min_width"], c["tab_max_width"]) == (160, 300)
 
 
@@ -53,7 +53,7 @@ def test_user_customized_generation_two_layout_stays_custom():
         "tab_bar_height": 49,
     }
     normalized = main._normalized_customization(custom)
-    assert normalized["spacing_generation"] == 3
+    assert normalized["spacing_generation"] == 5
     assert normalized["density"] == "spacious"
     assert normalized["toolbar_height"] == 68
     assert normalized["tab_bar_height"] == 49

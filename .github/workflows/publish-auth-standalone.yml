@@ -1,0 +1,35 @@
+name: Update authentication release notes
+on:
+  push:
+    branches: ["fix/auth-handoff-lifecycle-tests"]
+    paths: [".github/workflows/publish-auth-standalone.yml"]
+permissions:
+  contents: write
+concurrency:
+  group: publish-auth-completion-fix
+  cancel-in-progress: false
+jobs:
+  update-notes:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Update release description
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          Fixes GitHub sign-in completion, auth-window closing and browser session handoff.
+          
+          - Prevents premature closure during GitHub OAuth sign-in.
+          - Resumes browsing after authentication and avoids duplicate auth windows.
+          - Adds **Tools → Copy Auth Debug** for troubleshooting.
+          
+          **Downloads:** Windows x64: standalone `.exe`. Linux x86_64: executable or `.tar.gz`. SHA256 checksums are included.
+          
+          **Validation:** 750 regression tests passed. GitHub sign-in and automatic window closure were verified on Windows; live login on Linux and other providers remains unverified.
+          
+          The Windows executable is unsigned.
+          NOTES
+          gh release edit v10.5.125-auth-completion-fix --notes-file notes.md

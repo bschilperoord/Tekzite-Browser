@@ -103,7 +103,7 @@ def test_generic_return_detection_accepts_cross_host_login_callback(monkeypatch)
     assert handle["auth_return_url_seen"].startswith("https://app.example.test/login/callback")
 
 
-def test_generic_site_cookie_change_can_complete_without_provider_specific_cookie_names(monkeypatch):
+def test_generic_site_cookie_change_alone_cannot_complete_auth(monkeypatch):
     baseline = {("example.test", "session"): "old"}
     current = {("example.test", "session"): "new"}
     handle = {
@@ -116,5 +116,5 @@ def test_generic_site_cookie_change_can_complete_without_provider_specific_cooki
     }
     monkeypatch.setattr(net, "_auth_navigation_has_returned", lambda _handle: False)
     monkeypatch.setattr(net, "_snapshot_auth_cookie_state", lambda _profile, _return: dict(current))
-    assert net.standalone_google_auth_succeeded(handle, 1.0)
-    assert handle["auth_provider_independent_success"] is True
+    assert not net.standalone_google_auth_succeeded(handle, 1.0)
+    assert not handle.get("auth_provider_independent_success")

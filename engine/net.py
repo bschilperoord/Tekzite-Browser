@@ -23,7 +23,7 @@ import atexit
 import threading
 from pathlib import Path
 from urllib.request import urlopen as _stdlib_urlopen
-from urllib.parse import urlsplit, unquote
+from urllib.parse import urlsplit, unquote, parse_qsl
 from loopback_policy import allow_loopback_port, revoke_loopback_port, snapshot as loopback_policy_snapshot
 from .udp_peer_etw import ensure_udp_peer_monitor, stop_udp_peer_monitor
 
@@ -106,6 +106,12 @@ _INTERNAL_NETWORK_ACTIVITY = []
 _INTERNAL_NETWORK_ACTIVITY_LOCK = threading.RLock()
 _INTERNAL_NETWORK_ACTIVITY_MAX_AGE = 15.0
 _INTERNAL_NETWORK_ACTIVITY_MAX_RECORDS = 128
+
+
+def _network_helper_executable(root, helper_name):
+    """Use a directory-built helper when packaged, retaining one-file compatibility."""
+    directory_helper = Path(root) / "network-helper" / helper_name
+    return directory_helper if directory_helper.is_file() else Path(root) / helper_name
 
 
 def _network_engine_root():
@@ -360,7 +366,7 @@ def _ensure_network_engine_locked():
     allow_loopback_port(port, "Tekzite Network proxy (HTTP/HTTPS filtering and ad blocking)", owner="tekzite-network")
     root = _network_engine_root()
     helper_name = "tekzite-network.exe" if os.name == "nt" else "tekzite-network"
-    exe = root / helper_name
+    exe = _network_helper_executable(root, helper_name)
     script = root / "tekzite_network.py"
     instance_token = secrets.token_hex(16)
     if exe.is_file():
@@ -4982,10 +4988,43 @@ def persistent_cdp_debug():
     }
 
 
+def _chromium_profile_directory(profile_dir):
+    """Choose one existing Chromium subprofile for both sides of a handoff."""
+    try:
+        state = json.loads((Path(profile_dir) / "Local State").read_text(encoding="utf-8"))
+        name = str(state.get("profile", {}).get("last_used") or "Default")
+        if (name == "Default" or re.fullmatch(r"Profile [0-9]+", name)) and (
+            Path(profile_dir) / name
+        ).is_dir():
+            return name
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return "Default"
+
+
+def _enable_chromium_session_restore(profile_dir, profile_directory):
+    """Keep session cookies across Tekzite's clean Chromium process handoff.
+
+    Chromium persists session cookies but only reloads them after a clean exit
+    when its startup preference restores the previous session. Never modify
+    cookie expiry, copy credentials, or mark a clean profile as crashed.
+    """
+    directory = Path(profile_dir) / profile_directory
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "Preferences"
+    prefs = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(prefs, dict):
+        raise ValueError("Chromium profile preferences must be an object")
+    prefs.setdefault("session", {})["restore_on_startup"] = 1
+    temp = path.with_suffix(".session-restore.tmp")
+    temp.write_text(json.dumps(prefs, separators=(",", ":")), encoding="utf-8")
+    temp.replace(path)
+
+
 def _apply_privacy_profile_preferences(profile_dir):
     """Apply privacy-first Chromium profile prefs without weakening TLS/security."""
     try:
-        default_dir = Path(profile_dir) / "Default"
+        default_dir = Path(profile_dir) / _chromium_profile_directory(profile_dir)
         default_dir.mkdir(parents=True, exist_ok=True)
         pref_path = default_dir / "Preferences"
         try:
@@ -5145,7 +5184,9 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     # the failed first helper before relaunching the same profile.
                     time.sleep(0.15)
                 _clear_devtools_active_port(profile)
+                profile_directory = _chromium_profile_directory(profile)
                 _apply_privacy_profile_preferences(profile)
+                _enable_chromium_session_restore(profile, profile_directory)
                 launch_x, launch_y, launch_w, launch_h = (-32000, -32000, 800, 600)
                 if launch_geometry:
                     try:
@@ -5162,6 +5203,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     f"--remote-debugging-port={port}",
                     "--remote-debugging-address=127.0.0.1",
                     f"--user-data-dir={profile}",
+                    f"--profile-directory={profile_directory}",
                     "--no-first-run", "--no-default-browser-check",
                     "--disable-save-password-bubble", "--disable-translate",
                     "--disable-search-engine-choice-screen",
@@ -5253,6 +5295,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                 _write_profile_owner(profile, process.pid)
                 _CHROMIUM_SESSION = {
                     "process": process, "port": port, "profile": profile,
+                    "profile_directory": profile_directory,
                     "page_cdp_channels": {}, "executable": executable,
                     "browser_ws_url": str((wait_info.get("version") or {}).get("webSocketDebuggerUrl") or ""),
                     "launch_attempt": attempt,
@@ -5458,7 +5501,7 @@ def _chromium_history_db_candidates(profile):
         yield profile_dir / "History"
 
 
-def _snapshot_chromium_latest_visit(profile, target_url=""):
+def _snapshot_chromium_latest_visit(profile, target_url="", *, match_path=False):
     """Return the newest matching Chromium History visit.
 
     When *target_url* is supplied, search recent visits for that normalized host
@@ -5509,6 +5552,8 @@ def _snapshot_chromium_latest_visit(profile, target_url=""):
                         continue
                     if candidate_host != expected_host:
                         continue
+                    if match_path and (urlsplit(candidate[0]).path or "/") != (urlsplit(target_url).path or "/"):
+                        continue
                 if best is None or candidate[1:] > best[1:]:
                     best = candidate
                 # Rows are already newest-first, so the first host match in
@@ -5538,6 +5583,8 @@ def _auth_return_url_candidates(handle):
     found = []
     pending = list(seeds)
     seen = set()
+    launch_url = str(handle.get("url") or "")
+    return_url = str(handle.get("return_url") or "")
     while pending and len(seen) < 24:
         value = str(pending.pop(0) or "").strip()
         if not value or value in seen:
@@ -5548,7 +5595,11 @@ def _auth_return_url_candidates(handle):
         except Exception:
             continue
         if parts.scheme.lower() in {"http", "https"} and parts.hostname:
-            if value not in found:
+            # The provider launch URL supplies nested callback parameters,
+            # but its own host is not a relying-party return destination.
+            # Otherwise GitHub /session, / or two-factor pages can close an
+            # unfinished login using unrelated provider history.
+            if (value != launch_url or value == return_url) and value not in found:
                 found.append(value)
         try:
             for key, raw in parse_qsl(parts.query, keep_blank_values=True):
@@ -5606,6 +5657,11 @@ def _auth_navigation_has_returned(handle):
             current_host = (current.hostname or "").lower().removeprefix("www.")
             if current_host != expected_host:
                 continue
+            # An OAuth error return is a completed navigation, not a login.
+            params = dict(parse_qsl(current.query) + parse_qsl(current.fragment))
+            if params.get("error") or params.get("error_description"):
+                handle["auth_callback_error"] = True
+                return False
 
             # Same-host sign-in pages are not a completed return. Cross-host
             # OAuth callbacks are allowed to contain /login or /auth in their
@@ -5958,6 +6014,80 @@ def _snapshot_google_auth_cookie_state(profile):
     return {} if saw_readable_db else None
 
 
+def _github_first_party_auth(handle):
+    """Distinguish GitHub's own login from GitHub OAuth for another site."""
+    try:
+        source = urlsplit(str(handle.get("url") or ""))
+        target = urlsplit(str(handle.get("return_url") or ""))
+        return (source.hostname == target.hostname == "github.com"
+                and source.path.rstrip("/") == "/login"
+                and "oauth" not in source.query.lower())
+    except Exception:
+        return False
+
+
+def _github_first_party_auth_succeeded(handle, settle_seconds):
+    """Require a fresh dashboard visit plus a changed GitHub login cookie.
+
+    GitHub documents user_session as its login cookie. CSRF/consent cookie
+    changes and provider visits during an OAuth flow cannot trigger this path.
+    Only fingerprints are retained; cookie contents are never exposed.
+    """
+    current = _snapshot_auth_cookie_state(handle["profile"], "https://github.com/")
+    baseline = handle.get("auth_cookie_baseline") or {}
+    sessions = {key: value for key, value in (current or {}).items()
+                if key[0].lstrip(".") == "github.com" and key[1] == "user_session"}
+    changed = any(baseline.get(key) != value for key, value in sessions.items())
+    handle["auth_diagnostics"].update({
+        "cookie_database_readable": current is not None,
+        "github_session_present": bool(sessions),
+        "github_session_changed": changed,
+    })
+    # Cookie files can be locked while Chromium is running. Independently
+    # observe the live dashboard; this still requires a fresh matching History
+    # visit below, never a title or cookie alone.
+    dashboard_visible = any(
+        str(row.get("title") or "").split(" - ", 1)[0].strip() == "GitHub"
+        for row in _standalone_auth_window_snapshot(handle)
+    )
+    handle["auth_diagnostics"]["dashboard_window_visible"] = dashboard_visible
+    # A second restored login window can append a newer /login visit. Search
+    # for the dashboard itself instead of trusting the newest provider URL.
+    latest = _snapshot_chromium_latest_visit(
+        handle["profile"], "https://github.com/", match_path=True)
+    before = handle.get("history_visit_baseline")
+    fresh = bool(latest and (not before or tuple(latest)[1:] > tuple(before)[1:]))
+    handle["auth_diagnostics"]["fresh_dashboard_visit"] = fresh
+    if not fresh:
+        handle["auth_diagnostics"]["stage"] = "waiting-for-dashboard-history"
+        handle["github_auth_settle_since"] = None
+        return False
+    if not (changed or dashboard_visible):
+        handle["auth_diagnostics"]["stage"] = "waiting-for-login-session"
+        handle["github_auth_settle_since"] = None
+        return False
+    handle["auth_diagnostics"]["stage"] = "settling-github-return"
+    # Readability can alternate while the cookie DB is locked; the confirmed
+    # dashboard visit is the stable settle key, not a fluctuating snapshot.
+    signal = ("github-session-return", tuple(latest))
+    now = time.monotonic()
+    if handle.get("github_auth_pending_signal") != signal:
+        handle["github_auth_pending_signal"] = signal
+        handle["github_auth_settle_since"] = now
+        return False
+    since = handle.get("github_auth_settle_since")
+    if since is None:
+        handle["github_auth_settle_since"] = now
+        return False
+    if now - since < max(0.8, float(settle_seconds)):
+        return False
+    handle["auth_diagnostics"]["stage"] = "github-completion-confirmed"
+    handle["google_auth_success_signal"] = ("github-session-return", tuple(latest))
+    handle["auth_return_url_seen"] = str(latest[0])
+    handle["auth_provider_independent_success"] = True
+    return True
+
+
 def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     """Detect completed authentication for Google and standards-based providers."""
     if not isinstance(handle, dict):
@@ -5981,6 +6111,12 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         launch_host == "accounts.google.com"
         or return_host in {"google.com", "youtube.com", "music.youtube.com"}
     )
+
+    handle["auth_diagnostics"] = {"detector": "github-first-party" if _github_first_party_auth(handle)
+                                  else "google" if google_flow else "oauth-return",
+                                  "stage": "waiting-for-completion"}
+    if _github_first_party_auth(handle):
+        return _github_first_party_auth_succeeded(handle, settle_seconds)
 
     # Keep the proven live-HWND Google/YouTube path first. This deliberately
     # avoids touching History/Cookies when the exact auth window has already
@@ -6019,6 +6155,11 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         handle["google_auth_cookie_change_at"] = time.monotonic()
         handle["auth_provider_independent_success"] = not google_flow
         return True
+
+    if not google_flow:
+        # A relying-site cookie can be consent, CSRF or tracking state. It must
+        # never independently authorize closing an unfinished login window.
+        return False
 
     # Keep the proven live-HWND Google/YouTube optimization. Other providers
     # use history/callback and relying-site cookie proof rather than guessing
@@ -6446,6 +6587,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
         session = _CHROMIUM_SESSION or {}
         executable = str(session.get("executable") or "")
         profile = str(session.get("profile") or _persistent_chromium_profile_dir())
+        profile_directory = str(session.get("profile_directory") or _chromium_profile_directory(profile))
         if not executable:
             executable = next(iter(_chromium_candidates()), "")
         if not executable or not os.path.isfile(executable):
@@ -6471,6 +6613,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
         # standalone browser ever reads the profile. This removes the persistent
         # "restore pages" bubble even for users upgrading from v10.5.63.
         _mark_chromium_profile_exited_cleanly(profile)
+        _enable_chromium_session_restore(profile, profile_directory)
         google_auth_cookie_baseline = _snapshot_google_auth_cookie_state(profile) or {}
         auth_cookie_baseline = _snapshot_auth_cookie_state(profile, str(return_url or "")) or {}
         history_visit_baseline = _snapshot_chromium_latest_visit(profile)
@@ -6482,6 +6625,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
         command = [
             executable,
             f"--user-data-dir={profile}",
+            f"--profile-directory={profile_directory}",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-background-mode",
@@ -6490,7 +6634,8 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             "--disable-session-crashed-bubble",
             f"--window-position={x},{y}",
             f"--window-size={width},{height}",
-            "--new-window",
+            # Reuse the restored browser window. --new-window would request
+            # an additional visible window alongside session restoration.
             target_url,
         ]
         process = subprocess.Popen(
@@ -6552,6 +6697,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             "launch_pid": int(process.pid),
             "browser_pids": list(browser_pids),
             "profile": profile,
+            "profile_directory": profile_directory,
             "executable": executable,
             "url": target_url,
             "return_url": str(return_url or ""),
@@ -6614,31 +6760,32 @@ def standalone_auth_chromium_running(handle):
 
 
 def wait_for_standalone_auth_chromium_release(handle, timeout: float = 6.0):
-    """Wait for auth Chromium to release Tekzite's shared profile completely."""
+    """Wait for the auth browser to exit, then clear stale profile bookkeeping."""
     if not isinstance(handle, dict):
         return True
 
     profile = str(handle.get("profile") or "")
+    diagnostics = handle.setdefault("auth_diagnostics", {})
+    diagnostics["stage"] = "waiting-for-profile-release"
     deadline = time.monotonic() + max(1.0, float(timeout))
-    while time.monotonic() < deadline:
-        if standalone_auth_chromium_running(handle):
-            time.sleep(0.08)
-            continue
-        if profile and _profile_chromium_pids(profile):
-            time.sleep(0.08)
-            continue
-        # Chromium can exit a fraction before its singleton files disappear.
-        if profile and _profile_recovery_needed(profile):
-            time.sleep(0.08)
-            continue
-        return True
-
-    # If no live browser owns the profile anymore, stale singleton crumbs are
-    # safe to remove. Never delete them while a tracked process is alive.
-    if profile and not _profile_chromium_pids(profile):
-        _clear_chromium_profile_locks(profile)
-        return not _profile_recovery_needed(profile)
-    return False
+    while True:
+        running = standalone_auth_chromium_running(handle)
+        owners = _profile_chromium_pids(profile) if profile else []
+        diagnostics["profile_process_alive"] = bool(running or owners)
+        if not running and not owners:
+            # _profile_recovery_needed includes Tekzite's own PID marker.
+            # Clearing only Chromium singleton files leaves that stale marker
+            # behind forever after an adopted process or mismatched old PID.
+            if profile:
+                _clear_profile_owner(profile)
+                _clear_chromium_profile_locks(profile)
+            released = not profile or not _profile_recovery_needed(profile)
+            diagnostics["stage"] = "profile-released" if released else "profile-cleanup-pending"
+            if released:
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.08)
 
 
 def _pick_devtools_page(port, session=None, target_id=None):

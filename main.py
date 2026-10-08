@@ -152,7 +152,7 @@ DEFAULT_CUSTOMIZATION = {
     "toolbar_font_size": 11,
     "ui_scale": 1.0,
     "density": "comfortable",
-    "spacing_generation": 3,
+    "spacing_generation": 5,
     "animations": True,
     "window_control_style": "traffic_lights",
     "tab_style": "soft",
@@ -186,11 +186,11 @@ DEFAULT_CUSTOMIZATION = {
     "show_chrome_separator": True,
     "show_status_activity_dot": True,
     "show_status_version": True,
-    "app_bar_height": 40,
-    "tab_bar_height": 46,
-    "toolbar_height": 62,
-    "status_bar_height": 26,
-    "find_bar_height": 40,
+    "app_bar_height": 50,
+    "tab_bar_height": 58,
+    "toolbar_height": 78,
+    "status_bar_height": 36,
+    "find_bar_height": 50,
     "window_width": 1440,
     "window_height": 900,
     "window_min_width": 960,
@@ -204,8 +204,8 @@ def _valid_hex_color(value, fallback):
 
 def _normalized_customization(value):
     src = value if isinstance(value, dict) else {}
-    # v10.5.104: migrate only untouched historical spacing baselines to
-    # the tighter shell. Any user-adjusted size/density keeps its values.
+    # Migrate untouched historical layouts to the larger readable shell.
+    # Preserve explicitly adjusted size and density settings.
     legacy_layout = {
         "font_size": 10, "tab_font_size": 9, "toolbar_font_size": 10,
         "ui_scale": 1.0, "density": "comfortable", "tab_title_chars": 24,
@@ -226,13 +226,27 @@ def _normalized_customization(value):
         "window_width": 1440, "window_height": 900,
         "window_min_width": 960, "window_min_height": 640,
     }
+    previous_layout = {
+        "font_size": 11, "menu_font_size": 10, "tab_font_size": 10,
+        "toolbar_font_size": 11, "ui_scale": 1.0, "density": "comfortable",
+        "app_bar_height": 40, "tab_bar_height": 46, "toolbar_height": 62,
+        "status_bar_height": 26, "find_bar_height": 40,
+    }
+    large_text_layout = {
+        "font_size": 13, "menu_font_size": 12, "tab_font_size": 12,
+        "toolbar_font_size": 13, "ui_scale": 1.0, "density": "comfortable",
+        "app_bar_height": 50, "tab_bar_height": 58, "toolbar_height": 78,
+        "status_bar_height": 36, "find_bar_height": 50,
+    }
     if src:
         try:
             spacing_generation = int(src.get("spacing_generation", 1) or 1)
         except Exception:
             spacing_generation = 1
-        if spacing_generation < 3:
-            expected_layout = legacy_layout if spacing_generation < 2 else spacious_layout
+        if spacing_generation < 5:
+            expected_layout = (legacy_layout if spacing_generation < 2 else
+                               spacious_layout if spacing_generation < 3 else
+                               previous_layout if spacing_generation < 4 else large_text_layout)
             untouched = all(
                 src.get(key, expected) == expected
                 for key, expected in expected_layout.items()
@@ -241,7 +255,7 @@ def _normalized_customization(value):
             if untouched:
                 for key in expected_layout:
                     src[key] = DEFAULT_CUSTOMIZATION[key]
-            src["spacing_generation"] = 3
+            src["spacing_generation"] = 5
     out = dict(DEFAULT_CUSTOMIZATION)
     default_colors = dict(DEFAULT_CUSTOMIZATION.get("colors") or UI_COLOR_DEFAULTS)
     raw_colors = src.get("colors") if isinstance(src.get("colors"), dict) else {}
@@ -277,7 +291,7 @@ def _normalized_customization(value):
     except Exception:
         out["ui_scale"] = 1.0
     out["density"] = str(out.get("density") or "comfortable") if str(out.get("density") or "comfortable") in ("compact", "comfortable", "spacious") else "comfortable"
-    out["spacing_generation"] = 3
+    out["spacing_generation"] = 5
     out["window_control_style"] = str(out.get("window_control_style") or "traffic_lights") if str(out.get("window_control_style") or "traffic_lights") in ("tekzite", "traffic_lights") else "traffic_lights"
     out["tab_style"] = str(out.get("tab_style") or "soft") if str(out.get("tab_style") or "soft") in ("soft", "classic") else "soft"
     out["toolbar_label_style"] = str(out.get("toolbar_label_style") or "icons") if str(out.get("toolbar_label_style") or "icons") in ("icons", "text", "both") else "icons"
@@ -1371,16 +1385,25 @@ class _AnimatedPopupMenu:
         except Exception:
             return False
 
+    @staticmethod
+    def _label_parts(label):
+        # Existing callers use the common icon/label formatter. Render its
+        # fields separately: proportional glyph widths cannot align with spaces.
+        text = str(label or "")
+        match = re.fullmatch(r"  (.+?)   (.*?)  ", text, flags=re.DOTALL)
+        return (match.group(1), match.group(2)) if match else ("", text.strip())
+
+
     def _measure(self):
         try:
             font = tkfont.Font(font=self._font)
-            label_widths = [font.measure(str(i.get("label", ""))) for i in self.items if i.get("type") != "separator"]
-            accel_widths = [font.measure(str(i.get("accelerator", ""))) for i in self.items if i.get("type") != "separator"]
+            label_widths = [font.measure(self._label_parts(i.get("label", ""))[1]) for i in self.items if i.get("type") != "separator"]
+            accel_widths = [font.measure(str(i.get("accelerator", "")).strip()) for i in self.items if i.get("type") != "separator"]
             label_w = max(label_widths or [120])
             accel_w = max(accel_widths or [0])
         except Exception:
             label_w, accel_w = 180, 80
-        self._width = max(230, min(620, int(label_w + accel_w + self.app._ui_padding(58))))
+        self._width = max(230, min(620, int(label_w + accel_w + self.app._ui_padding(96))))
         y = self._outer_pad
         rows = []
         for index, item in enumerate(self.items):
@@ -1427,12 +1450,16 @@ class _AnimatedPopupMenu:
                                                 fill=self._accent, outline="")
                 color = self._disabled if disabled else self._text
                 y_text = (y1 + y2) / 2 + (1 if pressed else 0)
-                canvas.create_text(left + (1 if pressed else 0), y_text,
-                                   text=item.get("label", ""), fill=color,
+                icon, label = self._label_parts(item.get("label", ""))
+                if icon:
+                    canvas.create_text(left + self.app._ui_padding(12) + (1 if pressed else 0), y_text,
+                                       text=icon, fill=color, font=font, anchor="center")
+                canvas.create_text(left + self.app._ui_padding(36) + (1 if pressed else 0), y_text,
+                                   text=label, fill=color,
                                    font=font, anchor="w")
-                accelerator = item.get("accelerator", "")
+                accelerator = str(item.get("accelerator", "")).strip()
                 if accelerator:
-                    canvas.create_text(right - (14 if typ == "cascade" else 0), y_text,
+                    canvas.create_text(right - self.app._ui_padding(18), y_text,
                                        text=accelerator, fill=(self._disabled if disabled else self._muted),
                                        font=font, anchor="e")
                 if typ == "cascade":
@@ -5196,6 +5223,7 @@ class BrowserApp(BrowserFeatures):
         launch_url, return_url = self._external_auth_handoff_urls(url, previous_url)
         self._google_auth_handoff_active = True
         self._google_auth_return_url = return_url
+        self._google_auth_previous_url = str(previous_url or tab.get("url") or "")
         self._google_auth_source_url = str(url or "")
         self._google_auth_source_tab_id = tab.get("id")
         self._suspend_chromium_for_external_auth()
@@ -5301,7 +5329,7 @@ class BrowserApp(BrowserFeatures):
                         succeeded = False
                     if succeeded:
                         self.status_var.set(
-                            "Google sign-in successful; closing authentication window…"
+                            "Sign-in successful; closing authentication window…"
                         )
                         try:
                             # The first close is already a synchronous, cooperative
@@ -5325,8 +5353,8 @@ class BrowserApp(BrowserFeatures):
                 if close_future is None and elapsed >= 1.6:
                     cooperative_escalation = elapsed >= 3.8
                     self.status_var.set(
-                        "Finishing Google sign-in…" if not cooperative_escalation
-                        else "Google sign-in complete; closing Chromium cleanly…"
+                        "Finishing Sign-in…" if not cooperative_escalation
+                        else "Sign-in complete; closing Chromium cleanly…"
                     )
                     try:
                         auth_executor = getattr(self, "_google_auth_executor", self._executor)
@@ -5371,7 +5399,7 @@ class BrowserApp(BrowserFeatures):
             released = False
         if not released:
             self.status_var.set(
-                "Google sign-in window is still releasing its profile; waiting…"
+                "Sign-in window is still releasing its profile; waiting…"
             )
             self.root.after(350, self._poll_google_auth_window)
             return
@@ -5381,6 +5409,7 @@ class BrowserApp(BrowserFeatures):
         if not getattr(self, "_google_auth_handoff_active", False):
             return
         self._google_auth_handoff_active = False
+        handle = getattr(self, "_google_auth_handle", None) or {}
         self._google_auth_handle = None
         self._google_auth_launch_future = None
         self._google_auth_release_future = None
@@ -5388,6 +5417,26 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_success_future_started_at = None
         self._google_auth_close_future = None
         return_url = str(getattr(self, "_google_auth_return_url", "") or "")
+        previous_url = str(getattr(self, "_google_auth_previous_url", "") or "")
+        self._google_auth_previous_url = None
+        if previous_url:
+            # Resume the initiating page on cancellation; never replay an OAuth
+            # callback without its one-time code/state. Prefer a final landing
+            # page only when it is safe to revisit without callback parameters.
+            seen = str(handle.get("auth_return_url_seen") or "")
+            expected = urlsplit(return_url)
+            actual = urlsplit(seen)
+            if (handle.get("auth_provider_independent_success") and seen
+                    and actual.hostname == expected.hostname
+                    and not set(actual.path.lower().strip("/").split("/"))
+                    & {"auth", "oauth", "oauth2", "oidc", "login", "callback"}
+                    and not dict(parse_qsl(actual.query) + parse_qsl(actual.fragment)).keys()
+                    & {"code", "state", "error"}):
+                return_url = seen
+            elif not handle.get("google_auth_success_signal") or handle.get(
+                "auth_provider_independent_success"
+            ):
+                return_url = previous_url
         source_tab_id = getattr(self, "_google_auth_source_tab_id", None)
         self._google_auth_return_url = None
         self._google_auth_source_url = None
@@ -5410,7 +5459,7 @@ class BrowserApp(BrowserFeatures):
                 self._google_auth_refresh_pending_url = return_url
                 self.url_var.set(return_url)
                 self._refresh_tab_strip()
-                self.status_var.set("Returning from Google sign-in…")
+                self.status_var.set("Returning from Sign-in…")
                 self.navigate_to(return_url, add_history=False, reuse_existing=False)
             else:
                 # The auth result belongs to the tab that initiated it, never to
@@ -5419,10 +5468,10 @@ class BrowserApp(BrowserFeatures):
                 tab["restore_pending"] = True
                 self._google_auth_refresh_pending_url = None
                 self._refresh_tab_strip()
-                self.status_var.set("Google sign-in complete")
+                self.status_var.set("Sign-in complete")
         else:
             self._google_auth_refresh_pending_url = None
-            self.status_var.set("Google sign-in window closed")
+            self.status_var.set("Sign-in window closed")
 
     def _refresh_after_google_auth(self, generation, target_id, expected_url):
         """Reload the returned page once after Chromium has reopened the profile."""
@@ -5433,7 +5482,7 @@ class BrowserApp(BrowserFeatures):
             return
         if self._canonical_tab_url(tab.get("url")) != self._canonical_tab_url(expected_url):
             return
-        self.status_var.set("Applying Google sign-in session…")
+        self.status_var.set("Applying Sign-in session…")
         self.navigate_to(expected_url, add_history=False, reuse_existing=False)
 
     def _poll_one_tab_state(self, tab_id, target_id, include_favicon=False):
@@ -10710,6 +10759,7 @@ class BrowserApp(BrowserFeatures):
                 None,
                 ("Copy All Debug", self.copy_all_debug, ""),
                 ("Copy Full Debug", self.copy_full_debug, ""),
+                ("Copy Auth Debug", self.copy_auth_debug, ""),
                 None,
                 ("Inspect Chromium HTML", self.inspect_html, "Ctrl+U / F12"),
             ]),
@@ -12048,7 +12098,28 @@ class BrowserApp(BrowserFeatures):
         }:
             _padding_factor, chrome_factor = self._display_spacing_factors()
             value *= chrome_factor
-        return max(1, int(round(value * scale)))
+        height = max(1, int(round(value * scale)))
+        # Tk fonts use DPI-scaled points, while these frame heights use pixels.
+        # Keep the requested density, but never make a bar shorter than its text.
+        font_sizes = {
+            "app_bar_height": max(7, int(self._custom("menu_font_size", 9))),
+            "tab_bar_height": max(10, int(self._custom("tab_font_size", 9)) + 4),
+            "toolbar_height": max(10, int(self._custom("font_size", 10)) + 1,
+                                  int(self._custom("toolbar_font_size", 10)) + 3),
+            "status_bar_height": max(7, int(self._custom("menu_font_size", 9)), self._font_size(7)),
+            "find_bar_height": self._font_size(9),
+        }
+        if key in font_sizes:
+            try:
+                font = tkfont.Font(root=self.root, font=(self._ui_font_family, font_sizes[key]))
+                line_height = int(font.metrics("linespace"))
+                padding = {"app_bar_height": 14, "tab_bar_height": 18,
+                           "toolbar_height": 20, "status_bar_height": 8,
+                           "find_bar_height": 14}[key]
+                height = max(height, line_height + self._ui_padding(padding))
+            except (AttributeError, tk.TclError):
+                pass
+        return height
 
     def _ui_padding(self, value):
         try:
@@ -14395,6 +14466,25 @@ class BrowserApp(BrowserFeatures):
             self._all_debug_text(),
             "compact debug",
         )
+
+    def copy_auth_debug(self):
+        """Copy only auth state flags, never URLs or session credentials."""
+        handle = getattr(self, "_google_auth_handle", None) or {}
+        allowed = {"detector", "stage", "cookie_database_readable",
+                   "github_session_present", "github_session_changed",
+                   "dashboard_window_visible", "fresh_dashboard_visit", "profile_process_alive"}
+        report = {key: value for key, value in (handle.get("auth_diagnostics") or {}).items()
+                  if key in allowed and isinstance(value, (bool, str))}
+        report.update({
+            "auth_active": bool(getattr(self, "_google_auth_handoff_active", False)),
+            "probe_count": int(handle.get("google_auth_probe_count") or 0),
+            "completion_detected": bool(handle.get("google_auth_success_signal")),
+            "close_requested": bool(handle.get("auto_close_requested")),
+            "visible_window_count": len(handle.get("auth_hwnds") or []),
+            "probe_error": bool(handle.get("google_auth_last_probe_error")),
+        })
+        self._copy_debug_report(json.dumps(report, indent=2), "auth debug")
+
 
     def copy_full_debug(self):
         self._copy_debug_report(

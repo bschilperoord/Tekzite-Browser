@@ -1,0 +1,77 @@
+name: Build Windows directory preview
+on:
+  push:
+    branches: ["fix/auth-handoff-lifecycle-tests"]
+    paths:
+      - ".github/workflows/build-auth-directory-preview.yml"
+      - "build_windows_directory.ps1"
+      - "engine/net.py"
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22"
+      - name: Install tests
+        shell: pwsh
+        run: |
+          python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
+          if ($LASTEXITCODE -ne 0) { throw "Runtime dependencies failed" }
+          python -m pip install --only-binary=:all: -r requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { throw "Test dependencies failed" }
+      - name: Regression tests
+        run: python -m pytest -q tests/current
+      - name: Extension tests
+        run: node tests/current/test_extension_features.cjs
+      - name: Build directory layout
+        shell: pwsh
+        run: ./build_windows_directory.ps1
+      - name: Scan directory without launching the application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = Join-Path $PWD "dist-folder/TekziteBrowser"
+          if (@(Get-ChildItem $root -Recurse -Directory | Where-Object Name -eq "_internal").Count -ne 0) { throw "Unexpected _internal directory" }
+          $files = @(Get-ChildItem $root -Recurse -File)
+          $executables = @($files | Where-Object Extension -eq ".exe")
+          if ($executables.Count -ne 2) { throw "Unexpected executable count" }
+          foreach ($exe in $executables) {
+            if ($exe.Length -gt 5MB) { throw "Expected small directory launcher, not a self-extracting executable" }
+          }
+          Update-MpSignature
+          $status = Get-MpComputerStatus
+          if (-not $status.AntivirusEnabled) { throw "Antivirus unavailable" }
+          Start-MpScan -ScanType CustomScan -ScanPath $root
+          $threats = @(Get-MpThreatDetection | Where-Object { ($_.Resources -join " ") -like "*dist-folder*" })
+          if ($threats.Count -gt 0) { $threats | Format-List; throw "Antivirus detection" }
+          foreach ($file in $files) {
+            if (-not (Test-Path $file.FullName)) { throw "A build file disappeared during scan" }
+          }
+          @{
+            engineVersion = $status.AMEngineVersion
+            signatureVersion = $status.AntivirusSignatureVersion
+            scanCompleted = $true
+            detectedThreats = $threats.Count
+            executableLaunched = $false
+            signing = "Unsigned preview"
+          } | ConvertTo-Json | Set-Content "$root/SCAN-RESULT.json" -Encoding utf8
+          Get-ChildItem $root -File -Recurse | Sort-Object FullName | ForEach-Object {
+            $relative = [IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/')
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $relative"
+          } | Set-Content "$root/SHA256SUMS.txt" -Encoding ascii
+      - name: Upload files directly (one ZIP download)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tekzite-Browser-v10.5.125-pr26-flat-Windows-x64
+          path: dist-folder/TekziteBrowser/
+          if-no-files-found: error
+          retention-days: 14
