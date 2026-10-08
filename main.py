@@ -951,7 +951,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.127"
+BROWSER_VERSION = "10.5.128"
 
 
 
@@ -5278,10 +5278,7 @@ class BrowserApp(BrowserFeatures):
             self.status_var.set(f"Sign-in handoff failed: {exc}")
             return
         self.status_var.set("Sign-in window is open; Tekzite will close it when authentication finishes")
-        # v10.5.69: the live HWND completion signal is cheap and authoritative.
-        # Poll it quickly so a visibly completed YouTube sign-in does not linger
-        # for the old 220 ms cadence. Slow cookie/history fallbacks still run in
-        # the executor and retain their own settle guard.
+        # Probe promptly, with session/history checks off the Tk thread.
         self.root.after(70, self._poll_google_auth_window)
 
     def _poll_google_auth_window(self):
@@ -5294,10 +5291,8 @@ class BrowserApp(BrowserFeatures):
             running = False
 
         if running:
-            # Detect the live returned auth HWND off the Tk thread first; the
-            # cookie/history profile checks are slower fallbacks. A confirmed
-            # live YouTube return closes immediately, while disk-only signals
-            # keep their conservative settle guard.
+            # Completion detection runs off the Tk thread. YouTube requires
+            # a persisted session change and a settled return before closing.
             close_future = getattr(self, "_google_auth_close_future", None)
             if close_future is not None and close_future.done():
                 self._google_auth_close_future = None
@@ -14472,7 +14467,8 @@ class BrowserApp(BrowserFeatures):
         handle = getattr(self, "_google_auth_handle", None) or {}
         allowed = {"detector", "stage", "cookie_database_readable",
                    "github_session_present", "github_session_changed",
-                   "dashboard_window_visible", "fresh_dashboard_visit", "profile_process_alive"}
+                   "dashboard_window_visible", "fresh_dashboard_visit", "profile_process_alive",
+                   "youtube_session_changed", "youtube_return_seen", "auth_prompt_visible"}
         report = {key: value for key, value in (handle.get("auth_diagnostics") or {}).items()
                   if key in allowed and isinstance(value, (bool, str))}
         report.update({

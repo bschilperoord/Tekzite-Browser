@@ -1,3 +1,13 @@
+# v10.5.128 - Guard YouTube passkey completion
+
+- Removes title-only and history-only YouTube authentication completion shortcuts.
+- Requires a changed persisted YouTube LOGIN_INFO cookie and a settled return before automatic closure.
+- Keeps authentication open while a passkey or verification window is visible.
+- Adds credential-free YouTube completion flags to Copy Auth Debug.
+- Adds regression tests for unfinished passkey prompts, delayed/unreadable cookies, old sessions and successful cooperative closure.
+
+Passkey scenarios are covered by simulated regression tests; live passkey login still needs user verification. If completion cannot be confirmed, close the authentication window manually after finishing sign-in.
+
 # v10.5.127 - Ready-to-use update checker
 
 - Prefills the official update repository, including existing empty settings.
