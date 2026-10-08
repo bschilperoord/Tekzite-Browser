@@ -179,3 +179,82 @@ def test_debug_report_includes_screen_health_details():
     assert "details=None" in NET
     assert "request_embedded_chromium_dwm_reregister()" in SOURCE
     assert "self._show_chromium_software_surface(target_id)" in SOURCE
+
+
+def test_stall_classification_separates_dwm_from_chromium():
+    from engine import net
+    assert net._dwm_stall_classification(True, {"valid": True, "visual": True}) == (
+        "chromium-cdp-frame-visible-dwm-screen-blank"
+    )
+    assert net._dwm_stall_classification(True, {"valid": True, "visual": False}) == (
+        "chromium-cdp-frame-also-blank"
+    )
+    assert net._dwm_stall_classification(True, {"valid": False}) == (
+        "chromium-cdp-frame-unavailable"
+    )
+    assert net._dwm_stall_classification(False, {"valid": True, "visual": False}) == (
+        "no-visible-stall"
+    )
+
+
+def test_dwm_forensics_captures_only_metadata_without_png(monkeypatch):
+    from engine import net
+    from io import BytesIO
+    import base64
+
+    image = Image.new("RGB", (96, 96), (250, 250, 250))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((8, 8, 85, 85), fill=(32, 80, 130))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    class FakeSession(dict):
+        pass
+
+    session = FakeSession({
+        "target_id": "same-document", "navigation_generation": 1,
+        "dwm_source_parked": True, "dwm_source_park_position": (-32000, -32000),
+        "dwm_thumbnail_registered": True, "dwm_thumbnail_visible": True,
+        "dwm_source_hwnd": 0, "dwm_destination_hwnd": 0,
+        "dwm_thumbnail_source_rect": (0, 121, 1440, 798),
+        "dwm_thumbnail_destination_rect": (0, 0, 1440, 677),
+    })
+    calls = []
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", session)
+    monkeypatch.setattr(
+        net, "_persistent_page_cdp_call",
+        lambda _session, method, options, **kwargs:
+            calls.append((method, options, kwargs)) or {"data": encoded},
+    )
+    outcome = net.diagnose_embedded_chromium_dwm_stall(
+        "same-document", phase="before-repair", timeout=0.5
+    )
+    assert outcome["classification"] == "chromium-cdp-frame-visible-dwm-screen-blank"
+    assert outcome["cdp_frame"]["visual"] is True
+    assert outcome["source_park_position"] == (-32000, -32000)
+    assert session["dwm_stall_evidence_before"] is outcome
+    assert calls[0][0] == "Page.captureScreenshot"
+    assert calls[0][2]["purpose"] == "capture"
+    assert "png" not in str(outcome).lower()
+    assert encoded not in str(outcome)
+    # Navigating while an asynchronous capture runs must not overwrite evidence
+    # associated with the old page/target.
+    assert net.diagnose_embedded_chromium_dwm_stall("other-document") == {
+        "reason": "stale-target"
+    }
+
+
+def test_dwm_forensics_unavailable_capture_records_error(monkeypatch):
+    from engine import net
+    session = {"target_id": "a"}
+    monkeypatch.setattr(net, "_CHROMIUM_SESSION", session)
+
+    def fails(*args, **kwargs):
+        raise TimeoutError("capture failed")
+
+    monkeypatch.setattr(net, "_persistent_page_cdp_call", fails)
+    result = net.diagnose_embedded_chromium_dwm_stall("a")
+    assert result["classification"] == "chromium-cdp-frame-unavailable"
+    assert result["cdp_capture_error"] == "TimeoutError"
+    assert "dwm_stall_evidence_before" in session
