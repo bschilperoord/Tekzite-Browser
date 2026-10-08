@@ -5214,11 +5214,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     "--disable-logging", "--metrics-recording-only", "--no-pings",
                     "--disable-hyperlink-auditing", "--disable-preconnect",
                     "--disable-features=AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion,BrowsingTopics,InterestCohortAPI,SharedStorageAPI,FencedFrames,AttributionReporting,PrivateAggregationApi,FedCm,WebBluetooth,WebUSB,WebSerial,WebHID,IdleDetection,WebNFC,Prerender2,SpeculationRulesPrefetchProxy,ExtensionManifestV2Disabled,ExtensionManifestV2Unsupported,ExtensionsManifestV3Only,ExtensionDisableUnsupportedDeveloper,DisableLoadExtensionCommandLineSwitch",
-                    "--enable-features=" + (
-                        "AllowLegacyMV2Extensions,WebContentsForceDark"
-                        if os.environ.get("TEKZITE_DARK_WEBSITES", "1") == "1"
-                        else "AllowLegacyMV2Extensions"
-                    ),
+                    "--enable-features=AllowLegacyMV2Extensions",
                     "--disable-session-crashed-bubble", "--disable-background-mode",
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
@@ -5233,9 +5229,10 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     f"--app={str(launch_url or 'about:blank')}",
                 ]
                 if os.environ.get("TEKZITE_DARK_WEBSITES", "1") == "1":
-                    # Let dark-aware sites use their native dark theme and
-                    # Chromium auto-darken light-only pages without altering images
-                    # through global CSS injection.
+                    # Keep the exact MV2 compatibility switch while enabling
+                    # Chromium's built-in darkening for light-only websites.
+                    feature_index = command.index("--enable-features=AllowLegacyMV2Extensions")
+                    command[feature_index] += ",WebContentsForceDark"
                     command.insert(-1, "--force-dark-mode")
                 if os.environ.get("TEKZITE_DOWNLOAD_PROMPT") == "1":
                     command.append("--download-prompt-for-download")
