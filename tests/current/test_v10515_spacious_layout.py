@@ -13,9 +13,9 @@ def test_release_version():
 def test_comfortable_defaults_are_the_new_baseline():
     c = main.DEFAULT_CUSTOMIZATION
     assert c["density"] == "comfortable"
-    assert c["font_size"] == 13
-    assert c["tab_font_size"] == 12
-    assert c["toolbar_font_size"] == 13
+    assert c["font_size"] == 11
+    assert c["tab_font_size"] == 10
+    assert c["toolbar_font_size"] == 11
     assert c["tab_min_width"] == 160
     assert c["tab_max_width"] == 300
     assert c["app_bar_height"] == 50
@@ -37,7 +37,7 @@ def test_untouched_previous_layout_migrates_to_current_spacing():
         "window_min_width": 900, "window_min_height": 600,
     }
     migrated = main._normalized_customization(old)
-    assert migrated["spacing_generation"] == 4
+    assert migrated["spacing_generation"] == 5
     assert migrated["density"] == "comfortable"
     assert migrated["toolbar_height"] == 78
     assert migrated["tab_min_width"] == 160
@@ -74,10 +74,21 @@ def test_saved_generation_three_default_layout_is_enlarged_once():
            "app_bar_height": 40, "tab_bar_height": 46, "toolbar_height": 62,
            "status_bar_height": 26, "find_bar_height": 40}
     migrated = main._normalized_customization(old)
-    assert migrated["menu_font_size"] == 12
+    assert migrated["menu_font_size"] == 10
     assert migrated["status_bar_height"] == 36
     assert main._normalized_customization(migrated) == migrated
     old["menu_font_size"] = 15
     customized = main._normalized_customization(old)
     assert customized["menu_font_size"] == 15
     assert customized["status_bar_height"] == 26
+
+
+def test_large_layout_keeps_its_space_with_smaller_text():
+    old = {**main.DEFAULT_CUSTOMIZATION, "spacing_generation": 4,
+           "font_size": 13, "menu_font_size": 12,
+           "tab_font_size": 12, "toolbar_font_size": 13}
+    migrated = main._normalized_customization(old)
+    assert migrated["menu_font_size"] == 10
+    for key in ("app_bar_height", "tab_bar_height", "toolbar_height", "status_bar_height"):
+        assert migrated[key] == old[key]
+    assert main._normalized_customization(migrated) == migrated

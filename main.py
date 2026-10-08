@@ -146,13 +146,13 @@ DEFAULT_CUSTOMIZATION = {
     "font_family": "",
     "display_font_family": "",
     "monospace_font_family": "",
-    "font_size": 13,
-    "menu_font_size": 12,
-    "tab_font_size": 12,
-    "toolbar_font_size": 13,
+    "font_size": 11,
+    "menu_font_size": 10,
+    "tab_font_size": 10,
+    "toolbar_font_size": 11,
     "ui_scale": 1.0,
     "density": "comfortable",
-    "spacing_generation": 4,
+    "spacing_generation": 5,
     "animations": True,
     "window_control_style": "traffic_lights",
     "tab_style": "soft",
@@ -232,14 +232,21 @@ def _normalized_customization(value):
         "app_bar_height": 40, "tab_bar_height": 46, "toolbar_height": 62,
         "status_bar_height": 26, "find_bar_height": 40,
     }
+    large_text_layout = {
+        "font_size": 13, "menu_font_size": 12, "tab_font_size": 12,
+        "toolbar_font_size": 13, "ui_scale": 1.0, "density": "comfortable",
+        "app_bar_height": 50, "tab_bar_height": 58, "toolbar_height": 78,
+        "status_bar_height": 36, "find_bar_height": 50,
+    }
     if src:
         try:
             spacing_generation = int(src.get("spacing_generation", 1) or 1)
         except Exception:
             spacing_generation = 1
-        if spacing_generation < 4:
+        if spacing_generation < 5:
             expected_layout = (legacy_layout if spacing_generation < 2 else
-                               spacious_layout if spacing_generation < 3 else previous_layout)
+                               spacious_layout if spacing_generation < 3 else
+                               previous_layout if spacing_generation < 4 else large_text_layout)
             untouched = all(
                 src.get(key, expected) == expected
                 for key, expected in expected_layout.items()
@@ -248,7 +255,7 @@ def _normalized_customization(value):
             if untouched:
                 for key in expected_layout:
                     src[key] = DEFAULT_CUSTOMIZATION[key]
-            src["spacing_generation"] = 4
+            src["spacing_generation"] = 5
     out = dict(DEFAULT_CUSTOMIZATION)
     default_colors = dict(DEFAULT_CUSTOMIZATION.get("colors") or UI_COLOR_DEFAULTS)
     raw_colors = src.get("colors") if isinstance(src.get("colors"), dict) else {}
@@ -284,7 +291,7 @@ def _normalized_customization(value):
     except Exception:
         out["ui_scale"] = 1.0
     out["density"] = str(out.get("density") or "comfortable") if str(out.get("density") or "comfortable") in ("compact", "comfortable", "spacious") else "comfortable"
-    out["spacing_generation"] = 4
+    out["spacing_generation"] = 5
     out["window_control_style"] = str(out.get("window_control_style") or "traffic_lights") if str(out.get("window_control_style") or "traffic_lights") in ("tekzite", "traffic_lights") else "traffic_lights"
     out["tab_style"] = str(out.get("tab_style") or "soft") if str(out.get("tab_style") or "soft") in ("soft", "classic") else "soft"
     out["toolbar_label_style"] = str(out.get("toolbar_label_style") or "icons") if str(out.get("toolbar_label_style") or "icons") in ("icons", "text", "both") else "icons"
