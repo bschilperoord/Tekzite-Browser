@@ -309,6 +309,54 @@ def _normalized_customization(value):
     out["preset"] = str(out.get("preset") or "Custom")[:40]
     return out
 
+
+DEFAULT_PREFERENCES = {
+    "homepage": START_URL,
+    "startup": "homepage",
+    "restore_tabs": True,
+    "quiet_mode": False,
+    "adblock_sites": [],
+    "new_tab": "blank",
+    "renderer": "chromium",
+    "reuse_open_tabs": True,
+    # v10.5.48: local-only omnibox suggestions. No query is sent to a remote
+    # autocomplete service; suggestions come from Tekzite-owned local/session data.
+    "omnibox_suggestions_enabled": True,
+    "show_status_bar": True,
+    # v4.68: real native Chromium interaction is the default. The CDP
+    # screenshot surface remains available only as an explicit diagnostic mode.
+    "chromium_presentation": "native",
+    # v4.56 privacy-first defaults.
+    "network_diagnostics": "off",
+    "strict_python_loopback": True,
+    # Privacy Core controls browser/network protections. Data lifetime is
+    # independent: Private Window is ephemeral, while normal profiles persist
+    # unless the user explicitly enables clear_browsing_data_on_exit.
+    "privacy_lockdown": True,
+    "tracker_blocking_enabled": True,
+    "strip_tracking_parameters": True,
+    "strip_referrer": True,
+    "https_first": True,
+    "clear_browsing_data_on_exit": False,
+    "page_zoom_percent": 100,
+    "adblock_enabled": True,
+    "hagezi_enabled": True,
+    "hagezi_auto_update": True,
+    "hagezi_allowlist": [],
+    # User-managed unpacked Chromium extensions. Tekzite's built-in local
+    # services extension is always loaded separately and cannot be removed.
+    "extensions": [],
+    # v10.2 productivity + resource controls.
+    "sleeping_tabs_enabled": True,
+    "sleeping_tabs_minutes": 30,
+    "tab_groups": {},
+    "site_permissions": {},
+    "download_prompt": False,
+    "update_repository": "",
+    "search_url_template": DEFAULT_SEARCH_URL_TEMPLATE,
+    "customization": dict(DEFAULT_CUSTOMIZATION),
+}
+
 def _profile_slug(value):
     value = re.sub(r"[^A-Za-z0-9._ -]+", "", str(value or "")).strip().replace(" ", "-")
     value = re.sub(r"-+", "-", value).strip(".-_")
