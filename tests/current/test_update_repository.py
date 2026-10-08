@@ -106,11 +106,18 @@ def test_download_verifies_digest_and_preserves_existing_file(monkeypatch, tmp_p
 
 
 def test_linux_download_is_executable_and_reports_missing_digest(monkeypatch, tmp_path):
+    from pathlib import Path
+    modes = []
+    original_chmod = Path.chmod
+    def chmod(path, mode):
+        modes.append(mode)
+        original_chmod(path, mode)
+    monkeypatch.setattr(Path, "chmod", chmod)
     app, buttons, _, _, content = run_update_dialog(monkeypatch, tmp_path, platform="linux")
     buttons["Download update"]()
     target = tmp_path / "Downloads" / "Tekzite-Linux-x86_64"
     assert target.read_bytes() == content
-    assert target.stat().st_mode & 0o111 == 0o111
+    assert modes == [0o755]
     assert "No published digest." in app._show_message.call_args.args[2]
 
 
