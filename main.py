@@ -367,6 +367,59 @@ DEFAULT_PREFERENCES = {
     "customization": dict(DEFAULT_CUSTOMIZATION),
 }
 
+def _dwm_visible_surface_health(image):
+    """Detect the white DWM host even when borders pollute whole-frame statistics.
+
+    Only the central web viewport is considered for the white-surface signal.
+    This stays conservative for dark/native pages and is checked twice before a
+    one-shot DWM re-registration or a guarded renderer fallback.
+    """
+    rgb = image.convert("RGB")
+    rgb.thumbnail((96, 96))
+    width, height = rgb.size
+    def pixels_of(img):
+        get_flattened = getattr(img, "get_flattened_data", None)
+        return list(get_flattened() if callable(get_flattened) else img.getdata())
+    full = pixels_of(rgb)
+    if not full:
+        return {"blank": False, "span": None, "dominant": None,
+                "center_pale_ratio": 0.0, "center_dominant": 0.0,
+                "reason": "no-pixels"}
+    lo = [min(px[c] for px in full) for c in range(3)]
+    hi = [max(px[c] for px in full) for c in range(3)]
+    span = max(hi[c] - lo[c] for c in range(3))
+    bins = {}
+    for px in full:
+        key = tuple(c // 8 for c in px)
+        bins[key] = bins.get(key, 0) + 1
+    dominant = max(bins.values()) / len(full)
+    center = rgb.crop((
+        max(0, width // 7), max(0, height // 7),
+        max(1, width - width // 7), max(1, height - height // 7),
+    ))
+    inner = pixels_of(center)
+    pale = sum(
+        1 for red, green, blue in inner
+        if min(red, green, blue) >= 228 and max(red, green, blue) - min(red, green, blue) <= 16
+    ) / max(1, len(inner))
+    inner_bins = {}
+    for px in inner:
+        key = tuple(c // 12 for c in px)
+        inner_bins[key] = inner_bins.get(key, 0) + 1
+    center_dominant = max(inner_bins.values()) / max(1, len(inner))
+    # The top/bottom of a captured DWM host can contain partial browser chrome
+    # and antialiased rounded corners, even when its page is completely white.
+    white_surface = pale >= 0.94 and center_dominant >= 0.80
+    uniform_surface = span <= 18 and dominant >= 0.975
+    return {
+        "blank": bool(white_surface or uniform_surface),
+        "span": int(span), "dominant": float(dominant),
+        "center_pale_ratio": round(pale, 4),
+        "center_dominant": round(center_dominant, 4),
+        "reason": "white-center" if white_surface else ("uniform" if uniform_surface else "content"),
+    }
+
+
 def _tab_title_pixel_budget(title, available_pixels, measure):
     """Return the longest moving text window that fits its actual pixel width.
 
@@ -9877,13 +9930,62 @@ class BrowserApp(BrowserFeatures):
         except Exception:
             pass
 
-    def _probe_visible_embedded_surface(self, generation, target_id, cdp_visual, attempt=1):
-        """Verify that the *screen-visible* native Chromium surface presents pixels.
+    def _repair_stalled_dwm_once(self, generation, target_id, viewport, attempt):
+        """Re-register a confirmed-white DWM thumbnail once, without UI blocking."""
+        tab = self._active_tab()
+        if (tab is None or tab.get("chromium_target_id") != target_id
+                or generation != self._navigation_generation
+                or tab.get("native_surface_repair_attempted")):
+            return False
+        tab["native_surface_repair_attempted"] = True
+        tab["native_surface_repair_pending"] = True
+        tab["native_surface_blank_confirmations"] = 0
+        self.status_var.set("Re-registering stalled Chromium DWM surface…")
+        width, height = viewport
 
-        v10.5.68 treats this as a cold/new-target diagnostic, not a hot-navigation
-        watchdog.  A page still loading is allowed to pass through flat compositor
-        frames without being called stalled, and a completed page must produce two
-        consecutive blank samples before the DComp source is diagnosed as stuck.
+        def refresh_native():
+            if not request_embedded_chromium_dwm_reregister():
+                return False
+            return bool(resize_embedded_chromium(width, height))
+
+        try:
+            future = self._executor.submit(refresh_native)
+        except Exception as exc:
+            tab["native_surface_repair_pending"] = False
+            tab["native_surface_repair_error"] = type(exc).__name__
+            self.root.after(500, self._probe_visible_embedded_surface,
+                            generation, target_id, True, int(attempt) + 1)
+            return True
+
+        def finished():
+            if generation != self._navigation_generation:
+                return
+            current = self._active_tab()
+            if not current or current.get("chromium_target_id") != target_id:
+                return
+            if not future.done():
+                self.root.after(35, finished)
+                return
+            current["native_surface_repair_pending"] = False
+            try:
+                current["native_surface_repair_succeeded"] = bool(future.result())
+            except Exception as exc:
+                current["native_surface_repair_succeeded"] = False
+                current["native_surface_repair_error"] = type(exc).__name__
+            # Let DWM actually compose the re-registered thumbnail before
+            # capturing the visible surface again.
+            self.root.after(650, self._probe_visible_embedded_surface,
+                            generation, target_id, True, int(attempt) + 1)
+
+        self.root.after(35, finished)
+        return True
+
+    def _probe_visible_embedded_surface(self, generation, target_id, cdp_visual, attempt=1):
+        """Validate native DWM pixels, repair once, then fail over if still white.
+
+        A usable DOM and matching HWND sizes are not proof that a parked Chromium
+        compositor was painted into DWM. A nearly white center with nonuniform
+        screenshot edges was previously mislabeled healthy.
         """
         if generation != self._navigation_generation:
             return
@@ -9892,17 +9994,20 @@ class BrowserApp(BrowserFeatures):
                 generation, target_id, bool(cdp_visual), int(attempt)
             )
             return
-        if not self._embedded_mode:
-            return
-        if self._chromium_software_mode or not cdp_visual:
+        if not self._embedded_mode or self._chromium_software_mode or not cdp_visual:
             return
         tab = self._active_tab()
         if tab is None or tab.get("chromium_target_id") != target_id:
             return
+        if tab.get("native_surface_repair_pending"):
+            return
         if tab.get("native_surface_probe_generation") != generation:
             tab["native_surface_probe_generation"] = generation
             tab["native_surface_blank_confirmations"] = 0
+            tab.pop("native_surface_repair_attempted", None)
         try:
+            if str(self.root.state()) == "iconic" or not self.root.winfo_viewable():
+                return
             self.root.update_idletasks()
             x = int(self.edge_host.winfo_rootx())
             y = int(self.edge_host.winfo_rooty())
@@ -9910,106 +10015,71 @@ class BrowserApp(BrowserFeatures):
             h = int(self.edge_host.winfo_height())
             if w < 240 or h < 160:
                 return
-            # Stay inside the page area and away from borders where possible.
             pad = max(2, min(12, w // 100, h // 100))
-            shot = ImageGrab.grab(bbox=(x + pad, y + pad, x + w - pad, y + h - pad), all_screens=True)
-            rgb = shot.convert("RGB")
-            rgb.thumbnail((72, 72))
-            # Pillow 14 removes Image.getdata(); prefer the replacement on
-            # newer Pillow while retaining compatibility with older releases.
-            get_flattened = getattr(rgb, "get_flattened_data", None)
-            if callable(get_flattened):
-                pixels = list(get_flattened())
-            else:
-                pixels = list(rgb.getdata())
-            if not pixels:
-                return
-            mins = [min(px[i] for px in pixels) for i in range(3)]
-            maxs = [max(px[i] for px in pixels) for i in range(3)]
-            span = max(maxs[i] - mins[i] for i in range(3))
-            # Quantized dominant-color ratio catches the flat Tekzite gray host even
-            # when antialiasing/DWM adds a couple of nearby shades.
-            bins = {}
-            for r, g, b in pixels:
-                key = (r // 8, g // 8, b // 8)
-                bins[key] = bins.get(key, 0) + 1
-            dominant = max(bins.values()) / float(len(pixels))
-            blank = bool(span <= 18 and dominant >= 0.975)
-            try:
-                record_embedded_surface_probe(blank, span, dominant, attempt, False)
-            except Exception:
-                pass
+            shot = ImageGrab.grab(
+                bbox=(x + pad, y + pad, x + w - pad, y + h - pad),
+                all_screens=True,
+            )
+            result = _dwm_visible_surface_health(shot)
+            span = result["span"]
+            dominant = result["dominant"]
+            blank = bool(result["blank"])
+            details = dict(result)
+            details["sample_viewport"] = (w, h)
+            # Record only the viewport dimensions, never captured page pixels.
+            record_embedded_surface_probe(blank, span, dominant, attempt, False,
+                                          details=details)
             if not blank:
                 tab["native_surface_blank_confirmations"] = 0
-                # A resize-triggered native retry has now proved itself on the
-                # actual monitor.  Commit native presentation and release the
-                # temporary software-fallback latch.
                 if tab.get("presentation") == "native-retry":
                     tab["presentation"] = "native"
                     tab.pop("software_fallback_reason", None)
                     try:
-                        record_embedded_native_recovery(True,
-                            (int(self.edge_host.winfo_width()), int(self.edge_host.winfo_height())),
-                            True)
+                        record_embedded_native_recovery(
+                            True, (w, h), True
+                        )
                     except Exception:
                         pass
-                    self.status_var.set("Chromium native presentation recovered after resize")
+                    self.status_var.set("Chromium native presentation recovered")
                 return
-
-            # A renderer swap is allowed to be flat while the live page is still
-            # loading. Do not count those samples toward a DComp-stall diagnosis.
+            # Loading pages can have a transient white frame. Give them a
+            # bounded grace period, but do not ignore a permanently stuck load.
             if bool(tab.get("loading")):
-                tab["native_surface_blank_confirmations"] = 0
                 if int(attempt) < 6:
+                    tab["native_surface_blank_confirmations"] = 0
                     self.root.after(320, self._probe_visible_embedded_surface,
                                     generation, target_id, cdp_visual, int(attempt) + 1)
-                return
-
+                    return
             confirmations = int(tab.get("native_surface_blank_confirmations") or 0) + 1
             tab["native_surface_blank_confirmations"] = confirmations
             if confirmations < 2:
-                # Passive probation only. In DWM mode the historical wake helper
-                # deliberately returns immediately, so pretending to "pulse" it here
-                # merely delayed a false-positive diagnosis. Keep source geometry
-                # untouched and sample once more after the completed page settles.
                 self.root.after(420, self._probe_visible_embedded_surface,
                                 generation, target_id, cdp_visual, int(attempt) + 1)
                 return
-
             if generation != self._navigation_generation:
                 return
             tab = self._active_tab()
             if tab is None or tab.get("chromium_target_id") != target_id:
                 return
-            tab["presentation"] = "native"
-            tab.pop("software_fallback_reason", None)
-            fallback_viewport = (
-                max(1, int(self.edge_host.winfo_width())),
-                max(1, int(self.edge_host.winfo_height())),
-            )
-            tab["native_recovery_viewport"] = fallback_viewport
-            try:
-                record_embedded_native_recovery(True, fallback_viewport, False)
-            except Exception:
-                pass
-            try:
-                # Keep the historical field for debug compatibility, but record that
-                # no automatic software fallback was used.
-                record_embedded_surface_probe(True, span, dominant, attempt, False)
-            except Exception:
-                pass
-            # Do not hammer a persistently stalled top-level DComp surface with
-            # repeated resize/geometry-sync/repaint pulses. Keep Native authoritative
-            # and leave Chromium's current compositor hierarchy untouched until a
-            # genuine user-driven geometry change provides a safe recovery boundary.
-            try:
-                self._set_chromium_presentation_fast("native", target_id)
-            except Exception:
-                pass
-            self.status_var.set("Chromium Native surface stalled after load; holding DComp geometry stable")
+            viewport = (w, h)
+            if not tab.get("native_surface_repair_attempted"):
+                self._repair_stalled_dwm_once(generation, target_id, viewport, attempt)
+                return
+            # A second consecutive white sample *after* the one native repair
+            # proves the DWM thumbnail cannot currently present this page.
+            # Prefer a working Chromium software view over a permanent blank UI.
+            tab["presentation"] = "software"
+            tab["software_fallback_reason"] = "visible-surface"
+            tab["native_recovery_viewport"] = viewport
+            record_embedded_native_recovery(True, viewport, False)
+            record_embedded_surface_probe(True, span, dominant, attempt, True,
+                                          details=details)
+            self._show_chromium_software_surface(target_id)
+            self.status_var.set("DWM stayed white after repair; using Chromium software view")
         except Exception as exc:
             try:
-                record_embedded_surface_probe(False, None, None, attempt, False, type(exc).__name__)
+                record_embedded_surface_probe(False, None, None, attempt, False,
+                                              type(exc).__name__)
             except Exception:
                 pass
 
