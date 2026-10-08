@@ -12,7 +12,7 @@ from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, simpledialog, filedialog, colorchooser
-from browser_features import BrowserFeatures, omnibox_suggestions, most_visited_sites
+from browser_features import BrowserFeatures, omnibox_suggestions, most_visited_sites, DEFAULT_UPDATE_REPOSITORY
 from browser_state import load_bookmarks, load_session, read_json, session_snapshot, write_json, valid_url
 from PIL import Image, ImageTk, ImageGrab, ImageDraw, ImageFont
 from io import BytesIO
@@ -359,7 +359,7 @@ DEFAULT_PREFERENCES = {
     "tab_groups": {},
     "site_permissions": {},
     "download_prompt": False,
-    "update_repository": "",
+    "update_repository": DEFAULT_UPDATE_REPOSITORY,
     "search_url_template": DEFAULT_SEARCH_URL_TEMPLATE,
     "customization": dict(DEFAULT_CUSTOMIZATION),
 }
@@ -904,7 +904,7 @@ def load_preferences():
         prefs["tab_groups"] = {}
     if not isinstance(prefs.get("site_permissions"), dict):
         prefs["site_permissions"] = {}
-    prefs["update_repository"] = str(prefs.get("update_repository") or "").strip()[:160]
+    prefs["update_repository"] = str(prefs.get("update_repository") or "").strip()[:160] or DEFAULT_UPDATE_REPOSITORY
     prefs["homepage"] = str(prefs.get("homepage") or START_URL).strip()[:32768] or START_URL
     template = str(prefs.get("search_url_template") or DEFAULT_SEARCH_URL_TEMPLATE).strip()[:500]
     prefs["search_url_template"] = template if "{query}" in template else DEFAULT_SEARCH_URL_TEMPLATE
@@ -13415,7 +13415,7 @@ class BrowserApp(BrowserFeatures):
         sleeping_tabs_enabled = tk.BooleanVar(value=bool(self.preferences.get("sleeping_tabs_enabled", True)))
         sleeping_tabs_minutes = tk.StringVar(value=str(self.preferences.get("sleeping_tabs_minutes", 30)))
         download_prompt = tk.BooleanVar(value=bool(self.preferences.get("download_prompt", False)))
-        update_repository = tk.StringVar(value=str(self.preferences.get("update_repository", "")))
+        update_repository = tk.StringVar(value=str(self.preferences.get("update_repository") or "").strip() or DEFAULT_UPDATE_REPOSITORY)
 
         def section(title):
             tk.Label(outer, text=title, fg=self.ui["accent_hover"], bg=self.ui["bg"],
@@ -13794,7 +13794,7 @@ class BrowserApp(BrowserFeatures):
                 "sleeping_tabs_enabled": bool(sleeping_tabs_enabled.get()),
                 "sleeping_tabs_minutes": max(5, min(240, int(sleeping_tabs_minutes.get() or 30))),
                 "download_prompt": bool(download_prompt.get()),
-                "update_repository": update_repository.get().strip(),
+                "update_repository": update_repository.get().strip() or DEFAULT_UPDATE_REPOSITORY,
             })
             try:
                 save_preferences(self.preferences)

@@ -16,6 +16,8 @@ from engine import features
 import hagezi_privacy
 
 
+DEFAULT_UPDATE_REPOSITORY = "bschilperoord/Tekzite-Browser"
+
 def site_host(url):
     try:
         parsed = urlsplit(url)
@@ -2280,7 +2282,7 @@ class BrowserFeatures:
         return tuple(int(n) for n in numbers) if numbers else (0,)
 
     def _check_for_updates(self):
-        repo = str(self.preferences.get('update_repository') or '').strip()
+        repo = str(self.preferences.get('update_repository') or '').strip() or DEFAULT_UPDATE_REPOSITORY
         repo = re.sub(r'^https?://github\.com/', '', repo, flags=re.I).strip('/ ')
         if repo.endswith('.git'): repo = repo[:-4]
         if repo.count('/') != 1:
