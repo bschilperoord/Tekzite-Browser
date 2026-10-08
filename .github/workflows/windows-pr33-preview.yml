@@ -5,6 +5,8 @@ on:
     branches: ["feature/marquee-dark-websites"]
     paths:
       - ".github/workflows/windows-pr33-preview.yml"
+      - "main.py"
+      - "tests/current/test_tab_titles_and_dark_websites.py"
   workflow_dispatch:
 
 permissions:
