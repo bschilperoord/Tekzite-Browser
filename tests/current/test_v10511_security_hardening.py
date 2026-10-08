@@ -16,7 +16,7 @@ SECURITY = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
 
 def test_release_version():
-    assert main.BROWSER_VERSION == "10.5.128"
+    assert main.BROWSER_VERSION == "10.5.129"
 
 
 def test_stale_pid_requires_profile_chromium_verification():
@@ -84,7 +84,7 @@ def test_proxy_limits_headers_and_concurrency():
 
 
 def test_dependency_and_build_hardening_present():
-    assert (ROOT / "requirements.txt").read_text().strip() == "Pillow==12.3.0"
+    assert (ROOT / "requirements.txt").read_text().splitlines() == ["Pillow==12.3.0", "cryptography==50.0.1"]
     assert (ROOT / "requirements-build.txt").read_text().strip() == "pyinstaller==6.22.3"
     dev = (ROOT / "requirements-dev.txt").read_text()
     assert "bandit==1.9.4" in dev

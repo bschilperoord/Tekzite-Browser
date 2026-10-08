@@ -15,6 +15,7 @@ from PIL import Image, ImageTk
 from browser_state import read_json, write_json, valid_url, session_snapshot
 from engine import features
 import hagezi_privacy
+import extension_updates
 
 
 DEFAULT_UPDATE_REPOSITORY = "bschilperoord/Tekzite-Browser"
@@ -282,7 +283,52 @@ class BrowserFeatures:
         self._hagezi_update_callbacks = []
         self._hagezi_last_result = None
         self._closing = False
+        self._extension_update_future = None
+        self._extension_update_callbacks = []
+        self.root.after(10000, self._start_extension_updates)
         self._configure_feature_preferences()
+
+
+    def _start_extension_updates(self, force=False, callback=None):
+        if self._closing or getattr(self, '_private_mode', False):
+            return False
+        if not force and not self.preferences.get('extensions_auto_update', True):
+            return False
+        if callback:
+            self._extension_update_callbacks.append(callback)
+        if self._extension_update_future is not None:
+            return False
+        entries = [dict(row) for row in self.preferences.get('extensions', [])]
+        def work():
+            session = features.net._CHROMIUM_SESSION or {}
+            info = features.net._devtools_json(session['port'], '/json/version', timeout=2)
+            chrome_version = str(info.get('Browser') or '').split('/')[-1]
+            extension_updates.version(chrome_version)
+            return extension_updates.check_updates(entries, self._state_directory, chrome_version, force=force)
+        self._extension_update_future = self._executor.submit(work)
+        self.root.after(100, self._poll_extension_updates)
+        return True
+
+
+    def _poll_extension_updates(self):
+        future = self._extension_update_future
+        if self._closing or future is None:
+            return
+        if not future.done():
+            self.root.after(100, self._poll_extension_updates)
+            return
+        self._extension_update_future = None
+        try:
+            results = future.result()
+        except Exception as exc:
+            results = {'check': {'state': 'error', 'error': str(exc)}}
+        callbacks = list(self._extension_update_callbacks)
+        self._extension_update_callbacks.clear()
+        for callback in callbacks:
+            callback(results)
+        if any(row.get('state') == 'staged' for row in results.values()):
+            self.status_var.set('Extension updates ready; restart Tekzite to apply them.')
+        self.root.after(3600000, self._start_extension_updates)
 
     def _start_optional_services(self, session):
         if self._closing or session is not features.net._CHROMIUM_SESSION:
@@ -1177,6 +1223,15 @@ class BrowserFeatures:
             'Manifest V2 + V3 unpacked extensions are supported; restart after changes.'
         ))
         tk.Label(win, textvariable=note, bg=self.ui['bg'], fg=self.ui['muted'], anchor='w').pack(side='bottom', fill='x', padx=12)
+        auto_updates = tk.BooleanVar(value=bool(self.preferences.get('extensions_auto_update', True)))
+        def set_auto_updates():
+            self.preferences['extensions_auto_update'] = bool(auto_updates.get())
+            self._persist_preferences()
+            if auto_updates.get():
+                self._start_extension_updates()
+        update_controls = tk.Frame(win, bg=self.ui['bg'])
+        update_controls.pack(side='bottom', fill='x', padx=12, pady=4)
+        tk.Checkbutton(update_controls, text='Automatically update extensions', variable=auto_updates, command=set_auto_updates, bg=self.ui['bg'], fg=self.ui['text'], selectcolor=self.ui['bg']).pack(side='left')
         state = {'rows': {}}
 
         def persist(entries):
@@ -1212,6 +1267,7 @@ class BrowserFeatures:
             except Exception:
                 pass
 
+            update_status = read_json(extension_updates.cache_dir(self._state_directory) / 'status.json', {})
             entries = self.preferences.get('extensions', [])
             for index, row in enumerate(entries):
                 path = str(row.get('path') or '')
@@ -1219,6 +1275,13 @@ class BrowserFeatures:
                 try:
                     meta = self._extension_metadata(path)
                     state_label = 'Enabled' if row.get('enabled') else 'Disabled'
+                    status = update_status.get(extension_updates.token(path), {})
+                    if status.get('state') == 'staged':
+                        state_label = 'Update ready'
+                    elif status.get('state') == 'error':
+                        state_label = 'Update failed'
+                    elif status.get('state') == 'no-source':
+                        state_label = 'No update source'
                 except Exception as exc:
                     meta = {'name': Path(path).name or 'Missing extension', 'version': '?', 'manifest_version': '?', 'permissions': []}
                     state_label = 'Missing / invalid'
@@ -1316,6 +1379,14 @@ class BrowserFeatures:
                 f'Folder: {item.get("path", "")}\n\n'
                 'Declared permissions:\n' + ('\n'.join(f'• {p}' for p in permissions) if permissions else 'None declared')
             )
+            try:
+                source = extension_updates.discover_source(extension_updates.manifest(item.get('path')))
+                message += '\n\nUpdate source: ' + (str(source.get('repository') or source.get('url')) if source else 'Not found in extension metadata')
+                status = read_json(extension_updates.cache_dir(self._state_directory) / 'status.json', {}).get(extension_updates.token(item.get('path')), {})
+                if status.get('error'):
+                    message += '\nUpdate: ' + str(status['error'])
+            except Exception:
+                pass
             if meta.get('error'):
                 message += f'\n\nValidation error:\n{meta["error"]}'
             self._show_message("info", 'Extension details', message, parent=win)
@@ -1334,6 +1405,18 @@ class BrowserFeatures:
                 refresh(entries[index].get('path'))
                 self._refresh_extension_toolbar()
 
+        def check_updates():
+            note.set('Checking extension updates…')
+            def finished(results):
+                if not win.winfo_exists():
+                    return
+                refresh()
+                staged = sum(row.get('state') == 'staged' for row in results.values())
+                errors = sum(row.get('state') == 'error' for row in results.values())
+                note.set(f'{staged} update(s) ready; {errors} failed. Restart to apply updates. Details shows sources and errors.')
+            if not self._start_extension_updates(force=True, callback=finished):
+                note.set('Update check already running or unavailable in private mode.')
+        self._feature_button(update_controls, 'Check updates', check_updates)
         self._feature_button(controls, 'Add unpacked…', add_unpacked)
         self._feature_button(controls, 'Enable / Disable', toggle_selected)
         self._feature_button(controls, 'Pin / Unpin', pin_selected)
