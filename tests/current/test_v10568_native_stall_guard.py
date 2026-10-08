@@ -39,7 +39,9 @@ def test_native_stall_requires_completed_page_and_two_blank_confirmations():
     assert 'confirmations = int(tab.get("native_surface_blank_confirmations") or 0) + 1' in block
     assert "if confirmations < 2:" in block
     assert "_schedule_embedded_surface_wake" not in block
-    assert "holding DComp geometry stable" in block
+    assert "self._repair_stalled_dwm_once(" in block
+    assert 'tab["software_fallback_reason"] = "visible-surface"' in block
+    assert "self._show_chromium_software_surface(target_id)" in block
 
 
 def test_hot_reuse_flag_is_reset_for_every_navigation():
