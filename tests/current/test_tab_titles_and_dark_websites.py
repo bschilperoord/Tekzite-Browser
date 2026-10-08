@@ -9,6 +9,59 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 ENGINE = (ROOT / "engine" / "net.py").read_text(encoding="utf-8")
 
 
+def test_full_title_uses_available_pixels_without_character_cap(monkeypatch):
+    class FakeFont:
+        @staticmethod
+        def measure(value):
+            return sum(4 if ch == "i" else 8 for ch in value)
+
+    monkeypatch.setattr(main.tkfont, "Font", lambda **kwargs: FakeFont())
+    app = object.__new__(main.BrowserApp)
+    app.root = None
+    app._ui_font_family = "Test"
+    app._custom = lambda name, default=None: {
+        "tab_title_chars": 6, "tab_font_size": 10,
+        "tab_min_width": 160, "tab_max_width": 300, "ui_scale": 1.0,
+    }.get(name, default)
+    title = "Kea Router Dashboard"
+    assert app._tab_title_character_budget(title, 200, 10) == len(title)
+    assert app._tab_pixel_width(title) == 8 * len(title) + 92
+    assert app._tab_pixel_width("W" * 200) == 300
+    assert app._tab_pixel_width("Pinned", pinned=True) == 48
+
+
+def test_pixel_budget_uses_real_widths_not_widest_character():
+    # Wide/W and narrow/i are visually different, so a worst-case 'WWW…'
+    # measurement must not waste space when a title actually fits.
+    def measure(value):
+        return sum({"W": 14, "i": 3, "…": 9}.get(ch, 8) for ch in value)
+
+    title = "iiiiiiWWWiiiiii"
+    assert main._tab_title_pixel_budget(title, measure(title), measure) == len(title)
+    assert main._tab_title_pixel_budget("i" * 24, 85, measure) == 24
+    for candidate in (title, "WWWWiiWWWiii", "Router Dashboard"):
+        for pixels in (20, 35, 50, 85):
+            count = main._tab_title_pixel_budget(candidate, pixels, measure)
+            assert 1 <= count <= len(candidate)
+            if count == len(candidate):
+                assert measure(candidate) <= pixels
+            else:
+                for offset in range(len(candidate) - count + 1):
+                    excerpt = candidate[offset:offset + count]
+                    visible = main._decorate_tab_title_slice(
+                        excerpt, offset, len(candidate), count
+                    )
+                    # When even one ellipsis cannot fit, the single-character
+                    # fallback is the smallest possible representation.
+                    assert measure(visible) <= pixels or count == 1
+
+
+def test_customization_shows_width_controls_instead_of_character_cap():
+    assert 'label(row, "Max width")' in MAIN
+    assert 'label(row, "Tab title chars")' not in MAIN
+    assert 'tab_chars_var' not in MAIN
+
+
 def test_short_tab_titles_never_scroll():
     assert main._tab_title_window("Tekzite", 20, 990.0) == "Tekzite"
     assert main._tab_title_window("", 20, 990.0) == ""
