@@ -11413,7 +11413,10 @@ def diagnose_embedded_chromium_dwm_stall(target_id=None, *, phase="before-repair
         "white_ratio": metrics.get("white_ratio") if metrics.get("valid") else None,
         "span": metrics.get("channel_span") if metrics.get("valid") else None,
     }
-    evidence["classification"] = _dwm_stall_classification(True, metrics)
+    evidence["classification"] = (
+        _dwm_stall_classification(True, metrics)
+        if phase == "before-repair" else "post-repair-screen-not-yet-sampled"
+    )
     # Both branches correspond to the same session and target; do not overwrite
     # a later navigation's evidence if the user navigated during the probe.
     if _CHROMIUM_SESSION is session and target == str(session.get("target_id") or ""):
