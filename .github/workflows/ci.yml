@@ -70,3 +70,7 @@ jobs:
           PY
       - name: Verify immediate extension activation and settings retention
         run: python tools/test_extension_live_update.py "${{ runner.temp }}/tekzite-test-chrome/${{ matrix.binary }}"
+      - name: Install OneFile test dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Verify OneFile restart survives parent resource cleanup
+        run: python tools/test_onefile_restart.py
