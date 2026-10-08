@@ -9,7 +9,7 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
 def test_release_version_is_v10586():
-    assert main.BROWSER_VERSION == "10.5.125"
+    assert main.BROWSER_VERSION == "10.5.126"
 
 
 def test_precision_delta_is_not_artificially_delayed():

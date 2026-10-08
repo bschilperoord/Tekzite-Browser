@@ -1,3 +1,14 @@
+# v10.5.126 - Roomier UI and reliable authentication handoff
+
+- Larger browser controls and spacing with compact text.
+- Consistent icon, label and shortcut alignment across all Tekzite menus.
+- Prevents DPI-scaled text from clipping in the browser bars.
+- Preserves login sessions when authentication returns to Tekzite.
+- Fixes premature GitHub sign-in closure and stalled profile handoff.
+- Adds Tools → Copy Auth Debug for troubleshooting.
+
+GitHub sign-in, automatic auth-window closure and the final UI were verified on Windows. Live login on Linux and across every provider remains unverified. Windows builds are unsigned.
+
 # v10.5.125 - Cross-provider OAuth return-target fix
 
 - Fixes standalone authentication windows that could remain open after successful login when the identity provider redirects to a different relying-party host than the page Tekzite showed before login.

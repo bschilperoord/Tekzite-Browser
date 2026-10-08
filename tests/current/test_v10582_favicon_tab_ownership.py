@@ -59,7 +59,7 @@ def _poll_app(tab, info):
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.125"
+    assert main.BROWSER_VERSION == "10.5.126"
 
 
 def test_page_change_drops_previous_site_icon_before_new_icon_is_ready():
