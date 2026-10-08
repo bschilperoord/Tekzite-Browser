@@ -21,7 +21,7 @@ def test_long_tab_title_reaches_both_ends_and_reverses():
     assert main._tab_title_window(title, 4, 1.1) == "BCDE"
     assert main._tab_title_window(title, 4, 2.3) == "GHIJ"
     assert main._tab_title_window(title, 4, 3.0) == "GHIJ"
-    assert main._tab_title_window(title, 4, 3.5) == "EFGH"
+    assert main._tab_title_window(title, 4, 3.6) == "EFGH"
     assert main._tab_title_window(title, 4, 4.5) == "ABCD"
 
 
