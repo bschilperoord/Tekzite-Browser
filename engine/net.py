@@ -5214,7 +5214,11 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     "--disable-logging", "--metrics-recording-only", "--no-pings",
                     "--disable-hyperlink-auditing", "--disable-preconnect",
                     "--disable-features=AsyncDns,DnsOverHttps,UseDnsHttpsSvcb,NetworkErrorLogging,Reporting,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,PrivacySandboxSettings4,MediaRouter,CalculateNativeWinOcclusion,BrowsingTopics,InterestCohortAPI,SharedStorageAPI,FencedFrames,AttributionReporting,PrivateAggregationApi,FedCm,WebBluetooth,WebUSB,WebSerial,WebHID,IdleDetection,WebNFC,Prerender2,SpeculationRulesPrefetchProxy,ExtensionManifestV2Disabled,ExtensionManifestV2Unsupported,ExtensionsManifestV3Only,ExtensionDisableUnsupportedDeveloper,DisableLoadExtensionCommandLineSwitch",
-                    "--enable-features=AllowLegacyMV2Extensions",
+                    "--enable-features=" + (
+                        "AllowLegacyMV2Extensions,WebContentsForceDark"
+                        if os.environ.get("TEKZITE_DARK_WEBSITES", "1") == "1"
+                        else "AllowLegacyMV2Extensions"
+                    ),
                     "--disable-session-crashed-bubble", "--disable-background-mode",
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
@@ -5228,6 +5232,11 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     f"--window-size={launch_w},{launch_h}",
                     f"--app={str(launch_url or 'about:blank')}",
                 ]
+                if os.environ.get("TEKZITE_DARK_WEBSITES", "1") == "1":
+                    # Let dark-aware sites use their native dark theme and
+                    # Chromium auto-darken light-only pages without altering images
+                    # through global CSS injection.
+                    command.insert(-1, "--force-dark-mode")
                 if os.environ.get("TEKZITE_DOWNLOAD_PROMPT") == "1":
                     command.append("--download-prompt-for-download")
                 # v7.3 typography guard: Chromium's best Windows text path is
@@ -5257,6 +5266,7 @@ def _start_persistent_chromium_session_unlocked(timeout=12, launch_geometry=None
                     "background_timer_throttling_disabled": "--disable-background-timer-throttling" in effective_flags,
                     "occluded_window_backgrounding_disabled": "--disable-backgrounding-occluded-windows" in effective_flags,
                     "launch_effective_flags": list(effective_flags),
+                    "force_dark_websites": "--force-dark-mode" in effective_flags,
                     "typography_lcd_text_enabled": "--disable-lcd-text" not in effective_flags,
                     "typography_subpixel_positioning_enabled": "--disable-font-subpixel-positioning" not in effective_flags,
                     "typography_directwrite_ui_enabled": "--disable-directwrite-for-ui" not in effective_flags,
@@ -6634,6 +6644,10 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             # an additional visible window alongside session restoration.
             target_url,
         ]
+        if os.environ.get("TEKZITE_DARK_WEBSITES", "1") == "1":
+            # Keep the standalone sign-in window in dark theme as well, but
+            # avoid auto-recoloring sensitive authentication forms.
+            command.insert(-1, "--force-dark-mode")
         process = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
