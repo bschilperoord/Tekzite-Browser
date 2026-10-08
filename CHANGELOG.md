@@ -1,3 +1,13 @@
+# v10.5.127 - Ready-to-use update checker
+
+- Prefills the official update repository, including existing empty settings.
+- Selects the matching Windows or Linux build and prefers the direct executable.
+- Offers downloads only when a newer release is available.
+- Makes downloaded Linux executables runnable.
+- Tests release comparison, downloads, SHA-256 verification, interrupted downloads and network errors.
+
+The updater saves the new executable to Downloads; launch it manually to switch versions.
+
 # v10.5.126 - Roomier UI and reliable authentication handoff
 
 - Larger browser controls and spacing with compact text.
