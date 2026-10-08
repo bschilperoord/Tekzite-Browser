@@ -290,10 +290,11 @@ def check_updates(entries, state_directory, chrome_version, *, force=False):
             record = {'checked_at': time.time(), 'state': 'up-to-date'}
             try:
                 old = manifest(path); source = discover_source(old)
-                record['source'] = source
+                record.update(name=old['name'], installed_version=old['version'], source=source, phase='source-discovery')
                 if not source:
                     record['state'] = 'no-source'
                 else:
+                    record['phase'] = 'download-and-validation'
                     package = release_package(source, old, chrome_version)
                     if package:
                         payload, expected_version = package
@@ -310,15 +311,18 @@ def check_updates(entries, state_directory, chrome_version, *, force=False):
                                 (root / 'manifest.json').write_text(json.dumps(new, indent=2), encoding='utf-8')
                                 shutil.copytree(root, stage)
                                 write_json(ready, {'base': old['version'], 'version': new['version']})
-                                record.update(state='staged', version=new['version'], base=old['version'])
+                                record.update(state='staged', version=new['version'], base=old['version'], phase='activation-pending')
                 # A forced check for the same release must retain an existing stage.
                 if record['state'] == 'up-to-date' and (cache / (ident + '.ready.json')).is_file() and (cache / ident / 'manifest.json').is_file():
                     record.update(state='staged', version=manifest(cache / ident)['version'], base=old['version'])
             except Exception as exc:
                 record.update(state='error', error=str(exc))
+            if record['state'] in ('up-to-date', 'no-source'):
+                record['phase'] = 'complete'
             records[ident] = record
         write_json(cache / 'status.json', records)
-        return records
+        return {token(row['path']): records[token(row['path'])] for row in entries
+                if row.get('enabled', True) and row.get('auto_update', True) and token(row['path']) in records}
 
 
 def apply_pending(entries, state_directory, reload_extension=None):
@@ -391,5 +395,85 @@ def apply_pending(entries, state_directory, reload_extension=None):
             ident = token(result['path'])
             record = records.setdefault(ident, {})
             record.update({key: value for key, value in result.items() if key != 'path'})
+            record['phase'] = 'active' if result['state'] == 'updated' else 'activation'
         write_json(cache / 'status.json', records)
     return results
+
+
+def update_summary(entries, results):
+    results = results if isinstance(results, dict) else {}
+    eligible = [row for row in entries if row.get('enabled', True) and row.get('auto_update', True)]
+    rows = [results.get(token(row['path']), {}) for row in eligible]
+    counts = {state: sum(row.get('state') == state for row in rows)
+              for state in ('updated', 'staged', 'up-to-date', 'no-source', 'error')}
+    if results.get('check', {}).get('state') == 'error':
+        counts['error'] += 1
+    if counts['error']:
+        return f"{counts['error']} update check(s) failed. Use Copy Update Debug."
+    if not eligible:
+        return 'No eligible user extensions to check. Built-in services update with Tekzite.'
+    if counts['updated'] or counts['staged']:
+        return f"{counts['updated']} updated and active; {counts['staged']} awaiting activation; {counts['up-to-date']} up to date; {counts['no-source']} without a source."
+    unchecked = sum(not row.get('state') for row in rows)
+    if unchecked:
+        return f"{unchecked} extension(s) not checked yet. Use Check updates."
+    return f"{counts['up-to-date']} up to date; {counts['no-source']} without an update source."
+
+
+def _debug_url(value):
+    parts = urllib.parse.urlsplit(str(value or ''))
+    return urllib.parse.urlunsplit((parts.scheme, parts.hostname or '', parts.path, '', ''))
+
+
+def _debug_error(value, entries):
+    text = str(value or '')
+    for row in entries:
+        path = str(row.get('path') or '')
+        if path:
+            text = text.replace(path, '<extension>')
+            parent = str(Path(path).parent)
+            if len(parent) > 1:
+                text = text.replace(parent, '<extension-parent>')
+    text = re.sub(r'https?://[^\s\'"<>]+', lambda match: _debug_url(match.group()), text)
+    return text[:600]
+
+
+def build_debug_report(entries, state_directory, *, results=None, runtime=None, context=None):
+    """Allowlisted diagnostics without cookies, signing keys or profile folders."""
+    records = read_json(cache_dir(state_directory) / 'status.json', {})
+    if not isinstance(records, dict):
+        records = {}
+    if isinstance(results, dict):
+        records.update(results)
+    report = {'schema': 1, 'summary': update_summary(entries, records), 'extensions': []}
+    report['context'] = {key: value for key, value in (context or {}).items()
+                         if key in ('browser_version', 'chromium_version', 'chromium_running',
+                                    'check_running', 'automatic_updates', 'private_mode', 'authentication_active')}
+    if records.get('check', {}).get('error'):
+        report['check_error'] = _debug_error(records['check']['error'], entries)
+    for row in entries:
+        path = row.get('path') or ''; record = records.get(token(path), {})
+        item = {'enabled': bool(row.get('enabled', True)),
+                'automatic_updates': bool(row.get('auto_update', True)),
+                'folder_exists': Path(path).is_dir(),
+                'state': record.get('state', 'not-checked'), 'phase': record.get('phase'),
+                'checked_at': record.get('checked_at'), 'target_version': record.get('version')}
+        if not item['enabled'] or not item['automatic_updates']:
+            item['state'] = 'disabled' if not item['enabled'] else 'updates-disabled'
+        try:
+            data = manifest(path)
+            item.update(name=data['name'], installed_version=data['version'],
+                        manifest_version=data['manifest_version'], signing_key_present=bool(data.get('key')),
+                        update_url_present=bool(data.get('update_url')))
+            source = discover_source(data)
+            item['source'] = ({'kind': source['kind'], 'repository': source.get('repository'),
+                               'extension_id': source.get('id'),
+                               'url': _debug_url(source.get('url'))} if source else None)
+        except Exception as exc:
+            item['manifest_error'] = _debug_error(exc, entries)
+        if record.get('error'):
+            item['error'] = _debug_error(record['error'], entries)
+        report['extensions'].append(item)
+    report['runtime_extensions'] = [{key: row.get(key) for key in ('id', 'name', 'version', 'enabled', 'installType')}
+                                    for row in (runtime or []) if isinstance(row, dict)]
+    return report

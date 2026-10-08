@@ -285,6 +285,9 @@ class BrowserFeatures:
         self._closing = False
         self._extension_update_future = None
         self._extension_update_callbacks = []
+        self._extension_update_last_results = None
+        self._extension_update_runtime_inventory = []
+        self._extension_update_chromium_version = None
         self.root.after(10000, self._start_extension_updates)
         self._configure_feature_preferences()
 
@@ -304,6 +307,11 @@ class BrowserFeatures:
             info = features.net._devtools_json(session['port'], '/json/version', timeout=2)
             chrome_version = str(info.get('Browser') or '').split('/')[-1]
             extension_updates.version(chrome_version)
+            self._extension_update_chromium_version = chrome_version
+            try:
+                self._extension_update_runtime_inventory = features.extension_inventory(session)
+            except Exception:
+                self._extension_update_runtime_inventory = []
             results = extension_updates.check_updates(entries, self._state_directory, chrome_version, force=force)
             if any(row.get('state') == 'staged' for row in results.values()):
                 if session is not features.net._CHROMIUM_SESSION or getattr(self, '_google_auth_handoff_active', False):
@@ -329,6 +337,11 @@ class BrowserFeatures:
             results = future.result()
         except Exception as exc:
             results = {'check': {'state': 'error', 'error': str(exc)}}
+        self._extension_update_last_results = results
+        try:
+            write_json(extension_updates.cache_dir(self._state_directory) / 'last-check.json', results)
+        except OSError:
+            pass
         callbacks = list(self._extension_update_callbacks)
         self._extension_update_callbacks.clear()
         for callback in callbacks:
@@ -340,6 +353,30 @@ class BrowserFeatures:
             self._extension_toolbar_photos = {}
             self._refresh_extension_toolbar()
         self.root.after(10000 if any(row.get('state') == 'staged' for row in results.values()) else 3600000, self._start_extension_updates)
+
+    def _copy_extension_update_debug(self):
+        entries = [dict(row) for row in self.preferences.get('extensions', [])]
+        results = self._extension_update_last_results
+        if results is None:
+            results = read_json(extension_updates.cache_dir(self._state_directory) / 'last-check.json', {})
+        report = extension_updates.build_debug_report(entries, self._state_directory,
+            results=results, runtime=self._extension_update_runtime_inventory, context={
+                'browser_version': getattr(sys.modules.get(type(self).__module__), 'BROWSER_VERSION', None),
+                'chromium_version': self._extension_update_chromium_version,
+                'chromium_running': bool(features.net._CHROMIUM_SESSION),
+                'check_running': self._extension_update_future is not None,
+                'automatic_updates': bool(self.preferences.get('extensions_auto_update', True)),
+                'private_mode': bool(getattr(self, '_private_mode', False)),
+                'authentication_active': bool(getattr(self, '_google_auth_handoff_active', False)),
+            })
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(json.dumps(report, indent=2, ensure_ascii=False))
+            self.status_var.set('Extension update debug copied.')
+            return True
+        except tk.TclError:
+            self.status_var.set('Could not copy extension update debug.')
+            return False
 
     def _start_optional_services(self, session):
         if self._closing or session is not features.net._CHROMIUM_SESSION:
@@ -1422,13 +1459,16 @@ class BrowserFeatures:
                 if not win.winfo_exists():
                     return
                 refresh()
-                updated = sum(row.get('state') == 'updated' for row in results.values())
-                staged = sum(row.get('state') == 'staged' for row in results.values())
-                errors = sum(row.get('state') == 'error' for row in results.values())
-                note.set(f'{updated} update(s) active; {staged} pending; {errors} failed. Details shows sources and errors.')
+                note.set(extension_updates.update_summary(self.preferences.get('extensions', []), results))
             if not self._start_extension_updates(force=True, callback=finished):
                 note.set('Update check already running or unavailable in private mode.')
         self._feature_button(update_controls, 'Check updates', check_updates)
+        debug_controls = tk.Frame(win, bg=self.ui['bg'])
+        debug_controls.pack(side='bottom', fill='x', padx=12, pady=4)
+        def copy_update_debug():
+            if self._copy_extension_update_debug():
+                note.set('Update debug copied. Paste it into your support message.')
+        self._feature_button(debug_controls, 'Copy Update Debug', copy_update_debug)
         self._feature_button(controls, 'Add unpacked…', add_unpacked)
         self._feature_button(controls, 'Enable / Disable', toggle_selected)
         self._feature_button(controls, 'Pin / Unpin', pin_selected)

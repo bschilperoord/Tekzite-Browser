@@ -307,3 +307,51 @@ def test_failed_live_reload_restores_files_and_old_runtime(installed):
     assert calls == ['2.0', '1.0']
     assert updates.manifest(path)['version'] == '1.0'
     assert (profile / 'extension-settings.json').read_text() == 'user settings'
+
+
+def test_summary_distinguishes_current_missing_and_unchecked(installed):
+    path, profile, entries, _ = installed
+    key = updates.token(path)
+    assert updates.update_summary(entries, {key: {'state': 'up-to-date'}}) == '1 up to date; 0 without an update source.'
+    assert updates.update_summary(entries, {key: {'state': 'no-source'}}) == '0 up to date; 1 without an update source.'
+    assert 'not checked yet' in updates.update_summary(entries, {})
+    assert 'No eligible' in updates.update_summary([], {})
+
+
+def test_debug_captures_global_failure_and_redacts_sensitive_metadata(installed):
+    path, profile, entries, _ = installed
+    old = data(update_url='https://example.com/update?token=secret', key='a2V5')
+    (path / 'manifest.json').write_text(json.dumps(old))
+    result = {'check': {'state': 'error', 'error': f'offline {path} https://user:pass@example.com/update?token=secret'}}
+    report = updates.build_debug_report(entries, profile, results=result,
+        runtime=[{'id': 'runtime', 'name': 'Loaded', 'version': '1.0', 'enabled': True, 'installType': 'development', 'optionsUrl': 'secret'}],
+        context={'chromium_running': False, 'cookies': 'secret'})
+    text = json.dumps(report)
+    assert 'failed' in report['summary']
+    assert report['check_error'].startswith('offline <extension>')
+    assert report['extensions'][0]['source']['url'] == 'https://example.com/update'
+    assert 'secret' not in text and 'user:pass' not in text and str(path) not in text and 'a2V5' not in text
+    assert report['runtime_extensions'][0]['name'] == 'Loaded'
+
+
+def test_removed_extension_status_does_not_count_as_checked(installed):
+    path, profile, entries, _ = installed
+    updates.check_updates(entries, profile, '150.0')
+    assert updates.check_updates([], profile, '150.0', force=True) == {}
+
+
+def test_copy_update_debug_puts_json_on_clipboard(installed):
+    path, profile, entries, _ = installed
+    app = Mock()
+    app.preferences = {'extensions': entries}
+    app._state_directory = profile
+    app._extension_update_last_results = {'check': {'state': 'error', 'error': 'offline'}}
+    app._extension_update_runtime_inventory = []
+    app._extension_update_chromium_version = None
+    app._extension_update_future = None
+    app._private_mode = False
+    app._google_auth_handoff_active = False
+    assert BrowserFeatures._copy_extension_update_debug(app)
+    report = json.loads(app.root.clipboard_append.call_args.args[0])
+    assert report['check_error'] == 'offline'
+    assert report['extensions'][0]['installed_version'] == '1.0'
