@@ -25,6 +25,46 @@ def test_long_tab_title_reaches_both_ends_and_reverses():
     assert main._tab_title_window(title, 4, 4.5) == "ABCD"
 
 
+def test_clipped_titles_show_ellipsis_on_hidden_edges():
+    title = "Kea Router Dashboard"
+    assert main._decorate_tab_title_slice(title[:14], 0, len(title), 14) == "Kea Router Da…"
+
+    first = main._tab_title_window_state("ABCDEFGHIJ", 4, 0.0)
+    middle = main._tab_title_window_state("ABCDEFGHIJ", 4, 1.1)
+    last = main._tab_title_window_state("ABCDEFGHIJ", 4, 2.3)
+    reverse = main._tab_title_window_state("ABCDEFGHIJ", 4, 3.6)
+    assert main._decorate_tab_title_slice(*first) == "ABC…"
+    assert main._decorate_tab_title_slice(*middle) == "…CD…"
+    assert main._decorate_tab_title_slice(*last) == "…HIJ"
+    assert main._decorate_tab_title_slice(*reverse) == "…FG…"
+
+
+def test_clipped_titles_are_bounded_and_narrow_tabs_stay_clear():
+    for limit in range(1, 12):
+        for elapsed in (0.0, 1.1, 2.3, 3.6, 4.5):
+            state = main._tab_title_window_state("ABCDEFGHIJ", limit, elapsed)
+            text = main._decorate_tab_title_slice(*state)
+            assert len(text) <= limit
+            if len("ABCDEFGHIJ") > limit:
+                assert "…" in text
+    assert main._decorate_tab_title_slice("Hello", 0, 5, 5) == "Hello"
+    assert main._decorate_tab_title_slice("AB", 1, 10, 2) == "…"
+
+
+def test_quiet_mode_keeps_a_static_ellipsis():
+    class QuietApp:
+        _tab_marquee_starts = {}
+
+        @staticmethod
+        def _motion_enabled():
+            return False
+
+    text = main.BrowserApp._tab_title_display(
+        QuietApp(), {"id": "tab-a"}, "Kea Router Dashboard", 14
+    )
+    assert text == "Kea Router Da…"
+
+
 def test_narrow_tabs_keep_a_one_character_view():
     assert len(main._tab_title_window("long title", 0, 0)) == 1
 
