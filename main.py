@@ -367,6 +367,51 @@ DEFAULT_PREFERENCES = {
     "customization": dict(DEFAULT_CUSTOMIZATION),
 }
 
+def _tab_title_pixel_budget(title, available_pixels, measure):
+    """Return the longest moving text window that fits its actual pixel width.
+
+    Preserve complete short titles, and reserve room for ellipsis markers when
+    either end is hidden. Character advances are cached for the measurement so
+    budget calculations do not block the Tk thread on hundreds of font calls.
+    """
+    title = str(title or "")
+    if not title:
+        return 1
+    available_pixels = max(1, int(available_pixels))
+    if measure(title) <= available_pixels:
+        return len(title)
+    widths = {ch: max(0, int(measure(ch))) for ch in set(title)}
+    prefix = [0]
+    for char in title:
+        prefix.append(prefix[-1] + widths[char])
+    ellipsis_width = max(0, int(measure("…")))
+    # A few spare pixels guard against kerning differences in Tk's renderer.
+    usable = max(1, available_pixels - 3)
+    def fits(chars):
+        for offset in range(len(title) - chars + 1):
+            left = offset > 0
+            right = offset + chars < len(title)
+            if left and right and chars <= 2:
+                pixels = ellipsis_width
+            else:
+                pixels = prefix[offset + chars] - prefix[offset]
+                if left:
+                    pixels += ellipsis_width - widths[title[offset]]
+                if right:
+                    pixels += ellipsis_width - widths[title[offset + chars - 1]]
+            if pixels > usable:
+                return False
+        return True
+    low, high = 1, len(title) - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(middle):
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
 def _tab_title_window_state(title, visible_chars, elapsed_seconds, *, step_seconds=0.24, pause_seconds=0.8):
     """Return the scrolling slice and offset while preserving both endpoint pauses."""
     title = str(title or "")
@@ -4491,15 +4536,13 @@ class BrowserApp(BrowserFeatures):
         return True
 
     def _tab_title_character_budget(self, title, available_pixels, font_size):
-        """Limit the moving text to the area between favicon and close button."""
-        limit = min(len(title), max(6, int(self._custom("tab_title_chars", 28))))
+        """Use all text pixels available, without an arbitrary character limit."""
+        title = str(title or "")
         try:
             font = tkfont.Font(root=self.root, family=self._ui_font_family, size=font_size)
-            while limit > 1 and font.measure("W" * limit) > max(1, int(available_pixels)):
-                limit -= 1
-        except Exception:
-            limit = min(limit, max(1, int(available_pixels) // 11))
-        return max(1, limit)
+            return _tab_title_pixel_budget(title, available_pixels, font.measure)
+        except (tk.TclError, RuntimeError):
+            return max(1, min(len(title), int(available_pixels) // 8))
 
     def _tab_title_display(self, tab, title, chars):
         """Display a moving title with a visible hint at each hidden edge."""
@@ -4589,15 +4632,21 @@ class BrowserApp(BrowserFeatures):
             pass
 
     def _tab_pixel_width(self, title, pinned=False):
-        """Return the shared tab width for soft and classic tab styles."""
+        """Grow with the real title, up to the user-configured maximum width."""
         scale = max(0.75, float(self._custom("ui_scale", 1.0)))
         if pinned:
             return max(44, int(48 * scale))
         title = str(title or "New Tab")
-        title_chars = min(len(title), max(6, int(self._custom("tab_title_chars", 28))))
         min_width = max(90, int(self._custom("tab_min_width", 175)))
         max_width = max(min_width, int(self._custom("tab_max_width", 330)))
-        natural = int(78 + title_chars * 8.2)
+        try:
+            font_size = max(7, int(self._custom("tab_font_size", 9)))
+            font = tkfont.Font(root=self.root, family=self._ui_font_family, size=font_size)
+            title_pixels = font.measure(title)
+        except (tk.TclError, RuntimeError):
+            title_pixels = len(title) * 8
+        # Reserve room for the favicon, close icon, and Tk's inner padding.
+        natural = int(title_pixels + 92)
         return max(int(min_width * scale), min(int(max_width * scale), int(natural * scale)))
 
     @staticmethod
@@ -13002,7 +13051,6 @@ class BrowserApp(BrowserFeatures):
             check(grid, text, var).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 24), pady=3)
         tab_position_var = tk.StringVar(value=draft.get("tab_position", "above_toolbar"))
         new_tab_position_var = tk.StringVar(value=draft.get("new_tab_button_position", "right"))
-        tab_chars_var = tk.StringVar(value=str(draft.get("tab_title_chars", 28)))
         tab_min_width_var = tk.StringVar(value=str(draft.get("tab_min_width", 175)))
         tab_max_width_var = tk.StringVar(value=str(draft.get("tab_max_width", 330)))
         row = tk.Frame(tabs_page, bg=self.ui["bg"]); row.pack(fill="x", pady=(16, 4))
@@ -13010,8 +13058,6 @@ class BrowserApp(BrowserFeatures):
         ttk.Combobox(row, textvariable=tab_position_var, values=["above_toolbar", "below_toolbar"], state="readonly", width=16).pack(side="left", padx=(0, 18))
         label(row, "+ button position").pack(side="left")
         ttk.Combobox(row, textvariable=new_tab_position_var, values=["left", "right"], state="readonly", width=10).pack(side="left", padx=(6, 18))
-        label(row, "Tab title chars").pack(side="left")
-        entry(row, tab_chars_var, width=5).pack(side="left", padx=(6, 14), ipady=3)
         label(row, "Min width").pack(side="left")
         entry(row, tab_min_width_var, width=5).pack(side="left", padx=(6, 14), ipady=3)
         label(row, "Max width").pack(side="left")
@@ -13155,7 +13201,6 @@ class BrowserApp(BrowserFeatures):
                 custom[key] = bool(var.get())
             custom["tab_position"] = tab_position_var.get()
             custom["new_tab_button_position"] = new_tab_position_var.get()
-            custom["tab_title_chars"] = int_value(tab_chars_var, 28)
             custom["tab_min_width"] = int_value(tab_min_width_var, 175)
             custom["tab_max_width"] = int_value(tab_max_width_var, 330)
             custom["window_corner_radius"] = int_value(window_radius_var, 24)
@@ -13187,7 +13232,7 @@ class BrowserApp(BrowserFeatures):
             for item in TOOLBAR_ITEM_IDS:
                 visible_vars[item].set(bool(draft["toolbar_visible"].get(item, True)))
             for key, var in bool_vars.items(): var.set(bool(draft[key]))
-            tab_position_var.set(draft["tab_position"]); new_tab_position_var.set(draft["new_tab_button_position"]); tab_chars_var.set(str(draft["tab_title_chars"]))
+            tab_position_var.set(draft["tab_position"]); new_tab_position_var.set(draft["new_tab_button_position"])
             tab_min_width_var.set(str(draft["tab_min_width"])); tab_max_width_var.set(str(draft["tab_max_width"]))
             window_radius_var.set(str(draft["window_corner_radius"])); content_radius_var.set(str(draft["content_corner_radius"])); control_radius_var.set(str(draft["control_corner_radius"]))
             for key, var in heights.items(): var.set(str(draft[key]))
