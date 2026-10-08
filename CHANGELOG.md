@@ -1,3 +1,16 @@
+# v10.5.129 - Automatic extension updates with immediate activation
+
+- Automatically discovers signed manifest update URLs, Chrome Web Store identities, GitHub project links and uBlock Origin's official Chromium releases.
+- Checks enabled extensions in the background, normally once per day; failures retry after an hour.
+- Verifies CRX3 signatures against the existing extension key and checks published GitHub asset digests.
+- Swaps validated extension files and reloads only that extension using Chromium's hidden extension manager. Success requires the expected runtime version and enabled state; failures restore the old files and runtime.
+- Preserves extension paths, IDs and browser-profile settings. Staged updates can be recovered on the next startup if Chromium is unavailable during sign-in.
+- Adds automatic-update control, Check updates, source details and update status to Extension Manager.
+
+Extensions without identifiable update metadata are marked as having no update source. New permissions/site access and unsupported manifest-generation changes require a manual update. Built-in Tekzite services update with the browser. Content scripts already injected into an open page follow Chromium's normal lifecycle and may require that page to reload.
+
+Validation: 838 regression tests; live official uBlock Origin package discovery/staging/application and a live signed Chrome Web Store CRX/XML check. CI also tests immediate runtime activation, settings retention and hidden-target cleanup in disposable Chromium profiles on Windows and Linux.
+
 # v10.5.128 - Guard YouTube passkey completion
 
 - Removes title-only and history-only YouTube authentication completion shortcuts.

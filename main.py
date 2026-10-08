@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, quote_plus, urlsplit, urlunsplit, parse_qsl, urlencode
 from privacy_core import strip_tracking_parameters, upgrade_to_https
 import hagezi_privacy
+import extension_updates
 import loopback_policy
 
 from engine.net import (
@@ -353,6 +354,7 @@ DEFAULT_PREFERENCES = {
     # User-managed unpacked Chromium extensions. Tekzite's built-in local
     # services extension is always loaded separately and cannot be removed.
     "extensions": [],
+    "extensions_auto_update": True,
     # v10.2 productivity + resource controls.
     "sleeping_tabs_enabled": True,
     "sleeping_tabs_minutes": 30,
@@ -862,6 +864,7 @@ def _normalized_extension_entries(value):
             "path": normalized,
             "enabled": bool(item.get("enabled", True)),
             "pinned": bool(item.get("pinned", True)),
+            "auto_update": bool(item.get("auto_update", True)),
         })
     return result
 
@@ -887,6 +890,7 @@ def load_preferences():
         prefs.get("page_zoom_percent", 100)
     )
     prefs["extensions"] = _normalized_extension_entries(prefs.get("extensions", []))
+    prefs["extensions_auto_update"] = bool(prefs.get("extensions_auto_update", True))
     try:
         prefs["sleeping_tabs_minutes"] = max(5, min(240, int(prefs.get("sleeping_tabs_minutes", 30))))
     except Exception:
@@ -951,7 +955,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.128"
+BROWSER_VERSION = "10.5.129"
 
 
 
@@ -2241,6 +2245,11 @@ class BrowserApp(BrowserFeatures):
         self._google_auth_source_tab_id = None
         self._google_auth_refresh_pending_url = None
         self.preferences = load_preferences()
+        self._extension_updates_applied = []
+        if not getattr(self, "_private_mode", False):
+            self._extension_updates_applied = extension_updates.apply_pending(
+                self.preferences.get("extensions", []), _preferences_path().parent
+            )
         strict_python_loopback = bool(self.preferences.get("strict_python_loopback", True))
         os.environ["TEKZITE_STRICT_PYTHON_LOOPBACK"] = "1" if strict_python_loopback else "0"
         os.environ["TEKZITE_PRIVACY_LOCKDOWN"] = "1" if self.preferences.get("privacy_lockdown", True) else "0"
