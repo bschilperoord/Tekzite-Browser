@@ -1,3 +1,15 @@
+# v10.5.132 - Full-width tabs and website dark mode
+
+- Uses the available tab width for page titles, measured using the selected UI font rather than a fixed character count.
+- Expands tabs toward their configured maximum width before shortening a title, keeping favicons and close buttons visible.
+- Animates overflowing tab titles gently back and forth in Soft and Classic styles, using ellipses to identify hidden text at either end.
+- Keeps a static ellipsis when animation or quiet mode is enabled.
+- Enables native Chromium dark mode and auto-darkens light-only websites by default, with a per-profile option under Customize Tekzite > Behavior and a restart required when changed.
+- Preserves Chromium extension compatibility and avoids forced content recoloring in standalone authentication windows.
+- Adds regression coverage for title sizing, scrolling, overflow markers, quiet mode, website dark preferences and Chromium startup flags.
+
+Website darkening may not be perfect on every site. Review pages and login flows visually; disable the dark-websites option if a site renders incorrectly. Windows builds remain unsigned.
+
 # v10.5.131 - Preserve bundled resources across restart
 
 - Launches packaged restarts and independent browser windows with a fresh OneFile extraction.

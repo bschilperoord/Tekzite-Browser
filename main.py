@@ -323,6 +323,7 @@ DEFAULT_PREFERENCES = {
     "startup": "homepage",
     "restore_tabs": True,
     "quiet_mode": False,
+    "force_dark_websites": True,
     "adblock_sites": [],
     "new_tab": "blank",
     "renderer": "chromium",
@@ -365,6 +366,103 @@ DEFAULT_PREFERENCES = {
     "search_url_template": DEFAULT_SEARCH_URL_TEMPLATE,
     "customization": dict(DEFAULT_CUSTOMIZATION),
 }
+
+def _tab_title_pixel_budget(title, available_pixels, measure):
+    """Return the longest moving text window that fits its actual pixel width.
+
+    Preserve complete short titles, and reserve room for ellipsis markers when
+    either end is hidden. Character advances are cached for the measurement so
+    budget calculations do not block the Tk thread on hundreds of font calls.
+    """
+    title = str(title or "")
+    if not title:
+        return 1
+    available_pixels = max(1, int(available_pixels))
+    if measure(title) <= available_pixels:
+        return len(title)
+    widths = {ch: max(0, int(measure(ch))) for ch in set(title)}
+    prefix = [0]
+    for char in title:
+        prefix.append(prefix[-1] + widths[char])
+    ellipsis_width = max(0, int(measure("…")))
+    # A few spare pixels guard against kerning differences in Tk's renderer.
+    usable = max(1, available_pixels - 3)
+    def fits(chars):
+        for offset in range(len(title) - chars + 1):
+            left = offset > 0
+            right = offset + chars < len(title)
+            if left and right and chars <= 2:
+                pixels = ellipsis_width
+            else:
+                pixels = prefix[offset + chars] - prefix[offset]
+                if left:
+                    pixels += ellipsis_width - widths[title[offset]]
+                if right:
+                    pixels += ellipsis_width - widths[title[offset + chars - 1]]
+            if pixels > usable:
+                return False
+        return True
+    low, high = 1, len(title) - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(middle):
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+def _tab_title_window_state(title, visible_chars, elapsed_seconds, *, step_seconds=0.24, pause_seconds=0.8):
+    """Return the scrolling slice and offset while preserving both endpoint pauses."""
+    title = str(title or "")
+    visible_chars = max(1, int(visible_chars))
+    total_len = len(title)
+    if total_len <= visible_chars:
+        return title, 0, total_len, visible_chars
+    distance = total_len - visible_chars
+    travel = distance * step_seconds
+    cycle = 2 * (travel + pause_seconds)
+    position = max(0.0, float(elapsed_seconds)) % cycle
+    if position < pause_seconds:
+        offset = 0
+    elif position < pause_seconds + travel:
+        offset = min(distance, int((position - pause_seconds) / step_seconds))
+    elif position < 2 * pause_seconds + travel:
+        offset = distance
+    else:
+        offset = max(0, distance - int((position - 2 * pause_seconds - travel) / step_seconds))
+    return title[offset:offset + visible_chars], offset, total_len, visible_chars
+
+
+def _tab_title_window(title, visible_chars, elapsed_seconds, *, step_seconds=0.24, pause_seconds=0.8):
+    """Return the undecorated slice, preserving the existing motion contract."""
+    segment, _, _, _ = _tab_title_window_state(
+        title, visible_chars, elapsed_seconds,
+        step_seconds=step_seconds, pause_seconds=pause_seconds,
+    )
+    return segment
+
+
+def _decorate_tab_title_slice(segment, offset, total_len, visible_chars):
+    """Mark hidden edges without exceeding the available text width.
+
+    On very narrow tabs, prioritize a single ellipsis rather than displaying
+    two ellipses with no meaningful text between them.
+    """
+    segment = str(segment or "")
+    visible_chars = max(1, int(visible_chars))
+    if total_len <= visible_chars:
+        return segment
+    hidden_left = offset > 0
+    hidden_right = offset + visible_chars < total_len
+    if hidden_left and hidden_right and visible_chars <= 2:
+        return "…"
+    if visible_chars == 1:
+        return "…"
+    first = 1 if hidden_left else 0
+    last = len(segment) - (1 if hidden_right else 0)
+    return ("…" if hidden_left else "") + segment[first:last] + ("…" if hidden_right else "")
+
 
 def _profile_slug(value):
     value = re.sub(r"[^A-Za-z0-9._ -]+", "", str(value or "")).strip().replace(" ", "-")
@@ -898,6 +996,7 @@ def load_preferences():
     prefs["sleeping_tabs_enabled"] = bool(prefs.get("sleeping_tabs_enabled", True))
     prefs["omnibox_suggestions_enabled"] = bool(prefs.get("omnibox_suggestions_enabled", True))
     prefs["download_prompt"] = bool(prefs.get("download_prompt", False))
+    prefs["force_dark_websites"] = bool(prefs.get("force_dark_websites", True))
     prefs["strict_python_loopback"] = bool(prefs.get("strict_python_loopback", True))
     prefs["hagezi_enabled"] = bool(prefs.get("hagezi_enabled", True))
     prefs["hagezi_auto_update"] = bool(prefs.get("hagezi_auto_update", True))
@@ -955,7 +1054,7 @@ def save_preferences(prefs):
 
 
 
-BROWSER_VERSION = "10.5.131"
+BROWSER_VERSION = "10.5.132"
 
 
 
@@ -2257,6 +2356,7 @@ class BrowserApp(BrowserFeatures):
         os.environ["TEKZITE_HAGEZI_ENABLED"] = "1" if self.preferences.get("hagezi_enabled", True) else "0"
         os.environ["TEKZITE_STRIP_REFERRER"] = "1" if self.preferences.get("strip_referrer", True) else "0"
         os.environ["TEKZITE_HTTPS_FIRST"] = "1" if self.preferences.get("https_first", True) else "0"
+        os.environ["TEKZITE_DARK_WEBSITES"] = "1" if self.preferences.get("force_dark_websites", True) else "0"
         os.environ["TEKZITE_LOOPBACK_ROLE"] = "browser"
         os.environ["TEKZITE_LOOPBACK_AUDIT_LOG"] = str(_preferences_path().parent / "loopback-blocked.jsonl")
         # Process-local Python egress guard. Only ports registered by Tekzite's
@@ -2350,6 +2450,9 @@ class BrowserApp(BrowserFeatures):
         # navigation can resume the same animation instead of snapping.
         self._tab_open_animation_started = {}
         self._tab_open_animation_duration = 0.20
+        self._tab_marquee_targets = {}
+        self._tab_marquee_starts = {}
+        self._tab_marquee_after_id = None
         # v10.5.88: browser-style tab tear-off. A tab becomes detachable only
         # after a real pointer drag leaves an expanded tab-strip boundary, so a
         # slightly sloppy click never spawns another browser window.
@@ -4432,6 +4535,64 @@ class BrowserApp(BrowserFeatures):
             frame()
         return True
 
+    def _tab_title_character_budget(self, title, available_pixels, font_size):
+        """Use all text pixels available, without an arbitrary character limit."""
+        title = str(title or "")
+        try:
+            font = tkfont.Font(root=self.root, family=self._ui_font_family, size=font_size)
+            return _tab_title_pixel_budget(title, available_pixels, font.measure)
+        except (tk.TclError, RuntimeError):
+            return max(1, min(len(title), int(available_pixels) // 8))
+
+    def _tab_title_display(self, tab, title, chars):
+        """Display a moving title with a visible hint at each hidden edge."""
+        title = str(title or "")
+        chars = max(1, int(chars))
+        if len(title) <= chars:
+            return title
+        if not self._motion_enabled():
+            # Reduced-motion and quiet modes still need a non-abrupt ending.
+            return _decorate_tab_title_slice(title[:chars], 0, len(title), chars)
+        tid = tab.get("id")
+        state = self._tab_marquee_starts.get(tid)
+        if state is None or state[0] != title:
+            state = (title, time.monotonic())
+            self._tab_marquee_starts[tid] = state
+        segment, offset, total_len, visible_chars = _tab_title_window_state(
+            title, chars, time.monotonic() - state[1]
+        )
+        return _decorate_tab_title_slice(segment, offset, total_len, visible_chars)
+
+    def _schedule_tab_marquee(self):
+        if self._tab_marquee_after_id is not None or not self._motion_enabled():
+            return
+        if any(len(t["title"]) > t["chars"] for t in self._tab_marquee_targets.values()):
+            self._tab_marquee_after_id = self.root.after(125, self._tick_tab_marquee)
+
+    def _tick_tab_marquee(self):
+        """Update text only, without recreating widgets or touching Chromium."""
+        self._tab_marquee_after_id = None
+        if getattr(self, "_closing", False) or not self._motion_enabled():
+            return
+        for tid, target in list(self._tab_marquee_targets.items()):
+            widget = target["widget"]
+            try:
+                if not widget.winfo_exists() or len(target["title"]) <= target["chars"]:
+                    continue
+                tab = next((t for t in self.tabs if t.get("id") == tid), None)
+                if tab is None:
+                    continue
+                text = self._tab_title_display(tab, target["title"], target["chars"])
+                if text != target["last_text"]:
+                    if target["style"] == "soft":
+                        widget.itemconfigure(target["text_item"], text=text)
+                    else:
+                        widget.configure(text=text)
+                    target["last_text"] = text
+            except (tk.TclError, RuntimeError):
+                continue
+        self._schedule_tab_marquee()
+
     def _draw_soft_tab(self, canvas, tab, active, hovered=False):
         try:
             canvas.delete("all")
@@ -4452,15 +4613,15 @@ class BrowserApp(BrowserFeatures):
             else:
                 glyph = "☾" if tab.get("sleeping") else ("◌" if tab.get("loading") else "◇")
                 canvas.create_text(icon_x, height / 2, text=glyph, fill=self.ui["accent_hover"] if tab.get("loading") else self.ui["muted_dim"], font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))))
-            title = str(tab.get("title") or "New Tab")
-            title_chars = max(6, int(self._custom("tab_title_chars", 28)))
-            if tab.get("pinned"):
-                title = ""
-            else:
-                title = title[:title_chars]
+            full_title = str(tab.get("title") or "New Tab")
             close_visible = (not tab.get("pinned")) and self._custom("show_tab_close_buttons", True)
             close_space = 28 if close_visible else 10
-            canvas.create_text(icon_x + 15, height / 2, text=title, anchor="w", fill=self.ui["text"] if active or hovered else self.ui["muted"], font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))))
+            font_size = max(7, int(self._custom("tab_font_size", 9)))
+            chars = self._tab_title_character_budget(full_title, width - (icon_x + 15) - close_space - 7, font_size)
+            title = "" if tab.get("pinned") else self._tab_title_display(tab, full_title, chars)
+            text_item = canvas.create_text(icon_x + 15, height / 2, text=title, anchor="w", fill=self.ui["text"] if active or hovered else self.ui["muted"], font=(self._ui_font_family, font_size))
+            if not tab.get("pinned"):
+                self._tab_marquee_targets[tab["id"]] = {"widget": canvas, "style": "soft", "text_item": text_item, "title": full_title, "chars": chars, "last_text": title}
             if close_visible:
                 close_x = width - 16
                 close_fill = self.ui["text"] if hovered else self.ui["muted_dim"]
@@ -4471,15 +4632,21 @@ class BrowserApp(BrowserFeatures):
             pass
 
     def _tab_pixel_width(self, title, pinned=False):
-        """Return the shared tab width for soft and classic tab styles."""
+        """Grow with the real title, up to the user-configured maximum width."""
         scale = max(0.75, float(self._custom("ui_scale", 1.0)))
         if pinned:
             return max(44, int(48 * scale))
         title = str(title or "New Tab")
-        title_chars = min(len(title), max(6, int(self._custom("tab_title_chars", 28))))
         min_width = max(90, int(self._custom("tab_min_width", 175)))
         max_width = max(min_width, int(self._custom("tab_max_width", 330)))
-        natural = int(78 + title_chars * 8.2)
+        try:
+            font_size = max(7, int(self._custom("tab_font_size", 9)))
+            font = tkfont.Font(root=self.root, family=self._ui_font_family, size=font_size)
+            title_pixels = font.measure(title)
+        except (tk.TclError, RuntimeError):
+            title_pixels = len(title) * 8
+        # Reserve room for the favicon, close icon, and Tk's inner padding.
+        natural = int(title_pixels + 92)
         return max(int(min_width * scale), min(int(max_width * scale), int(natural * scale)))
 
     @staticmethod
@@ -4706,6 +4873,9 @@ class BrowserApp(BrowserFeatures):
         for child in self.tab_items.winfo_children():
             if child is not getattr(self, "new_tab_button", None):
                 child.destroy()
+        self._tab_marquee_targets = {}
+        live_ids = {tab.get("id") for tab in self.tabs}
+        self._tab_marquee_starts = {tid: value for tid, value in self._tab_marquee_starts.items() if tid in live_ids}
 
         groups = self._normalized_tab_groups()
         group_rows = groups.items() if self._custom("show_tab_group_chips", True) else ()
@@ -4763,10 +4933,11 @@ class BrowserApp(BrowserFeatures):
             )
             icon.pack(side="left")
             title = str(tab.get("title") or "New Tab")
-            title_chars = max(6, int(self._custom("tab_title_chars", 28)))
+            chars = self._tab_title_character_budget(title, target_tab_width - 82, max(7, int(self._custom("tab_font_size", 9))))
+            display_title = title[:1] if tab.get("pinned") else self._tab_title_display(tab, title, chars)
             label = tk.Label(
                 body,
-                text=(title[:1] if tab.get("pinned") else title[:title_chars]),
+                text=display_title,
                 bg=normal_bg,
                 fg=normal_fg,
                 font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))),
@@ -4775,6 +4946,8 @@ class BrowserApp(BrowserFeatures):
                 cursor="hand2",
             )
             label.pack(side="left")
+            if not tab.get("pinned"):
+                self._tab_marquee_targets[tab["id"]] = {"widget": label, "style": "classic", "title": title, "chars": chars, "last_text": display_title}
             def classic_press(event, tid=tab["id"], fr=frame):
                 return self._begin_tab_drag(tid, event, fr)
 
@@ -4850,6 +5023,7 @@ class BrowserApp(BrowserFeatures):
             self._animate_opening_tab_widget(tab.get("id"), frame, target_tab_width)
 
         self._place_new_tab_button_inline()
+        self._schedule_tab_marquee()
 
     @staticmethod
     def _clear_tab_favicon(tab):
@@ -12877,7 +13051,6 @@ class BrowserApp(BrowserFeatures):
             check(grid, text, var).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 24), pady=3)
         tab_position_var = tk.StringVar(value=draft.get("tab_position", "above_toolbar"))
         new_tab_position_var = tk.StringVar(value=draft.get("new_tab_button_position", "right"))
-        tab_chars_var = tk.StringVar(value=str(draft.get("tab_title_chars", 28)))
         tab_min_width_var = tk.StringVar(value=str(draft.get("tab_min_width", 175)))
         tab_max_width_var = tk.StringVar(value=str(draft.get("tab_max_width", 330)))
         row = tk.Frame(tabs_page, bg=self.ui["bg"]); row.pack(fill="x", pady=(16, 4))
@@ -12885,8 +13058,6 @@ class BrowserApp(BrowserFeatures):
         ttk.Combobox(row, textvariable=tab_position_var, values=["above_toolbar", "below_toolbar"], state="readonly", width=16).pack(side="left", padx=(0, 18))
         label(row, "+ button position").pack(side="left")
         ttk.Combobox(row, textvariable=new_tab_position_var, values=["left", "right"], state="readonly", width=10).pack(side="left", padx=(6, 18))
-        label(row, "Tab title chars").pack(side="left")
-        entry(row, tab_chars_var, width=5).pack(side="left", padx=(6, 14), ipady=3)
         label(row, "Min width").pack(side="left")
         entry(row, tab_min_width_var, width=5).pack(side="left", padx=(6, 14), ipady=3)
         label(row, "Max width").pack(side="left")
@@ -12923,6 +13094,7 @@ class BrowserApp(BrowserFeatures):
         newtab_var = tk.StringVar(value=str(self.preferences.get("new_tab", "blank")))
         zoom_var = tk.StringVar(value=f"{self._page_zoom_percent()}%")
         statusbar_var = tk.BooleanVar(value=bool(self.preferences.get("show_status_bar", True)))
+        dark_websites_var = tk.BooleanVar(value=bool(self.preferences.get("force_dark_websites", True)))
 
         homepage_row = tk.Frame(behavior_page, bg=self.ui["bg"])
         homepage_row.pack(fill="x", pady=(4, 5))
@@ -12971,6 +13143,7 @@ class BrowserApp(BrowserFeatures):
         label(row, "Page zoom").pack(side="left")
         ttk.Combobox(row, textvariable=zoom_var, values=["75%", "80%", "90%", "100%", "110%", "125%", "150%", "175%", "200%"], width=8).pack(side="left", padx=(6, 0))
         check(behavior_page, "Show status bar", statusbar_var).pack(anchor="w", pady=(12, 3))
+        check(behavior_page, "Always use dark mode for websites (restart required)", dark_websites_var).pack(anchor="w", pady=3)
 
         # Advanced -----------------------------------------------------------
         window_width_var = tk.StringVar(value=str(draft.get("window_width", 1280)))
@@ -13028,7 +13201,6 @@ class BrowserApp(BrowserFeatures):
                 custom[key] = bool(var.get())
             custom["tab_position"] = tab_position_var.get()
             custom["new_tab_button_position"] = new_tab_position_var.get()
-            custom["tab_title_chars"] = int_value(tab_chars_var, 28)
             custom["tab_min_width"] = int_value(tab_min_width_var, 175)
             custom["tab_max_width"] = int_value(tab_max_width_var, 330)
             custom["window_corner_radius"] = int_value(window_radius_var, 24)
@@ -13060,7 +13232,7 @@ class BrowserApp(BrowserFeatures):
             for item in TOOLBAR_ITEM_IDS:
                 visible_vars[item].set(bool(draft["toolbar_visible"].get(item, True)))
             for key, var in bool_vars.items(): var.set(bool(draft[key]))
-            tab_position_var.set(draft["tab_position"]); new_tab_position_var.set(draft["new_tab_button_position"]); tab_chars_var.set(str(draft["tab_title_chars"]))
+            tab_position_var.set(draft["tab_position"]); new_tab_position_var.set(draft["new_tab_button_position"])
             tab_min_width_var.set(str(draft["tab_min_width"])); tab_max_width_var.set(str(draft["tab_max_width"]))
             window_radius_var.set(str(draft["window_corner_radius"])); content_radius_var.set(str(draft["content_corner_radius"])); control_radius_var.set(str(draft["control_corner_radius"]))
             for key, var in heights.items(): var.set(str(draft[key]))
@@ -13127,6 +13299,8 @@ class BrowserApp(BrowserFeatures):
             self.preferences["new_tab"] = newtab_var.get()
             self.preferences["page_zoom_percent"] = _normalized_zoom_percent(zoom_var.get(), self._page_zoom_percent())
             self.preferences["show_status_bar"] = bool(statusbar_var.get())
+            dark_mode_changed = bool(self.preferences.get("force_dark_websites", True)) != bool(dark_websites_var.get())
+            self.preferences["force_dark_websites"] = bool(dark_websites_var.get())
             try:
                 save_preferences(self.preferences)
             except Exception as exc:
@@ -13135,7 +13309,7 @@ class BrowserApp(BrowserFeatures):
             self._apply_customization_runtime()
             self._apply_chromium_zoom_to_all_tabs()
             self._schedule_chromium_zoom_apply(all_tabs=True)
-            self.status_var.set("Customization saved for this profile")
+            self.status_var.set("Customization saved; restart Tekzite to apply website dark mode" if dark_mode_changed else "Customization saved for this profile")
             win.destroy()
 
         def cancel():
