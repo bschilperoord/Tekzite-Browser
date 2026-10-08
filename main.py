@@ -146,13 +146,13 @@ DEFAULT_CUSTOMIZATION = {
     "font_family": "",
     "display_font_family": "",
     "monospace_font_family": "",
-    "font_size": 11,
-    "menu_font_size": 10,
-    "tab_font_size": 10,
-    "toolbar_font_size": 11,
+    "font_size": 13,
+    "menu_font_size": 12,
+    "tab_font_size": 12,
+    "toolbar_font_size": 13,
     "ui_scale": 1.0,
     "density": "comfortable",
-    "spacing_generation": 3,
+    "spacing_generation": 4,
     "animations": True,
     "window_control_style": "traffic_lights",
     "tab_style": "soft",
@@ -186,11 +186,11 @@ DEFAULT_CUSTOMIZATION = {
     "show_chrome_separator": True,
     "show_status_activity_dot": True,
     "show_status_version": True,
-    "app_bar_height": 40,
-    "tab_bar_height": 46,
-    "toolbar_height": 62,
-    "status_bar_height": 26,
-    "find_bar_height": 40,
+    "app_bar_height": 50,
+    "tab_bar_height": 58,
+    "toolbar_height": 78,
+    "status_bar_height": 36,
+    "find_bar_height": 50,
     "window_width": 1440,
     "window_height": 900,
     "window_min_width": 960,
@@ -204,8 +204,8 @@ def _valid_hex_color(value, fallback):
 
 def _normalized_customization(value):
     src = value if isinstance(value, dict) else {}
-    # v10.5.104: migrate only untouched historical spacing baselines to
-    # the tighter shell. Any user-adjusted size/density keeps its values.
+    # Migrate untouched historical layouts to the larger readable shell.
+    # Preserve explicitly adjusted size and density settings.
     legacy_layout = {
         "font_size": 10, "tab_font_size": 9, "toolbar_font_size": 10,
         "ui_scale": 1.0, "density": "comfortable", "tab_title_chars": 24,
@@ -226,13 +226,20 @@ def _normalized_customization(value):
         "window_width": 1440, "window_height": 900,
         "window_min_width": 960, "window_min_height": 640,
     }
+    previous_layout = {
+        "font_size": 11, "menu_font_size": 10, "tab_font_size": 10,
+        "toolbar_font_size": 11, "ui_scale": 1.0, "density": "comfortable",
+        "app_bar_height": 40, "tab_bar_height": 46, "toolbar_height": 62,
+        "status_bar_height": 26, "find_bar_height": 40,
+    }
     if src:
         try:
             spacing_generation = int(src.get("spacing_generation", 1) or 1)
         except Exception:
             spacing_generation = 1
-        if spacing_generation < 3:
-            expected_layout = legacy_layout if spacing_generation < 2 else spacious_layout
+        if spacing_generation < 4:
+            expected_layout = (legacy_layout if spacing_generation < 2 else
+                               spacious_layout if spacing_generation < 3 else previous_layout)
             untouched = all(
                 src.get(key, expected) == expected
                 for key, expected in expected_layout.items()
@@ -241,7 +248,7 @@ def _normalized_customization(value):
             if untouched:
                 for key in expected_layout:
                     src[key] = DEFAULT_CUSTOMIZATION[key]
-            src["spacing_generation"] = 3
+            src["spacing_generation"] = 4
     out = dict(DEFAULT_CUSTOMIZATION)
     default_colors = dict(DEFAULT_CUSTOMIZATION.get("colors") or UI_COLOR_DEFAULTS)
     raw_colors = src.get("colors") if isinstance(src.get("colors"), dict) else {}
@@ -277,7 +284,7 @@ def _normalized_customization(value):
     except Exception:
         out["ui_scale"] = 1.0
     out["density"] = str(out.get("density") or "comfortable") if str(out.get("density") or "comfortable") in ("compact", "comfortable", "spacious") else "comfortable"
-    out["spacing_generation"] = 3
+    out["spacing_generation"] = 4
     out["window_control_style"] = str(out.get("window_control_style") or "traffic_lights") if str(out.get("window_control_style") or "traffic_lights") in ("tekzite", "traffic_lights") else "traffic_lights"
     out["tab_style"] = str(out.get("tab_style") or "soft") if str(out.get("tab_style") or "soft") in ("soft", "classic") else "soft"
     out["toolbar_label_style"] = str(out.get("toolbar_label_style") or "icons") if str(out.get("toolbar_label_style") or "icons") in ("icons", "text", "both") else "icons"
@@ -301,54 +308,6 @@ def _normalized_customization(value):
     out["monospace_font_family"] = str(out.get("monospace_font_family") or "").strip()[:80]
     out["preset"] = str(out.get("preset") or "Custom")[:40]
     return out
-
-
-DEFAULT_PREFERENCES = {
-    "homepage": START_URL,
-    "startup": "homepage",
-    "restore_tabs": True,
-    "quiet_mode": False,
-    "adblock_sites": [],
-    "new_tab": "blank",
-    "renderer": "chromium",
-    "reuse_open_tabs": True,
-    # v10.5.48: local-only omnibox suggestions. No query is sent to a remote
-    # autocomplete service; suggestions come from Tekzite-owned local/session data.
-    "omnibox_suggestions_enabled": True,
-    "show_status_bar": True,
-    # v4.68: real native Chromium interaction is the default. The CDP
-    # screenshot surface remains available only as an explicit diagnostic mode.
-    "chromium_presentation": "native",
-    # v4.56 privacy-first defaults.
-    "network_diagnostics": "off",
-    "strict_python_loopback": True,
-    # Privacy Core controls browser/network protections. Data lifetime is
-    # independent: Private Window is ephemeral, while normal profiles persist
-    # unless the user explicitly enables clear_browsing_data_on_exit.
-    "privacy_lockdown": True,
-    "tracker_blocking_enabled": True,
-    "strip_tracking_parameters": True,
-    "strip_referrer": True,
-    "https_first": True,
-    "clear_browsing_data_on_exit": False,
-    "page_zoom_percent": 100,
-    "adblock_enabled": True,
-    "hagezi_enabled": True,
-    "hagezi_auto_update": True,
-    "hagezi_allowlist": [],
-    # User-managed unpacked Chromium extensions. Tekzite's built-in local
-    # services extension is always loaded separately and cannot be removed.
-    "extensions": [],
-    # v10.2 productivity + resource controls.
-    "sleeping_tabs_enabled": True,
-    "sleeping_tabs_minutes": 30,
-    "tab_groups": {},
-    "site_permissions": {},
-    "download_prompt": False,
-    "update_repository": "",
-    "search_url_template": DEFAULT_SEARCH_URL_TEMPLATE,
-    "customization": dict(DEFAULT_CUSTOMIZATION),
-}
 
 def _profile_slug(value):
     value = re.sub(r"[^A-Za-z0-9._ -]+", "", str(value or "")).strip().replace(" ", "-")
