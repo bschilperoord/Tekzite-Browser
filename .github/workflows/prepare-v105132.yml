@@ -26,6 +26,7 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "22"
+      # README's release-line trailing spaces are normalized before this job runs.
       - name: Synchronize all version metadata and current tests
         shell: pwsh
         run: |
