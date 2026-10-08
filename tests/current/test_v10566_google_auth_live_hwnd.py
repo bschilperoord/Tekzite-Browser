@@ -6,7 +6,7 @@ import engine.net as net
 
 
 def test_release_version_is_current():
-    assert main.BROWSER_VERSION == "10.5.129"
+    assert main.BROWSER_VERSION == "10.5.130"
 
 
 def test_live_youtube_window_title_is_return_hint(monkeypatch):
