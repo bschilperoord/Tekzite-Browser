@@ -367,13 +367,14 @@ DEFAULT_PREFERENCES = {
     "customization": dict(DEFAULT_CUSTOMIZATION),
 }
 
-def _tab_title_window(title, visible_chars, elapsed_seconds, *, step_seconds=0.24, pause_seconds=0.8):
-    """Read all of a long title with a paused, back-and-forth character window."""
+def _tab_title_window_state(title, visible_chars, elapsed_seconds, *, step_seconds=0.24, pause_seconds=0.8):
+    """Return the scrolling slice and offset while preserving both endpoint pauses."""
     title = str(title or "")
     visible_chars = max(1, int(visible_chars))
-    if len(title) <= visible_chars:
-        return title
-    distance = len(title) - visible_chars
+    total_len = len(title)
+    if total_len <= visible_chars:
+        return title, 0, total_len, visible_chars
+    distance = total_len - visible_chars
     travel = distance * step_seconds
     cycle = 2 * (travel + pause_seconds)
     position = max(0.0, float(elapsed_seconds)) % cycle
@@ -385,7 +386,37 @@ def _tab_title_window(title, visible_chars, elapsed_seconds, *, step_seconds=0.2
         offset = distance
     else:
         offset = max(0, distance - int((position - 2 * pause_seconds - travel) / step_seconds))
-    return title[offset:offset + visible_chars]
+    return title[offset:offset + visible_chars], offset, total_len, visible_chars
+
+
+def _tab_title_window(title, visible_chars, elapsed_seconds, *, step_seconds=0.24, pause_seconds=0.8):
+    """Return the undecorated slice, preserving the existing motion contract."""
+    segment, _, _, _ = _tab_title_window_state(
+        title, visible_chars, elapsed_seconds,
+        step_seconds=step_seconds, pause_seconds=pause_seconds,
+    )
+    return segment
+
+
+def _decorate_tab_title_slice(segment, offset, total_len, visible_chars):
+    """Mark hidden edges without exceeding the available text width.
+
+    On very narrow tabs, prioritize a single ellipsis rather than displaying
+    two ellipses with no meaningful text between them.
+    """
+    segment = str(segment or "")
+    visible_chars = max(1, int(visible_chars))
+    if total_len <= visible_chars:
+        return segment
+    hidden_left = offset > 0
+    hidden_right = offset + visible_chars < total_len
+    if hidden_left and hidden_right and visible_chars <= 2:
+        return "…"
+    if visible_chars == 1:
+        return "…"
+    first = 1 if hidden_left else 0
+    last = len(segment) - (1 if hidden_right else 0)
+    return ("…" if hidden_left else "") + segment[first:last] + ("…" if hidden_right else "")
 
 
 def _profile_slug(value):
@@ -4471,14 +4502,23 @@ class BrowserApp(BrowserFeatures):
         return max(1, limit)
 
     def _tab_title_display(self, tab, title, chars):
-        if not self._motion_enabled() or len(title) <= chars:
-            return title[:chars]
+        """Display a moving title with a visible hint at each hidden edge."""
+        title = str(title or "")
+        chars = max(1, int(chars))
+        if len(title) <= chars:
+            return title
+        if not self._motion_enabled():
+            # Reduced-motion and quiet modes still need a non-abrupt ending.
+            return _decorate_tab_title_slice(title[:chars], 0, len(title), chars)
         tid = tab.get("id")
         state = self._tab_marquee_starts.get(tid)
         if state is None or state[0] != title:
             state = (title, time.monotonic())
             self._tab_marquee_starts[tid] = state
-        return _tab_title_window(title, chars, time.monotonic() - state[1])
+        segment, offset, total_len, visible_chars = _tab_title_window_state(
+            title, chars, time.monotonic() - state[1]
+        )
+        return _decorate_tab_title_slice(segment, offset, total_len, visible_chars)
 
     def _schedule_tab_marquee(self):
         if self._tab_marquee_after_id is not None or not self._motion_enabled():
