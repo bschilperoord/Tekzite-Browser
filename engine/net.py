@@ -8521,6 +8521,8 @@ def embedded_chromium_debug_report():
     lines.append(f"visible_surface_software_fallback: {session.get('visible_surface_software_fallback')}")
     lines.append(f"visible_surface_probe_error: {session.get('visible_surface_probe_error')}")
     lines.append(f"visible_surface_probe_details: {session.get('visible_surface_probe_details')}")
+    lines.append(f"dwm_stall_evidence_before: {session.get('dwm_stall_evidence_before')}")
+    lines.append(f"dwm_stall_evidence_after: {session.get('dwm_stall_evidence_after')}")
     lines.append(f"native_resize_recovery_attempted: {session.get('native_resize_recovery_attempted')}")
     lines.append(f"native_resize_recovery_viewport: {session.get('native_resize_recovery_viewport')}")
     lines.append(f"native_resize_recovery_succeeded: {session.get('native_resize_recovery_succeeded')}")
@@ -11302,6 +11304,122 @@ def capture_embedded_chromium_frame(timeout: int = 4, target_id: str = None, vie
 
     raise RuntimeError(f"Chromium software frame contract failed: {last_problem or 'unknown mismatch'}")
 
+
+
+def _dwm_stall_classification(screen_blank, cdp_result):
+    """Compare independently sampled screen and Chromium frames, not page text."""
+    if not screen_blank:
+        return "no-visible-stall"
+    if cdp_result.get("valid") and cdp_result.get("visual"):
+        return "chromium-cdp-frame-visible-dwm-screen-blank"
+    if cdp_result.get("valid"):
+        return "chromium-cdp-frame-also-blank"
+    return "chromium-cdp-frame-unavailable"
+
+
+def diagnose_embedded_chromium_dwm_stall(target_id=None, *, phase="before-repair", timeout=1.5):
+    """Collect metadata-only evidence while a verified DWM surface is white.
+
+    The CDP PNG is analyzed in memory and discarded immediately. No screenshots,
+    web content, cookies, full URLs, or DOM text are recorded. This is a bounded
+    worker-only diagnostic, never something to run on Tk's main event loop.
+    """
+    session = _CHROMIUM_SESSION
+    if not session:
+        return {"reason": "no-session"}
+    target = str(target_id or session.get("target_id") or "")
+    if not target or target != str(session.get("target_id") or ""):
+        return {"reason": "stale-target"}
+    evidence = {
+        "phase": str(phase),
+        "navigation_generation": session.get("navigation_generation"),
+        "source_parked": bool(session.get("dwm_source_parked")),
+        "source_park_position": session.get("dwm_source_park_position"),
+        "thumbnail_registered": bool(session.get("dwm_thumbnail_registered")),
+        "thumbnail_visible": bool(session.get("dwm_thumbnail_visible")),
+        "thumbnail_source_rect": session.get("dwm_thumbnail_source_rect"),
+        "thumbnail_destination_rect": session.get("dwm_thumbnail_destination_rect"),
+        "render_host_hwnd": session.get("dwm_source_render_hwnd") or session.get("render_hwnd"),
+        "source_hwnd": session.get("dwm_source_hwnd"),
+        "destination_hwnd": session.get("dwm_destination_hwnd"),
+    }
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = _typed_user32()
+            dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+            for name, raw in (
+                ("source", evidence["source_hwnd"]),
+                ("destination", evidence["destination_hwnd"]),
+                ("render_host", evidence["render_host_hwnd"]),
+            ):
+                hwnd = _hwnd_int(raw or 0)
+                facts = {"valid": bool(hwnd and user32.IsWindow(_as_hwnd(hwnd)))}
+                if facts["valid"]:
+                    facts["visible"] = bool(user32.IsWindowVisible(_as_hwnd(hwnd)))
+                    facts["minimized"] = bool(user32.IsIconic(_as_hwnd(hwnd)))
+                    rect = wintypes.RECT()
+                    if user32.GetWindowRect(_as_hwnd(hwnd), ctypes.byref(rect)):
+                        facts["rect"] = (
+                            int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+                        )
+                        facts["size"] = (
+                            int(rect.right - rect.left), int(rect.bottom - rect.top)
+                        )
+                    cloaked = wintypes.DWORD()
+                    hr = int(dwmapi.DwmGetWindowAttribute(
+                        _as_hwnd(hwnd), 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)
+                    ))
+                    facts["dwm_cloaked_hresult"] = f"0x{hr & 0xffffffff:08X}"
+                    if hr == 0:
+                        facts["dwm_cloaked"] = int(cloaked.value)
+                evidence[name] = facts
+            thumb = _hwnd_int(session.get("dwm_thumbnail_handle") or 0)
+            if thumb:
+                dims = wintypes.SIZE()
+                hr = int(dwmapi.DwmQueryThumbnailSourceSize(
+                    wintypes.HANDLE(thumb), ctypes.byref(dims)
+                ))
+                evidence["thumbnail_source_size_hresult"] = f"0x{hr & 0xffffffff:08X}"
+                if hr == 0:
+                    evidence["thumbnail_source_size"] = (int(dims.cx), int(dims.cy))
+        except Exception as exc:
+            evidence["win32_error"] = type(exc).__name__
+    # This probes Chromium's frame *separately* from ImageGrab's DWM output.
+    # It must be captured before any reregister/resize can destroy the evidence.
+    metrics = {"valid": False, "visual": False}
+    try:
+        result = _persistent_page_cdp_call(
+            session, "Page.captureScreenshot",
+            {
+                "format": "png", "fromSurface": True,
+                "captureBeyondViewport": False, "optimizeForSpeed": True,
+            },
+            target_id=target, timeout=max(0.35, min(float(timeout), 2.5)),
+            purpose="capture",
+        )
+        png = (result or {}).get("data", "")
+        evidence["cdp_screenshot_received"] = bool(png)
+        metrics = _analyze_embedded_frame_png(png)
+    except Exception as exc:
+        evidence["cdp_capture_error"] = type(exc).__name__
+    evidence["cdp_frame"] = {
+        "valid": bool(metrics.get("valid")),
+        "visual": bool(metrics.get("visual")),
+        "width": metrics.get("width"),
+        "height": metrics.get("height"),
+        "black_ratio": metrics.get("black_ratio") if metrics.get("valid") else None,
+        "white_ratio": metrics.get("white_ratio") if metrics.get("valid") else None,
+        "span": metrics.get("channel_span") if metrics.get("valid") else None,
+    }
+    evidence["classification"] = _dwm_stall_classification(True, metrics)
+    # Both branches correspond to the same session and target; do not overwrite
+    # a later navigation's evidence if the user navigated during the probe.
+    if _CHROMIUM_SESSION is session and target == str(session.get("target_id") or ""):
+        key = "dwm_stall_evidence_before" if phase == "before-repair" else "dwm_stall_evidence_after"
+        session[key] = evidence
+    return evidence
 
 
 def record_embedded_surface_probe(blank, span=None, dominant=None, attempt=1, fallback=False, error=None, details=None):
