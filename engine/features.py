@@ -159,6 +159,14 @@ def extension_reloader(session=None):
             row = paths.get(path_key(path))
             if not row or row.get('state') != 'ENABLED':
                 raise RuntimeError('Extension is not enabled at its configured path')
+            # Tekzite loads user-installed extensions unpacked. Chromium requires
+            # developer mode for their reload even when command-line loading worked.
+            setup = net._cdp_call(ws, 'Runtime.evaluate', {
+                'expression': 'chrome.developerPrivate.updateProfileConfiguration({inDeveloperMode:true})',
+                'awaitPromise': True, 'returnByValue': True,
+            }, timeout=3)
+            if setup.get('exceptionDetails'):
+                raise RuntimeError('Chromium did not allow unpacked extension reload')
             # Do not await Chromium's unpacked-load observer: some builds can
             # finish loading before it attaches. Verify the runtime separately.
             expression = 'chrome.developerPrivate.reload(%s,{failQuietly:true,populateErrorForUnpacked:false})' % json.dumps(row['id'])
