@@ -355,3 +355,19 @@ def test_copy_update_debug_puts_json_on_clipboard(installed):
     report = json.loads(app.root.clipboard_append.call_args.args[0])
     assert report['check_error'] == 'offline'
     assert report['extensions'][0]['installed_version'] == '1.0'
+
+
+def test_check_wide_error_is_retained_for_debug(installed):
+    from browser_state import read_json
+    path, profile, entries, _ = installed
+    app = Mock()
+    app._closing = False
+    app._state_directory = profile
+    app._extension_update_future = Mock()
+    app._extension_update_future.done.return_value = True
+    app._extension_update_future.result.side_effect = OSError('Chromium unavailable')
+    app._extension_update_callbacks = []
+    BrowserFeatures._poll_extension_updates(app)
+    assert app._extension_update_last_results['check']['error'] == 'Chromium unavailable'
+    cached = read_json(updates.cache_dir(profile) / 'last-check.json', {})
+    assert cached['check']['state'] == 'error'

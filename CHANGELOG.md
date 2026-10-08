@@ -1,3 +1,14 @@
+# v10.5.130 - Clear extension update results and copyable diagnostics
+
+- Distinguishes updated, pending, current, missing-source, unchecked and ineligible extensions.
+- Adds Copy Update Debug to Extension Manager, including configured and runtime versions, source discovery, check phase, timestamps and activation errors.
+- Retains check-wide failures for debugging after the check and across browser restarts.
+- Excludes cookies, signing keys, extension folders and URL credentials/query strings from copied diagnostics.
+- Ignores stale update records for extensions that are no longer configured.
+- Adds regression tests for result summaries, redaction, removed extensions, clipboard output and persisted check failures.
+
+This release improves diagnosis of update checks; the cause of a reported zero-update result still needs the copied debug report.
+
 # v10.5.129 - Automatic extension updates with immediate activation
 
 - Automatically discovers signed manifest update URLs, Chrome Web Store identities, GitHub project links and uBlock Origin's official Chromium releases.
