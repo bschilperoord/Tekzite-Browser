@@ -323,6 +323,7 @@ DEFAULT_PREFERENCES = {
     "startup": "homepage",
     "restore_tabs": True,
     "quiet_mode": False,
+    "force_dark_websites": True,
     "adblock_sites": [],
     "new_tab": "blank",
     "renderer": "chromium",
@@ -365,6 +366,27 @@ DEFAULT_PREFERENCES = {
     "search_url_template": DEFAULT_SEARCH_URL_TEMPLATE,
     "customization": dict(DEFAULT_CUSTOMIZATION),
 }
+
+def _tab_title_window(title, visible_chars, elapsed_seconds, *, step_seconds=0.24, pause_seconds=0.8):
+    """Read all of a long title with a paused, back-and-forth character window."""
+    title = str(title or "")
+    visible_chars = max(1, int(visible_chars))
+    if len(title) <= visible_chars:
+        return title
+    distance = len(title) - visible_chars
+    travel = distance * step_seconds
+    cycle = 2 * (travel + pause_seconds)
+    position = max(0.0, float(elapsed_seconds)) % cycle
+    if position < pause_seconds:
+        offset = 0
+    elif position < pause_seconds + travel:
+        offset = min(distance, int((position - pause_seconds) / step_seconds))
+    elif position < 2 * pause_seconds + travel:
+        offset = distance
+    else:
+        offset = max(0, distance - int((position - 2 * pause_seconds - travel) / step_seconds))
+    return title[offset:offset + visible_chars]
+
 
 def _profile_slug(value):
     value = re.sub(r"[^A-Za-z0-9._ -]+", "", str(value or "")).strip().replace(" ", "-")
@@ -898,6 +920,7 @@ def load_preferences():
     prefs["sleeping_tabs_enabled"] = bool(prefs.get("sleeping_tabs_enabled", True))
     prefs["omnibox_suggestions_enabled"] = bool(prefs.get("omnibox_suggestions_enabled", True))
     prefs["download_prompt"] = bool(prefs.get("download_prompt", False))
+    prefs["force_dark_websites"] = bool(prefs.get("force_dark_websites", True))
     prefs["strict_python_loopback"] = bool(prefs.get("strict_python_loopback", True))
     prefs["hagezi_enabled"] = bool(prefs.get("hagezi_enabled", True))
     prefs["hagezi_auto_update"] = bool(prefs.get("hagezi_auto_update", True))
@@ -2257,6 +2280,7 @@ class BrowserApp(BrowserFeatures):
         os.environ["TEKZITE_HAGEZI_ENABLED"] = "1" if self.preferences.get("hagezi_enabled", True) else "0"
         os.environ["TEKZITE_STRIP_REFERRER"] = "1" if self.preferences.get("strip_referrer", True) else "0"
         os.environ["TEKZITE_HTTPS_FIRST"] = "1" if self.preferences.get("https_first", True) else "0"
+        os.environ["TEKZITE_DARK_WEBSITES"] = "1" if self.preferences.get("force_dark_websites", True) else "0"
         os.environ["TEKZITE_LOOPBACK_ROLE"] = "browser"
         os.environ["TEKZITE_LOOPBACK_AUDIT_LOG"] = str(_preferences_path().parent / "loopback-blocked.jsonl")
         # Process-local Python egress guard. Only ports registered by Tekzite's
@@ -2350,6 +2374,9 @@ class BrowserApp(BrowserFeatures):
         # navigation can resume the same animation instead of snapping.
         self._tab_open_animation_started = {}
         self._tab_open_animation_duration = 0.20
+        self._tab_marquee_targets = {}
+        self._tab_marquee_starts = {}
+        self._tab_marquee_after_id = None
         # v10.5.88: browser-style tab tear-off. A tab becomes detachable only
         # after a real pointer drag leaves an expanded tab-strip boundary, so a
         # slightly sloppy click never spawns another browser window.
@@ -4432,6 +4459,57 @@ class BrowserApp(BrowserFeatures):
             frame()
         return True
 
+    def _tab_title_character_budget(self, title, available_pixels, font_size):
+        """Limit the moving text to the area between favicon and close button."""
+        limit = min(len(title), max(6, int(self._custom("tab_title_chars", 28))))
+        try:
+            font = tkfont.Font(root=self.root, family=self._ui_font_family, size=font_size)
+            while limit > 1 and font.measure("W" * limit) > max(1, int(available_pixels)):
+                limit -= 1
+        except Exception:
+            limit = min(limit, max(1, int(available_pixels) // 11))
+        return max(1, limit)
+
+    def _tab_title_display(self, tab, title, chars):
+        if not self._motion_enabled() or len(title) <= chars:
+            return title[:chars]
+        tid = tab.get("id")
+        state = self._tab_marquee_starts.get(tid)
+        if state is None or state[0] != title:
+            state = (title, time.monotonic())
+            self._tab_marquee_starts[tid] = state
+        return _tab_title_window(title, chars, time.monotonic() - state[1])
+
+    def _schedule_tab_marquee(self):
+        if self._tab_marquee_after_id is not None or not self._motion_enabled():
+            return
+        if any(len(t["title"]) > t["chars"] for t in self._tab_marquee_targets.values()):
+            self._tab_marquee_after_id = self.root.after(125, self._tick_tab_marquee)
+
+    def _tick_tab_marquee(self):
+        """Update text only, without recreating widgets or touching Chromium."""
+        self._tab_marquee_after_id = None
+        if getattr(self, "_closing", False) or not self._motion_enabled():
+            return
+        for tid, target in list(self._tab_marquee_targets.items()):
+            widget = target["widget"]
+            try:
+                if not widget.winfo_exists() or len(target["title"]) <= target["chars"]:
+                    continue
+                tab = next((t for t in self.tabs if t.get("id") == tid), None)
+                if tab is None:
+                    continue
+                text = self._tab_title_display(tab, target["title"], target["chars"])
+                if text != target["last_text"]:
+                    if target["style"] == "soft":
+                        widget.itemconfigure(target["text_item"], text=text)
+                    else:
+                        widget.configure(text=text)
+                    target["last_text"] = text
+            except (tk.TclError, RuntimeError):
+                continue
+        self._schedule_tab_marquee()
+
     def _draw_soft_tab(self, canvas, tab, active, hovered=False):
         try:
             canvas.delete("all")
@@ -4452,15 +4530,15 @@ class BrowserApp(BrowserFeatures):
             else:
                 glyph = "☾" if tab.get("sleeping") else ("◌" if tab.get("loading") else "◇")
                 canvas.create_text(icon_x, height / 2, text=glyph, fill=self.ui["accent_hover"] if tab.get("loading") else self.ui["muted_dim"], font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))))
-            title = str(tab.get("title") or "New Tab")
-            title_chars = max(6, int(self._custom("tab_title_chars", 28)))
-            if tab.get("pinned"):
-                title = ""
-            else:
-                title = title[:title_chars]
+            full_title = str(tab.get("title") or "New Tab")
             close_visible = (not tab.get("pinned")) and self._custom("show_tab_close_buttons", True)
             close_space = 28 if close_visible else 10
-            canvas.create_text(icon_x + 15, height / 2, text=title, anchor="w", fill=self.ui["text"] if active or hovered else self.ui["muted"], font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))))
+            font_size = max(7, int(self._custom("tab_font_size", 9)))
+            chars = self._tab_title_character_budget(full_title, width - (icon_x + 15) - close_space - 7, font_size)
+            title = "" if tab.get("pinned") else self._tab_title_display(tab, full_title, chars)
+            text_item = canvas.create_text(icon_x + 15, height / 2, text=title, anchor="w", fill=self.ui["text"] if active or hovered else self.ui["muted"], font=(self._ui_font_family, font_size))
+            if not tab.get("pinned"):
+                self._tab_marquee_targets[tab["id"]] = {"widget": canvas, "style": "soft", "text_item": text_item, "title": full_title, "chars": chars, "last_text": title}
             if close_visible:
                 close_x = width - 16
                 close_fill = self.ui["text"] if hovered else self.ui["muted_dim"]
@@ -4706,6 +4784,9 @@ class BrowserApp(BrowserFeatures):
         for child in self.tab_items.winfo_children():
             if child is not getattr(self, "new_tab_button", None):
                 child.destroy()
+        self._tab_marquee_targets = {}
+        live_ids = {tab.get("id") for tab in self.tabs}
+        self._tab_marquee_starts = {tid: value for tid, value in self._tab_marquee_starts.items() if tid in live_ids}
 
         groups = self._normalized_tab_groups()
         group_rows = groups.items() if self._custom("show_tab_group_chips", True) else ()
@@ -4763,10 +4844,11 @@ class BrowserApp(BrowserFeatures):
             )
             icon.pack(side="left")
             title = str(tab.get("title") or "New Tab")
-            title_chars = max(6, int(self._custom("tab_title_chars", 28)))
+            chars = self._tab_title_character_budget(title, target_tab_width - 82, max(7, int(self._custom("tab_font_size", 9))))
+            display_title = title[:1] if tab.get("pinned") else self._tab_title_display(tab, title, chars)
             label = tk.Label(
                 body,
-                text=(title[:1] if tab.get("pinned") else title[:title_chars]),
+                text=display_title,
                 bg=normal_bg,
                 fg=normal_fg,
                 font=(self._ui_font_family, max(7, int(self._custom("tab_font_size", 9)))),
@@ -4775,6 +4857,8 @@ class BrowserApp(BrowserFeatures):
                 cursor="hand2",
             )
             label.pack(side="left")
+            if not tab.get("pinned"):
+                self._tab_marquee_targets[tab["id"]] = {"widget": label, "style": "classic", "title": title, "chars": chars, "last_text": display_title}
             def classic_press(event, tid=tab["id"], fr=frame):
                 return self._begin_tab_drag(tid, event, fr)
 
@@ -4850,6 +4934,7 @@ class BrowserApp(BrowserFeatures):
             self._animate_opening_tab_widget(tab.get("id"), frame, target_tab_width)
 
         self._place_new_tab_button_inline()
+        self._schedule_tab_marquee()
 
     @staticmethod
     def _clear_tab_favicon(tab):
@@ -12923,6 +13008,7 @@ class BrowserApp(BrowserFeatures):
         newtab_var = tk.StringVar(value=str(self.preferences.get("new_tab", "blank")))
         zoom_var = tk.StringVar(value=f"{self._page_zoom_percent()}%")
         statusbar_var = tk.BooleanVar(value=bool(self.preferences.get("show_status_bar", True)))
+        dark_websites_var = tk.BooleanVar(value=bool(self.preferences.get("force_dark_websites", True)))
 
         homepage_row = tk.Frame(behavior_page, bg=self.ui["bg"])
         homepage_row.pack(fill="x", pady=(4, 5))
@@ -12971,6 +13057,7 @@ class BrowserApp(BrowserFeatures):
         label(row, "Page zoom").pack(side="left")
         ttk.Combobox(row, textvariable=zoom_var, values=["75%", "80%", "90%", "100%", "110%", "125%", "150%", "175%", "200%"], width=8).pack(side="left", padx=(6, 0))
         check(behavior_page, "Show status bar", statusbar_var).pack(anchor="w", pady=(12, 3))
+        check(behavior_page, "Always use dark mode for websites (restart required)", dark_websites_var).pack(anchor="w", pady=3)
 
         # Advanced -----------------------------------------------------------
         window_width_var = tk.StringVar(value=str(draft.get("window_width", 1280)))
@@ -13127,6 +13214,8 @@ class BrowserApp(BrowserFeatures):
             self.preferences["new_tab"] = newtab_var.get()
             self.preferences["page_zoom_percent"] = _normalized_zoom_percent(zoom_var.get(), self._page_zoom_percent())
             self.preferences["show_status_bar"] = bool(statusbar_var.get())
+            dark_mode_changed = bool(self.preferences.get("force_dark_websites", True)) != bool(dark_websites_var.get())
+            self.preferences["force_dark_websites"] = bool(dark_websites_var.get())
             try:
                 save_preferences(self.preferences)
             except Exception as exc:
@@ -13135,7 +13224,7 @@ class BrowserApp(BrowserFeatures):
             self._apply_customization_runtime()
             self._apply_chromium_zoom_to_all_tabs()
             self._schedule_chromium_zoom_apply(all_tabs=True)
-            self.status_var.set("Customization saved for this profile")
+            self.status_var.set("Customization saved; restart Tekzite to apply website dark mode" if dark_mode_changed else "Customization saved for this profile")
             win.destroy()
 
         def cancel():
