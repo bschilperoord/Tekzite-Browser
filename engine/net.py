@@ -5666,7 +5666,7 @@ def _auth_navigation_has_returned(handle):
             # Same-host sign-in pages are not a completed return. Cross-host
             # OAuth callbacks are allowed to contain /login or /auth in their
             # callback path because those are common legitimate callback routes.
-            if current_host == launch_host:
+            if current_host == launch_host or expected_host in {"youtube.com", "music.youtube.com"}:
                 path_parts = {
                     part for part in (current.path or "").lower().split("/") if part
                 }
@@ -5793,10 +5793,9 @@ def _standalone_auth_window_snapshot(handle):
 def _auth_window_title_has_returned(handle):
     """Track the live auth-window title as a guarded YouTube return hint.
 
-    A YouTube title alone is not authentication proof: Chromium can briefly
-    retain one before the account flow is complete. Record that a non-YouTube
-    auth phase was actually observed, then allow a stable YouTube title to act
-    as a fallback when History/Cookies are delayed.
+    A YouTube title alone is not authentication proof: Chromium can retain it
+    while a passkey prompt is active. An auth prompt in any owned window vetoes
+    the return hint, regardless of window enumeration order.
     """
     if not isinstance(handle, dict):
         return False
@@ -5817,6 +5816,7 @@ def _auth_window_title_has_returned(handle):
         return False
     windows = _standalone_auth_window_snapshot(handle)
     returned = False
+    auth_prompt = False
     for row in windows:
         raw_title = str(row.get("title") or "").strip()
         title = raw_title.casefold()
@@ -5825,7 +5825,9 @@ def _auth_window_title_has_returned(handle):
         auth_like = any(token in title for token in (
             "sign in", "signin", "google accounts", "choose an account",
             "verify", "2-step", "two-step", "account recovery",
+            "passkey", "security key", "windows security", "verification",
         ))
+        auth_prompt = auth_prompt or auth_like
         if "youtube" not in title or auth_like:
             handle["google_auth_auth_phase_seen"] = True
             handle["google_auth_last_auth_title"] = raw_title
@@ -5834,7 +5836,8 @@ def _auth_window_title_has_returned(handle):
         handle["google_auth_return_hwnd"] = int(row.get("hwnd") or 0)
         handle["google_auth_return_title"] = raw_title
         returned = True
-    return returned
+    handle["google_auth_prompt_visible"] = auth_prompt
+    return returned and not auth_prompt
 
 
 def _request_windows_hwnd_close(hwnds, *, synchronous=False, system_close=False):
@@ -6088,6 +6091,53 @@ def _github_first_party_auth_succeeded(handle, settle_seconds):
     return True
 
 
+def _youtube_auth_succeeded(handle, settle_seconds):
+    """Wait for a fresh persisted YouTube session and a settled site return.
+
+    Google cookies can change before passkey verification finishes. Restored
+    YouTube titles, history entries and old sessions must not close the window.
+    If the cookie database is unreadable, leave it open for the user to finish.
+    """
+    title_returned = _auth_window_title_has_returned(handle)
+    returned = _auth_navigation_has_returned(handle)
+    current = _snapshot_google_auth_cookie_state(handle["profile"])
+    baseline = handle.get("google_auth_cookie_baseline") or {}
+    fresh = {}
+    for key, value in (current or {}).items():
+        host, name = key
+        host = str(host or "").lower().lstrip(".")
+        if (name == "LOGIN_INFO" and (host == "youtube.com" or host.endswith(".youtube.com"))
+                and baseline.get(key) != value):
+            fresh[key] = value
+    diagnostics = handle["auth_diagnostics"]
+    diagnostics["cookie_database_readable"] = current is not None
+    diagnostics["youtube_session_changed"] = bool(fresh)
+    diagnostics["youtube_return_seen"] = bool(returned)
+    diagnostics["auth_prompt_visible"] = bool(handle.get("google_auth_prompt_visible"))
+    waiting = None
+    if not fresh or handle.get("google_auth_cookie_baseline_readable") is False:
+        waiting = "waiting-for-youtube-session"
+    elif not returned or handle.get("google_auth_prompt_visible") or (os.name == "nt" and not title_returned):
+        waiting = "waiting-for-youtube-return"
+    if waiting:
+        diagnostics["stage"] = waiting
+        handle["google_auth_success_signal"] = None
+        handle["youtube_auth_pending_signal"] = None
+        handle["youtube_auth_settle_since"] = None
+        return False
+    signal = ("youtube-session-return", tuple(sorted(fresh.items())), tuple(handle.get("google_auth_return_visit") or ()))
+    now = time.monotonic()
+    if handle.get("youtube_auth_pending_signal") != signal:
+        handle["youtube_auth_pending_signal"] = signal
+        handle["youtube_auth_settle_since"] = now
+    since = handle.get("youtube_auth_settle_since")
+    complete = since is not None and now - float(since) >= max(1.35, float(settle_seconds))
+    handle["google_auth_success_signal"] = signal if complete else None
+    diagnostics["stage"] = "completed" if complete else "waiting-for-youtube-session-settle"
+    return complete
+
+
+
 def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     """Detect completed authentication for Google and standards-based providers."""
     if not isinstance(handle, dict):
@@ -6118,36 +6168,10 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
     if _github_first_party_auth(handle):
         return _github_first_party_auth_succeeded(handle, settle_seconds)
 
-    # Keep the proven live-HWND Google/YouTube path first. This deliberately
-    # avoids touching History/Cookies when the exact auth window has already
-    # visibly returned, preserving the fast-close behavior.
-    if google_flow:
-        title_returned = _auth_window_title_has_returned(handle)
-        cross_host_return = (
-            launch_host == "accounts.google.com"
-            and return_host in {"youtube.com", "music.youtube.com"}
-        )
-        handle["google_auth_cross_host_return"] = bool(cross_host_return)
-        fast_live_proof = bool(
-            handle.get("google_auth_auth_phase_seen") or cross_host_return
-        )
-        if title_returned and fast_live_proof:
-            now = time.monotonic()
-            since = handle.get("google_auth_title_return_since")
-            if since is None:
-                handle["google_auth_title_return_since"] = now
-            elif (now - float(since)) >= 0.80:
-                handle["google_auth_success_signal"] = (
-                    "window-return",
-                    int(handle.get("google_auth_return_hwnd") or 0),
-                    str(handle.get("google_auth_return_title") or ""),
-                )
-                handle["google_auth_fast_return_used"] = True
-                return True
-        elif not title_returned:
-            handle["google_auth_title_return_since"] = None
+    if return_host in {"youtube.com", "music.youtube.com"}:
+        return _youtube_auth_succeeded(handle, settle_seconds)
 
-    # Strongest provider-independent proof after the non-disk Google fast path:
+    # Other providers retain their callback navigation completion path:
     # Chromium has navigated back to a relying-party return/callback host.
     if _auth_navigation_has_returned(handle):
         signal = ("return", tuple(handle.get("google_auth_return_visit") or ()))
@@ -6161,9 +6185,7 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
         # never independently authorize closing an unfinished login window.
         return False
 
-    # Keep the proven live-HWND Google/YouTube optimization. Other providers
-    # use history/callback and relying-site cookie proof rather than guessing
-    # from arbitrary window titles.
+    # Google flows outside YouTube retain their cookie-change fallback.
     if google_flow:
         baseline = handle.get("google_auth_cookie_baseline") or {}
         current = _snapshot_google_auth_cookie_state(profile)
@@ -6173,33 +6195,6 @@ def standalone_google_auth_succeeded(handle, settle_seconds: float = 1.35):
                 for key, value in current.items()
                 if key[1] in _GOOGLE_AUTH_COOKIE_NAMES
             )
-            cookie_keys = {
-                (str(host or "").lower(), str(name or ""))
-                for host, name in current.keys()
-            }
-            cookie_names = {name for _host, name in cookie_keys}
-            authenticated_session = bool(
-                any(
-                    name == "LOGIN_INFO" and host.endswith("youtube.com")
-                    for host, name in cookie_keys
-                )
-                or {"SID", "SAPISID"}.issubset(cookie_names)
-                or {"__Secure-1PSID", "__Secure-1PAPISID"}.issubset(cookie_names)
-                or {"__Secure-3PSID", "__Secure-3PAPISID"}.issubset(cookie_names)
-            )
-            handle["google_auth_authenticated_session_seen"] = authenticated_session
-            if title_returned and authenticated_session:
-                now = time.monotonic()
-                since = handle.get("google_auth_title_return_since")
-                if since is None:
-                    handle["google_auth_title_return_since"] = now
-                elif (now - float(since)) >= 1.20:
-                    handle["google_auth_success_signal"] = (
-                        "window-return",
-                        int(handle.get("google_auth_return_hwnd") or 0),
-                        str(handle.get("google_auth_return_title") or ""),
-                    )
-                    return True
             if changed:
                 signal = ("cookie", tuple(sorted(current.items())))
             else:
@@ -6614,7 +6609,8 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
         # "restore pages" bubble even for users upgrading from v10.5.63.
         _mark_chromium_profile_exited_cleanly(profile)
         _enable_chromium_session_restore(profile, profile_directory)
-        google_auth_cookie_baseline = _snapshot_google_auth_cookie_state(profile) or {}
+        google_auth_cookie_snapshot = _snapshot_google_auth_cookie_state(profile)
+        google_auth_cookie_baseline = google_auth_cookie_snapshot or {}
         auth_cookie_baseline = _snapshot_auth_cookie_state(profile, str(return_url or "")) or {}
         history_visit_baseline = _snapshot_chromium_latest_visit(profile)
         history_return_visit_baseline = _snapshot_chromium_latest_visit(
@@ -6703,6 +6699,7 @@ def start_standalone_auth_chromium(url: str, return_url: str = ""):
             "return_url": str(return_url or ""),
             "window_geometry": (x, y, width, height),
             "google_auth_cookie_baseline": dict(google_auth_cookie_baseline),
+            "google_auth_cookie_baseline_readable": google_auth_cookie_snapshot is not None,
             "auth_cookie_baseline": dict(auth_cookie_baseline),
             "history_visit_baseline": tuple(history_visit_baseline) if history_visit_baseline else None,
             "history_return_visit_baseline": tuple(history_return_visit_baseline) if history_return_visit_baseline else None,
