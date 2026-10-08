@@ -2,6 +2,7 @@
 import loopback_policy
 import json
 import os
+import sys
 import time
 import re
 import hashlib
@@ -14,6 +15,29 @@ from PIL import Image, ImageTk
 from browser_state import read_json, write_json, valid_url, session_snapshot
 from engine import features
 import hagezi_privacy
+
+
+DEFAULT_UPDATE_REPOSITORY = "bschilperoord/Tekzite-Browser"
+
+
+def update_release_asset(assets, platform=None):
+    """Select a downloadable build for this OS, preferring the direct executable."""
+    platform = sys.platform if platform is None else platform
+    if not isinstance(assets, list):
+        return None
+    candidates = [a for a in assets if isinstance(a, dict) and a.get('browser_download_url')]
+    if platform == 'win32':
+        candidates = [a for a in candidates if re.search(r'(windows|win)', str(a.get('name') or ''), re.I)
+                      and str(a.get('name') or '').lower().endswith(('.exe', '.msi', '.zip'))]
+        candidates.sort(key=lambda a: not str(a['name']).lower().endswith('.exe'))
+    elif platform.startswith('linux'):
+        candidates = [a for a in candidates if 'linux' in str(a.get('name') or '').lower()
+                      and not str(a.get('name') or '').lower().endswith(('.txt', '.sha256', '.exe', '.msi', '.zip'))]
+        candidates.sort(key=lambda a: str(a['name']).lower().endswith(('.tar.gz', '.tgz', '.tar.xz')))
+    else:
+        return None
+    return next(iter(candidates), None)
+
 
 
 def site_host(url):
@@ -2280,7 +2304,7 @@ class BrowserFeatures:
         return tuple(int(n) for n in numbers) if numbers else (0,)
 
     def _check_for_updates(self):
-        repo = str(self.preferences.get('update_repository') or '').strip()
+        repo = str(self.preferences.get('update_repository') or '').strip() or DEFAULT_UPDATE_REPOSITORY
         repo = re.sub(r'^https?://github\.com/', '', repo, flags=re.I).strip('/ ')
         if repo.endswith('.git'): repo = repo[:-4]
         if repo.count('/') != 1:
@@ -2304,22 +2328,20 @@ class BrowserFeatures:
             current = self._parse_release_version(getattr(self, 'browser_version', '') or '')
             latest = self._parse_release_version(tag)
             assets = data.get('assets') if isinstance(data.get('assets'), list) else []
-            win_asset = next((a for a in assets if isinstance(a, dict) and re.search(r'(windows|win|x64)', str(a.get('name') or ''), re.I)), None)
-            if win_asset is None:
-                win_asset = next((a for a in assets if isinstance(a, dict) and str(a.get('name') or '').lower().endswith(('.zip','.exe','.msi'))), None)
+            release_asset = update_release_asset(assets)
             lines = [f'Installed: {".".join(map(str,current))}', f'Latest release: {tag or "unknown"}']
             if latest > current: lines.append('Update available.')
             elif latest == current: lines.append('Up to date.')
             else: lines.append('Installed build is newer.')
-            if win_asset and win_asset.get('digest'):
-                lines.append(f'Published digest: {win_asset.get("digest")}')
+            if release_asset and release_asset.get('digest'):
+                lines.append(f'Published digest: {release_asset.get("digest")}')
             win = self._new_animated_toplevel(self.root); win.title('Tekzite Update'); win.geometry('620x300'); win.transient(self.root); win.configure(bg=self.ui['bg'])
             tk.Label(win, text='Update Checker', bg=self.ui['bg'], fg=self.ui['text'], font=(self._ui_display_font_family, 17, 'bold')).pack(anchor='w', padx=18, pady=(18, 8))
             tk.Label(win, text='\n'.join(lines), bg=self.ui['bg'], fg=self.ui['text'], justify='left', wraplength=570).pack(anchor='w', padx=18)
             bar = tk.Frame(win, bg=self.ui['bg']); bar.pack(side='bottom', fill='x', padx=18, pady=18)
-            if win_asset and win_asset.get('browser_download_url'):
+            if latest > current and release_asset and release_asset.get('browser_download_url'):
                 def download_asset():
-                    url = win_asset['browser_download_url']; name = Path(str(win_asset.get('name') or 'Tekzite-update.bin')).name
+                    url = release_asset['browser_download_url']; name = Path(str(release_asset.get('name') or 'Tekzite-update.bin')).name
                     target_dir = Path.home() / 'Downloads'; target_dir.mkdir(parents=True, exist_ok=True)
                     stem, suffix = Path(name).stem, Path(name).suffix
                     target = target_dir / name
@@ -2338,12 +2360,14 @@ class BrowserFeatures:
                                     if not chunk: break
                                     dst.write(chunk); digest.update(chunk)
                             actual = digest.hexdigest()
-                            expected = str(win_asset.get('digest') or '')
+                            expected = str(release_asset.get('digest') or '')
                             verified = None
                             if expected.lower().startswith('sha256:'):
                                 verified = actual.lower() == expected.split(':',1)[1].lower()
                                 if not verified:
                                     raise RuntimeError('SHA-256 verification failed; the downloaded file was removed.')
+                            if sys.platform.startswith('linux') and not name.lower().endswith(('.tar.gz', '.tgz', '.tar.xz')):
+                                partial.chmod(0o755)
                             os.replace(partial, target)
                             return str(target), actual, verified
                         except Exception:
@@ -2362,6 +2386,7 @@ class BrowserFeatures:
             self.status_var.set('Update check complete')
         self._feature_async(fetch, done)
         return 'break'
+
 
     def _show_diagnostics(self):
         win = self._new_animated_toplevel(self.root); win.title('Tekzite Diagnostics'); win.geometry('820x620'); win.transient(self.root); win.configure(bg=self.ui['bg'])
