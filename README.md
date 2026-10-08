@@ -6,7 +6,7 @@ Tekzite Browser is an experimental desktop browser shell built in Python/Tk arou
 
 Tekzite owns the browser interface, including tabs, the address bar, menus, settings and interaction layer. Chromium handles the web itself: HTML, JavaScript, media, cookies, WebGL and page rendering.
 
-> **Current release:** v10.5.131 UltraSpeed  
+> **Current release:** v10.5.131 UltraSpeed
 > **Platforms:** Windows 10/11 and Linux  
 > **Status:** experimental and actively developed
 
