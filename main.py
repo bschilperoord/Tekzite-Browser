@@ -1398,7 +1398,7 @@ class _AnimatedPopupMenu:
         try:
             font = tkfont.Font(font=self._font)
             label_widths = [font.measure(self._label_parts(i.get("label", ""))[1]) for i in self.items if i.get("type") != "separator"]
-            accel_widths = [font.measure(str(i.get("accelerator", ""))) for i in self.items if i.get("type") != "separator"]
+            accel_widths = [font.measure(str(i.get("accelerator", "")).strip()) for i in self.items if i.get("type") != "separator"]
             label_w = max(label_widths or [120])
             accel_w = max(accel_widths or [0])
         except Exception:
@@ -1457,7 +1457,7 @@ class _AnimatedPopupMenu:
                 canvas.create_text(left + self.app._ui_padding(36) + (1 if pressed else 0), y_text,
                                    text=label, fill=color,
                                    font=font, anchor="w")
-                accelerator = item.get("accelerator", "")
+                accelerator = str(item.get("accelerator", "")).strip()
                 if accelerator:
                     canvas.create_text(right - self.app._ui_padding(18), y_text,
                                        text=accelerator, fill=(self._disabled if disabled else self._muted),
