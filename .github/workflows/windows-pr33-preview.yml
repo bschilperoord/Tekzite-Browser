@@ -1,0 +1,74 @@
+name: Windows PR33 preview
+
+on:
+  push:
+    branches: ["feature/marquee-dark-websites"]
+    paths:
+      - ".github/workflows/windows-pr33-preview.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-preview:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22"
+      - name: Install test and build dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --only-binary=:all: --require-hashes -r requirements-windows.lock
+          if ($LASTEXITCODE -ne 0) { throw "Locked dependencies failed" }
+          python -m pip install --only-binary=:all: -r requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { throw "Test dependencies failed" }
+      - name: Validate current regression suite
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/current
+          if ($LASTEXITCODE -ne 0) { throw "Regression suite failed" }
+      - name: Validate Chromium extension scripts
+        shell: pwsh
+        run: |
+          node tests/current/test_extension_features.cjs
+          if ($LASTEXITCODE -ne 0) { throw "Extension suite failed" }
+      - name: Build Windows preview
+        shell: pwsh
+        run: |
+          ./build_windows.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Windows build failed" }
+      - name: Verify build and produce checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "10.5.131"
+          $exe = Get-Item "dist/TekziteBrowser.exe"
+          if (-not $exe.VersionInfo.FileVersion.StartsWith($version)) {
+            throw "Unexpected executable version: $($exe.VersionInfo.FileVersion)"
+          }
+          $name = "Tekzite-Browser-v$version-PR33-Windows-x64.exe"
+          Copy-Item $exe.FullName $name -Force
+          $sha = (Get-FileHash $name -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$sha  $name" | Set-Content "SHA256SUMS-PR33.txt" -Encoding ascii
+          Write-Host "Preview SHA256 $sha"
+      - name: Upload candidate preview (not a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tekzite-Browser-v10.5.131-PR33-Windows-x64-preview
+          path: |
+            Tekzite-Browser-v10.5.131-PR33-Windows-x64.exe
+            SHA256SUMS-PR33.txt
+          if-no-files-found: error
+          retention-days: 14
