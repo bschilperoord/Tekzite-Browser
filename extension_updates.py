@@ -321,8 +321,8 @@ def check_updates(entries, state_directory, chrome_version, *, force=False):
         return records
 
 
-def apply_pending(entries, state_directory):
-    """Called before Chromium starts. Roll back failed directory swaps."""
+def apply_pending(entries, state_directory, reload_extension=None):
+    """Swap files and optionally confirm live reload before discarding backup."""
     results = []
     cache = cache_dir(state_directory)
     for row in entries:
@@ -365,6 +365,18 @@ def apply_pending(entries, state_directory):
             except Exception:
                 backup.rename(path)
                 raise
+            if reload_extension is not None:
+                try:
+                    if reload_extension(str(path), new['version']) is not True:
+                        raise RuntimeError("Extension reload was not confirmed")
+                except Exception as exc:
+                    shutil.rmtree(path)
+                    backup.rename(path)
+                    try:
+                        reload_extension(str(path), old['version'])
+                    except Exception as recovery_error:
+                        raise RuntimeError(f"{exc}; old files restored but runtime recovery failed: {recovery_error}") from exc
+                    raise
             shutil.rmtree(backup)
             shutil.rmtree(stage)
             ready_path.unlink(missing_ok=True)

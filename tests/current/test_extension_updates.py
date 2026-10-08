@@ -275,3 +275,33 @@ def test_store_source_can_be_derived_from_signing_key():
     _, key = signed_crx(b'archive', 'rsa')
     source = updates.discover_source(data(key=key))
     assert source['url'] == 'https://clients2.google.com/service/update2/crx'
+
+
+def test_live_update_is_confirmed_before_backup_is_removed(installed):
+    path, profile, entries, _ = installed
+    updates.check_updates(entries, profile, '150.0')
+    def reload(path_value, expected):
+        assert path_value == str(path)
+        assert expected == '2.0'
+        assert updates.manifest(path)['version'] == expected
+        assert list(path.parent.glob('.tekzite-extension-backup-*'))
+        return True
+    assert updates.apply_pending(entries, profile, reload_extension=reload)[0]['state'] == 'updated'
+    assert not list(path.parent.glob('.tekzite-extension-backup-*'))
+
+
+def test_failed_live_reload_restores_files_and_old_runtime(installed):
+    path, profile, entries, _ = installed
+    updates.check_updates(entries, profile, '150.0')
+    calls = []
+    def reload(path_value, expected):
+        calls.append(expected)
+        assert updates.manifest(path)['version'] == expected
+        if expected == '2.0':
+            raise RuntimeError('Runtime rejected update')
+        return True
+    result = updates.apply_pending(entries, profile, reload_extension=reload)
+    assert result[0]['state'] == 'error'
+    assert calls == ['2.0', '1.0']
+    assert updates.manifest(path)['version'] == '1.0'
+    assert (profile / 'extension-settings.json').read_text() == 'user settings'

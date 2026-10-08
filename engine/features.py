@@ -1,5 +1,8 @@
 """Serialized, background-only calls to the bundled local extension."""
 import json
+import contextlib
+import os
+from pathlib import Path
 import threading
 import time
 from . import net
@@ -109,6 +112,79 @@ def extension_inventory(session=None):
             'icons': list(item.get('icons') or []),
         })
     return rows
+
+
+@contextlib.contextmanager
+def extension_reloader(session=None):
+    """Reload exact unpacked paths through Chromium's hidden extension manager.
+
+    Chromium's developerPrivate.reload rereads the manifest and works for MV2,
+    MV3 and content-only extensions. No visible tab or browser window is opened.
+    """
+    session = session or net._CHROMIUM_SESSION
+    if not session:
+        raise RuntimeError('Chromium is not running')
+    target_id = None
+    ws = None
+    try:
+        target = net._browser_cdp_call(session, 'Target.createTarget', {
+            'url': 'chrome://extensions/', 'background': True, 'hidden': True,
+        }, timeout=5)
+        target_id = target.get('targetId')
+        if not target_id:
+            raise RuntimeError('Hidden extension manager could not be created')
+        deadline = time.monotonic() + 8
+        inventory = None
+        while time.monotonic() < deadline:
+            pages = net._devtools_json(session['port'], '/json/list', timeout=1)
+            page = next((p for p in pages if p.get('id') == target_id), None)
+            if page and page.get('webSocketDebuggerUrl'):
+                ws = net._open_devtools_websocket(page['webSocketDebuggerUrl'], timeout=2)
+                result = net._cdp_call(ws, 'Runtime.evaluate', {
+                    'expression': 'typeof chrome.developerPrivate !== "undefined" ? chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true}) : null',
+                    'awaitPromise': True, 'returnByValue': True,
+                }, timeout=5)
+                inventory = result.get('result', {}).get('value')
+                if isinstance(inventory, list):
+                    break
+                ws.close(); ws = None
+            time.sleep(.05)
+        if not isinstance(inventory, list):
+            raise RuntimeError('Chromium extension reload API is unavailable')
+        def path_key(path):
+            return os.path.normcase(str(Path(path).resolve()))
+        paths = {path_key(row['path']): row for row in inventory
+                 if row.get('path') and row.get('location') == 'UNPACKED'}
+        def reload_extension(path, expected_version):
+            row = paths.get(path_key(path))
+            if not row or row.get('state') != 'ENABLED':
+                raise RuntimeError('Extension is not enabled at its configured path')
+            expression = '''(async () => {
+                const id = %s;
+                const error = await chrome.developerPrivate.reload(id, {failQuietly:true,populateErrorForUnpacked:true});
+                if (error) throw new Error(error.error || 'Extension reload failed');
+                const info = await chrome.developerPrivate.getExtensionInfo(id);
+                return {id:info.id,version:info.version,state:info.state};
+            })()''' % json.dumps(row['id'])
+            result = net._cdp_call(ws, 'Runtime.evaluate', {
+                'expression': expression, 'awaitPromise': True, 'returnByValue': True,
+            }, timeout=8)
+            if result.get('exceptionDetails'):
+                detail = result['exceptionDetails']
+                raise RuntimeError(detail.get('exception', {}).get('description') or detail.get('text') or 'Extension reload failed')
+            info = result.get('result', {}).get('value') or {}
+            if info.get('id') != row['id'] or info.get('version') != expected_version or info.get('state') != 'ENABLED':
+                raise RuntimeError('Reloaded extension did not confirm the expected version')
+            return True
+        yield reload_extension
+    finally:
+        if ws is not None:
+            ws.close()
+        if target_id:
+            try:
+                net._browser_cdp_call(session, 'Target.closeTarget', {'targetId': target_id}, timeout=2)
+            except Exception:
+                pass
 
 
 def privacy_stats(session=None):

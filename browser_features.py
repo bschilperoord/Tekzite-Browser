@@ -304,7 +304,14 @@ class BrowserFeatures:
             info = features.net._devtools_json(session['port'], '/json/version', timeout=2)
             chrome_version = str(info.get('Browser') or '').split('/')[-1]
             extension_updates.version(chrome_version)
-            return extension_updates.check_updates(entries, self._state_directory, chrome_version, force=force)
+            results = extension_updates.check_updates(entries, self._state_directory, chrome_version, force=force)
+            if any(row.get('state') == 'staged' for row in results.values()):
+                if session is not features.net._CHROMIUM_SESSION or getattr(self, '_google_auth_handoff_active', False):
+                    return results
+                with features.extension_reloader(session) as reload_extension:
+                    extension_updates.apply_pending(entries, self._state_directory, reload_extension=reload_extension)
+                results = read_json(extension_updates.cache_dir(self._state_directory) / 'status.json', {})
+            return results
         self._extension_update_future = self._executor.submit(work)
         self.root.after(100, self._poll_extension_updates)
         return True
@@ -327,8 +334,12 @@ class BrowserFeatures:
         for callback in callbacks:
             callback(results)
         if any(row.get('state') == 'staged' for row in results.values()):
-            self.status_var.set('Extension updates ready; restart Tekzite to apply them.')
-        self.root.after(3600000, self._start_extension_updates)
+            self.status_var.set('Extension updates ready; waiting for Chromium to finish sign-in.')
+        elif any(row.get('state') == 'updated' for row in results.values()):
+            self.status_var.set('Extensions updated and active.')
+            self._extension_toolbar_photos = {}
+            self._refresh_extension_toolbar()
+        self.root.after(10000 if any(row.get('state') == 'staged' for row in results.values()) else 3600000, self._start_extension_updates)
 
     def _start_optional_services(self, session):
         if self._closing or session is not features.net._CHROMIUM_SESSION:
@@ -1411,9 +1422,10 @@ class BrowserFeatures:
                 if not win.winfo_exists():
                     return
                 refresh()
+                updated = sum(row.get('state') == 'updated' for row in results.values())
                 staged = sum(row.get('state') == 'staged' for row in results.values())
                 errors = sum(row.get('state') == 'error' for row in results.values())
-                note.set(f'{staged} update(s) ready; {errors} failed. Restart to apply updates. Details shows sources and errors.')
+                note.set(f'{updated} update(s) active; {staged} pending; {errors} failed. Details shows sources and errors.')
             if not self._start_extension_updates(force=True, callback=finished):
                 note.set('Update check already running or unavailable in private mode.')
         self._feature_button(update_controls, 'Check updates', check_updates)
