@@ -8520,6 +8520,7 @@ def embedded_chromium_debug_report():
     lines.append(f"visible_surface_dominant_ratio: {session.get('visible_surface_dominant_ratio')}")
     lines.append(f"visible_surface_software_fallback: {session.get('visible_surface_software_fallback')}")
     lines.append(f"visible_surface_probe_error: {session.get('visible_surface_probe_error')}")
+    lines.append(f"visible_surface_probe_details: {session.get('visible_surface_probe_details')}")
     lines.append(f"native_resize_recovery_attempted: {session.get('native_resize_recovery_attempted')}")
     lines.append(f"native_resize_recovery_viewport: {session.get('native_resize_recovery_viewport')}")
     lines.append(f"native_resize_recovery_succeeded: {session.get('native_resize_recovery_succeeded')}")
@@ -11303,8 +11304,8 @@ def capture_embedded_chromium_frame(timeout: int = 4, target_id: str = None, vie
 
 
 
-def record_embedded_surface_probe(blank, span=None, dominant=None, attempt=1, fallback=False, error=None):
-    """Record final on-screen native presentation health for Full Debug."""
+def record_embedded_surface_probe(blank, span=None, dominant=None, attempt=1, fallback=False, error=None, details=None):
+    """Record visible DWM health without retaining captured pixels or page text."""
     session = _CHROMIUM_SESSION
     if not session:
         return False
@@ -11314,6 +11315,8 @@ def record_embedded_surface_probe(blank, span=None, dominant=None, attempt=1, fa
     session["visible_surface_dominant_ratio"] = dominant
     session["visible_surface_software_fallback"] = bool(fallback)
     session["visible_surface_probe_error"] = error
+    if details is not None:
+        session["visible_surface_probe_details"] = dict(details)
     return True
 
 
