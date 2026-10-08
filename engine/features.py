@@ -159,22 +159,27 @@ def extension_reloader(session=None):
             row = paths.get(path_key(path))
             if not row or row.get('state') != 'ENABLED':
                 raise RuntimeError('Extension is not enabled at its configured path')
-            expression = '''(async () => {
-                const id = %s;
-                const error = await chrome.developerPrivate.reload(id, {failQuietly:true,populateErrorForUnpacked:true});
-                if (error) throw new Error(error.error || 'Extension reload failed');
-                const info = await chrome.developerPrivate.getExtensionInfo(id);
-                return {id:info.id,version:info.version,state:info.state};
-            })()''' % json.dumps(row['id'])
+            # Do not await Chromium's unpacked-load observer: some builds can
+            # finish loading before it attaches. Verify the runtime separately.
+            expression = 'chrome.developerPrivate.reload(%s,{failQuietly:true,populateErrorForUnpacked:false})' % json.dumps(row['id'])
             result = net._cdp_call(ws, 'Runtime.evaluate', {
                 'expression': expression, 'awaitPromise': True, 'returnByValue': True,
-            }, timeout=8)
+            }, timeout=5)
             if result.get('exceptionDetails'):
                 detail = result['exceptionDetails']
                 raise RuntimeError(detail.get('exception', {}).get('description') or detail.get('text') or 'Extension reload failed')
-            info = result.get('result', {}).get('value') or {}
-            if info.get('id') != row['id'] or info.get('version') != expected_version or info.get('state') != 'ENABLED':
-                raise RuntimeError('Reloaded extension did not confirm the expected version')
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                result = net._cdp_call(ws, 'Runtime.evaluate', {
+                    'expression': 'chrome.developerPrivate.getExtensionInfo(%s)' % json.dumps(row['id']),
+                    'awaitPromise': True, 'returnByValue': True,
+                }, timeout=3)
+                info = result.get('result', {}).get('value') or {}
+                if info.get('id') == row['id'] and info.get('version') == expected_version and info.get('state') == 'ENABLED':
+                    break
+                time.sleep(.1)
+            else:
+                raise RuntimeError('Reloaded extension did not confirm the expected version: ' + str(info))
             return True
         yield reload_extension
     finally:

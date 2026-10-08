@@ -42,7 +42,11 @@ def run(executable):
             deadline = time.monotonic() + 10
             worker = None
             while time.monotonic() < deadline:
-                targets = net._devtools_json(port, '/json/list')
+                try:
+                    targets = net._devtools_json(port, '/json/list', timeout=3)
+                except OSError:
+                    time.sleep(.1)
+                    continue
                 worker = next((t for t in targets if t.get('type') == 'service_worker'), None)
                 if worker:
                     break
@@ -73,7 +77,11 @@ def run(executable):
             assert before == after, 'Hidden extension manager target was not cleaned up'
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
-                targets = net._devtools_json(port, '/json/list')
+                try:
+                    targets = net._devtools_json(port, '/json/list', timeout=3)
+                except OSError:
+                    time.sleep(.1)
+                    continue
                 worker = next((t for t in targets if t.get('url') == f'chrome-extension://{identity}/worker.js'), None)
                 if worker:
                     break

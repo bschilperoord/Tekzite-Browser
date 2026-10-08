@@ -37,9 +37,11 @@ def test_reload_confirms_version_and_closes_hidden_target(context):
 
 
 @pytest.mark.parametrize('change', [{'version': '1.0'}, {'id': 'different'}, {'state': 'DISABLED'}])
-def test_reload_rejects_unconfirmed_runtime(context, change):
+def test_reload_rejects_unconfirmed_runtime(context, change, monkeypatch):
     session, path, calls, _, response, _ = context
     response[0].update(change)
+    ticks = iter([0, 0, 0, 0, 9])
+    monkeypatch.setattr(features.time, "monotonic", lambda: next(ticks, 9))
     with pytest.raises(RuntimeError, match='expected version'):
         with features.extension_reloader(session) as reload:
             reload(str(path), '2.0')

@@ -26,7 +26,9 @@ def package(manifest, files=None):
         archive.writestr('extension/manifest.json', json.dumps(manifest))
         archive.writestr('extension/code.js', 'new code')
         for name, value in (files or {}).items():
-            archive.writestr(name, value)
+            info = zipfile.ZipInfo('placeholder')
+            info.filename = name  # Preserve hostile separators on Windows too.
+            archive.writestr(info, value)
     return stream.getvalue()
 
 
