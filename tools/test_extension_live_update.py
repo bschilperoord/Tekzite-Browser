@@ -16,6 +16,19 @@ import extension_updates as updates
 from browser_state import write_json
 
 
+def wait_worker_api(ws):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        result = net._cdp_call(ws, 'Runtime.evaluate', {
+            'expression': 'typeof chrome !== "undefined" && !!chrome.storage && !!chrome.storage.local',
+            'returnByValue': True,
+        }, timeout=3)
+        if result.get('result', {}).get('value') is True:
+            return
+        time.sleep(.1)
+    raise RuntimeError('Extension worker API did not initialize: ' + str(result))
+
+
 def run(executable):
     with tempfile.TemporaryDirectory(prefix='tekzite-live-update-') as directory:
         root = Path(directory)
@@ -47,7 +60,7 @@ def run(executable):
                 except OSError:
                     time.sleep(.1)
                     continue
-                worker = next((t for t in targets if t.get('type') == 'service_worker'), None)
+                worker = next((t for t in targets if t.get('type') == 'service_worker' and t.get('url', '').endswith('/worker.js')), None)
                 if worker:
                     break
                 time.sleep(.05)
@@ -56,9 +69,10 @@ def run(executable):
             identity = worker['url'].split('/')[2]
             ws = net._open_devtools_websocket(worker['webSocketDebuggerUrl'])
             try:
+                wait_worker_api(ws)
                 result = net._cdp_call(ws, 'Runtime.evaluate', {'expression': 'chrome.storage.local.set({sentinel:"preserved"})', 'awaitPromise': True, 'returnByValue': True})
                 if result.get('exceptionDetails'):
-                    raise RuntimeError('Could not initialize test extension storage')
+                    raise RuntimeError('Could not initialize test extension storage: ' + str(result))
             finally:
                 ws.close()
             cache = updates.cache_dir(root / 'state')
@@ -88,6 +102,7 @@ def run(executable):
                 time.sleep(.05)
             ws = net._open_devtools_websocket(worker['webSocketDebuggerUrl'])
             try:
+                wait_worker_api(ws)
                 info = net._cdp_call(ws, 'Runtime.evaluate', {'expression': '(async()=>({version:chrome.runtime.getManifest().version,sentinel:(await chrome.storage.local.get("sentinel")).sentinel}))()', 'awaitPromise': True, 'returnByValue': True})['result']['value']
                 assert info == {'version': '2.0', 'sentinel': 'preserved'}, info
             finally:
