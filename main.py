@@ -38,6 +38,7 @@ from engine.net import (
     get_embedded_chromium_page_state, find_embedded_chromium_text,
     set_embedded_chromium_presentation, set_embedded_chromium_zoom, check_embedded_chromium_zoom,
     validate_and_recover_embedded_chromium_frame, record_embedded_surface_probe, record_embedded_native_recovery, sync_embedded_chromium_native_geometry,
+    diagnose_embedded_chromium_dwm_stall,
     wait_for_embedded_chromium_native_frame,
     warm_embedded_chromium_io_channels, stop_embedded_chromium_loading,
     request_embedded_chromium_dwm_recrop, request_embedded_chromium_dwm_reregister, detach_embedded_chromium_dwm_thumbnail, network_engine_debug, privacy_stats,
@@ -9944,9 +9945,24 @@ class BrowserApp(BrowserFeatures):
         width, height = viewport
 
         def refresh_native():
+            # Capture compositor and Chromium metadata while the failure still
+            # exists. A re-registration would otherwise destroy crucial evidence.
+            try:
+                diagnose_embedded_chromium_dwm_stall(
+                    target_id, phase="before-repair", timeout=1.3
+                )
+            except Exception:
+                pass
             if not request_embedded_chromium_dwm_reregister():
                 return False
-            return bool(resize_embedded_chromium(width, height))
+            recovered = bool(resize_embedded_chromium(width, height))
+            try:
+                diagnose_embedded_chromium_dwm_stall(
+                    target_id, phase="after-repair", timeout=1.0
+                )
+            except Exception:
+                pass
+            return recovered
 
         try:
             future = self._executor.submit(refresh_native)
