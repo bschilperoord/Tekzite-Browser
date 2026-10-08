@@ -228,7 +228,7 @@ def unpack(payload, target):
         for item in members:
             path = PurePosixPath(item.filename)
             mode = item.external_attr >> 16
-            if (path.is_absolute() or '..' in path.parts or '\\' in item.filename or ':' in item.filename
+            if (path.is_absolute() or '..' in path.parts or '\\' in item.orig_filename or '\x00' in item.orig_filename or ':' in item.filename
                     or stat.S_ISLNK(mode) or str(path).casefold() in seen
                     or any(p.rstrip(' .') != p or re.fullmatch(r'(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?', p) for p in path.parts)):
                 raise ValueError("Unsafe extension ZIP path")
