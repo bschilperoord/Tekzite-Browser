@@ -12071,7 +12071,28 @@ class BrowserApp(BrowserFeatures):
         }:
             _padding_factor, chrome_factor = self._display_spacing_factors()
             value *= chrome_factor
-        return max(1, int(round(value * scale)))
+        height = max(1, int(round(value * scale)))
+        # Tk fonts use DPI-scaled points, while these frame heights use pixels.
+        # Keep the requested density, but never make a bar shorter than its text.
+        font_sizes = {
+            "app_bar_height": max(7, int(self._custom("menu_font_size", 9))),
+            "tab_bar_height": max(10, int(self._custom("tab_font_size", 9)) + 4),
+            "toolbar_height": max(10, int(self._custom("font_size", 10)) + 1,
+                                  int(self._custom("toolbar_font_size", 10)) + 3),
+            "status_bar_height": max(7, int(self._custom("menu_font_size", 9)), self._font_size(7)),
+            "find_bar_height": self._font_size(9),
+        }
+        if key in font_sizes:
+            try:
+                font = tkfont.Font(root=self.root, font=(self._ui_font_family, font_sizes[key]))
+                line_height = int(font.metrics("linespace"))
+                padding = {"app_bar_height": 14, "tab_bar_height": 18,
+                           "toolbar_height": 20, "status_bar_height": 8,
+                           "find_bar_height": 14}[key]
+                height = max(height, line_height + self._ui_padding(padding))
+            except (AttributeError, tk.TclError):
+                pass
+        return height
 
     def _ui_padding(self, value):
         try:
